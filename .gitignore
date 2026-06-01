@@ -1,0 +1,38 @@
+# Sensitive configuration
+.env
+.env.*
+config.json
+rh_config.json
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime outputs
+rh-output/
+output/
+downloads/
+*.log
+*.tmp
+
+# IDE and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
