@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +21,9 @@ OUTPUTS_URL = f"{API_HOST}/task/openapi/outputs"
 
 MAX_POLL_SECONDS = 1200
 POLL_INTERVAL_SECONDS = 5
+
+# SS_tools 鸭鸭图加密节点（copyangle/SS_tools）：把真实图片隐写进一张鸭子图。
+DUCK_ENCODE_CLASS = "DuckHideNode"
 
 
 def find_load_image_node(workflow: dict[str, Any]) -> str | None:
@@ -73,6 +77,91 @@ def _apply_overrides(workflow: dict[str, Any], set_args: list[str]) -> list[str]
         inputs[field] = _coerce_value(value_str, old)
         changes.append(f"{node_id}.{field}: {old!r} → {inputs[field]!r}")
     return changes
+
+
+def _next_node_id(workflow: dict[str, Any]) -> str:
+    """生成一个不与现有节点冲突的新节点 ID。"""
+    max_id = 0
+    for key in workflow:
+        try:
+            max_id = max(max_id, int(key))
+        except (TypeError, ValueError):
+            continue
+    return str(max_id + 1)
+
+
+def _inject_duck_encode(workflow: dict[str, Any], *, password: str, title: str) -> list[str]:
+    """在每个 SaveImage 前插入 DuckHideNode（鸭鸭图加密），返回变更记录。
+
+    把原本喂给 SaveImage 的图像改接到新节点的 images 输入，再让 SaveImage
+    读取新节点的输出——于是 SaveImage 存下来的是隐写后的鸭子图。
+    """
+    save_nodes = [
+        nid for nid, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "SaveImage"
+    ]
+    if not save_nodes:
+        raise RhCliError("NO_SAVE_IMAGE", "工作流里找不到 SaveImage 节点，无法插入加密节点。")
+    injected: list[str] = []
+    for save_id in save_nodes:
+        save_inputs = workflow[save_id].setdefault("inputs", {})
+        source = save_inputs.get("images")
+        if not (isinstance(source, list) and len(source) == 2):
+            continue
+        new_id = _next_node_id(workflow)
+        workflow[new_id] = {
+            "inputs": {
+                "password": password,
+                "title": title,
+                "fps": 16,
+                "compress": 2,
+                "combine_video": True,
+                "images": source,
+            },
+            "class_type": DUCK_ENCODE_CLASS,
+            "_meta": {"title": "鸭鸭图加密"},
+        }
+        save_inputs["images"] = [new_id, 0]
+        injected.append(f"{new_id}(DuckHideNode) → {save_id}(SaveImage)")
+    if not injected:
+        raise RhCliError(
+            "NO_SAVE_IMAGE",
+            "SaveImage 的 images 输入未连到节点输出，无法插入加密节点。",
+        )
+    return injected
+
+
+def _resolve_decoder(explicit: str | None) -> Path:
+    """定位 macOS-duck-decoder：显式路径 > 当前目录 SS_tools > 仓库根 SS_tools。"""
+    if explicit:
+        path = Path(explicit).expanduser()
+        if not path.exists():
+            raise RhCliError("DECODER_NOT_FOUND", f"解码器不存在：{path}")
+        return path
+    candidates = [
+        Path.cwd() / "SS_tools" / "macOS-duck-decoder",
+        Path(__file__).resolve().parents[3] / "SS_tools" / "macOS-duck-decoder",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    raise RhCliError(
+        "DECODER_NOT_FOUND",
+        "找不到 macOS-duck-decoder；用 --decoder 指定路径，或在仓库根目录运行。",
+    )
+
+
+def _decode_duck(decoder: Path, duck_path: Path, out_path: Path, password: str) -> None:
+    """用 macOS-duck-decoder 把鸭子图解回真图。"""
+    cmd = [str(decoder), "--duck", str(duck_path), "--out", str(out_path)]
+    if password:
+        cmd += ["--password", password]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip() or "Unknown error"
+        raise RhCliError("DECODE_FAILED", f"鸭鸭图解密失败：{err}")
+    if not out_path.exists():
+        raise RhCliError("DECODE_FAILED", f"解密未生成输出文件：{out_path}")
 
 
 def _upload_image(client: RhHttpClient, api_key: str, image_path: Path) -> str:
@@ -154,7 +243,13 @@ def run_workflow(
     output: str | None,
     output_dir: Path | None,
     set_args: list[str] | None = None,
+    encrypt: bool = False,
+    password: str = "",
+    title: str = "",
+    decoder: str | None = None,
     on_override: Callable[[list[str]], None] | None = None,
+    on_encrypt: Callable[[list[str]], None] | None = None,
+    on_decode: Callable[[str, str], None] | None = None,
     on_tick: Callable[[int, str], None] | None = None,
     max_seconds: int = MAX_POLL_SECONDS,
     interval: int = POLL_INTERVAL_SECONDS,
@@ -177,6 +272,13 @@ def run_workflow(
         changes = _apply_overrides(workflow, set_args)
         if on_override:
             on_override(changes)
+
+    decoder_path: Path | None = None
+    if encrypt:
+        decoder_path = _resolve_decoder(decoder)  # 尽早失败：没有解码器就别提交任务
+        injected = _inject_duck_encode(workflow, password=password, title=title)
+        if on_encrypt:
+            on_encrypt(injected)
 
     with RhHttpClient(api_key) as client:
         if input_image:
@@ -203,14 +305,24 @@ def run_workflow(
         for index, item in enumerate(file_items, start=1):
             url = str(item["fileUrl"])
             ext = str(item.get("fileType") or "png")
-            path = resolve_output_path(
+            final_path = resolve_output_path(
                 output,
                 output_dir=output_dir,
                 default_name=f"workflow_result.{ext}",
                 ext=ext,
                 index=index if len(file_items) > 1 else None,
             )
-            client.download(url, str(path))
-            files.append(str(path.resolve()))
+            if encrypt:
+                assert decoder_path is not None
+                # 下载的是鸭子图，落地为 *.duck.*；本地解密后真图用干净文件名
+                duck_path = final_path.with_name(f"{final_path.stem}.duck{final_path.suffix}")
+                client.download(url, str(duck_path))
+                _decode_duck(decoder_path, duck_path, final_path, password)
+                if on_decode:
+                    on_decode(str(final_path.resolve()), str(duck_path.resolve()))
+                files.append(str(final_path.resolve()))
+            else:
+                client.download(url, str(final_path))
+                files.append(str(final_path.resolve()))
 
     return RunResult(files=files, texts=[], task_id=task_id)

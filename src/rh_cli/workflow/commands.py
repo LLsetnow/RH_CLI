@@ -22,6 +22,10 @@ def run_command(
     input_image: str | None = typer.Option(None, "--input", "-i", help="输入图片路径，自动注入 LoadImage 节点。"),
     load_image_node: str | None = typer.Option(None, "--load-image-node", help="手动指定 LoadImage 节点 ID，默认自动检测。"),
     set_args: list[str] = typer.Option([], "--set", help="覆盖节点参数：nodeId:field=value，可重复（如 9:denoise=0.4）。"),
+    encrypt: bool = typer.Option(False, "--encrypt", help="在 SaveImage 前插入鸭鸭图加密节点，下载后本地自动解密为真图。"),
+    password: str = typer.Option("", "--password", help="鸭鸭图加密/解密密码（两端须一致）。"),
+    title: str = typer.Option("", "--title", help="鸭鸭图标题（可选）。"),
+    decoder: str | None = typer.Option(None, "--decoder", help="macOS-duck-decoder 路径，默认自动查找。"),
     output: str | None = typer.Option(None, "--output", "-o", help="输出文件或目录。"),
 ) -> None:
     state = _state(ctx)
@@ -30,6 +34,14 @@ def run_command(
     def on_override(changes: list[str]) -> None:
         for change in changes:
             state.out.print(f"[cyan]覆盖参数[/cyan] {change}")
+
+    def on_encrypt(injected: list[str]) -> None:
+        for entry in injected:
+            state.out.print(f"[magenta]插入加密节点[/magenta] {entry}")
+
+    def on_decode(real_path: str, duck_path: str) -> None:
+        state.out.print(f"[green]已本地解密[/green] {real_path}")
+        state.out.print(f"[dim]（鸭子图保留于 {duck_path}）[/dim]")
 
     with state.out.status("上传素材并提交任务...", spinner="dots") as status:
 
@@ -45,7 +57,13 @@ def run_command(
             output=output,
             output_dir=state.output_dir,
             set_args=set_args,
+            encrypt=encrypt,
+            password=password,
+            title=title,
+            decoder=decoder,
             on_override=on_override,
+            on_encrypt=on_encrypt,
+            on_decode=on_decode,
             on_tick=on_tick,
         )
     print_result(state.out, result, json_output=state.json_output)
