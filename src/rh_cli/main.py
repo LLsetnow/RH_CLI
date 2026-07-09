@@ -13,6 +13,7 @@ from .config import config_path, read_config, resolve_api_key, write_config
 from .errors import RhCliError
 from .model.commands import image_command, model_app, video_command
 from .state import CliState
+from .workflow.commands import app as workflow_commands
 
 
 console = Console()
@@ -94,6 +95,7 @@ app.add_typer(model_app, name="model")
 app.command("image")(image_command)
 app.command("video")(video_command)
 app.add_typer(app_commands, name="app")
+app.add_typer(workflow_commands, name="workflow")
 
 
 def run() -> None:
