@@ -9,9 +9,11 @@ from rich.console import Console
 @dataclass(slots=True)
 class CliState:
     api_key: str | None = None
+    key_name: str | None = None
     output_dir: Path | None = None
     json_output: bool = False
     verbose: bool = False
+    site: str = "cn"
     console: Console | None = None
 
     @property

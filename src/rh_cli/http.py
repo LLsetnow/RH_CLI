@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -8,9 +9,24 @@ import httpx
 from .errors import RhCliError, classify_api_error
 
 
-API_HOST = "https://www.runninghub.cn"
+API_HOST_CN = "https://www.runninghub.cn"
+API_HOST_AI = "https://www.runninghub.ai"
+API_HOST = API_HOST_CN
 BASE_URL = f"{API_HOST}/openapi/v2"
+BASE_URL_CN = f"{API_HOST_CN}/openapi/v2"
+BASE_URL_AI = f"{API_HOST_AI}/openapi/v2"
 ACCOUNT_STATUS_URL = f"{API_HOST}/uc/openapi/accountStatus"
+ACCOUNT_STATUS_URL_CN = f"{API_HOST_CN}/uc/openapi/accountStatus"
+ACCOUNT_STATUS_URL_AI = f"{API_HOST_AI}/uc/openapi/accountStatus"
+
+SITE_CONFIG: dict[str, dict[str, str]] = {
+    "cn": {"api_host": API_HOST_CN, "base_url": BASE_URL_CN},
+    "ai": {"api_host": API_HOST_AI, "base_url": BASE_URL_AI},
+}
+
+def get_site_config(site: str = "cn") -> dict[str, str]:
+    """返回指定站点的 API 地址配置。"""
+    return SITE_CONFIG.get(site, SITE_CONFIG["cn"])
 
 _SECRET_PATTERNS = (
     re.compile(r"(api[_-]?[kK]ey=)[^&\s]+"),
@@ -27,9 +43,14 @@ def mask_secret(text: str) -> str:
 
 
 class RhHttpClient:
-    def __init__(self, api_key: str, timeout: float = 60.0):
+    def __init__(self, api_key: str, timeout: float = 60.0, no_proxy_host: str = ""):
         self.api_key = api_key
         self.timeout = timeout
+        # 如需让特定域名绕过 SOCKS 代理，临时扩展 NO_PROXY
+        self._orig_no_proxy = os.environ.get("NO_PROXY", "")
+        if no_proxy_host and no_proxy_host not in self._orig_no_proxy:
+            new_val = f"{self._orig_no_proxy},{no_proxy_host}" if self._orig_no_proxy else no_proxy_host
+            os.environ["NO_PROXY"] = new_val
         self._client = httpx.Client(timeout=timeout, follow_redirects=True)
 
     def close(self) -> None:

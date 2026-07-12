@@ -9,15 +9,26 @@ from typing import Any
 
 from rh_cli.config import require_api_key
 from rh_cli.errors import RhCliError
-from rh_cli.http import API_HOST, BASE_URL, RhHttpClient
+from rh_cli.http import BASE_URL_CN, BASE_URL_AI, API_HOST_CN, API_HOST_AI, RhHttpClient, get_site_config
 from rh_cli.output import RunResult, resolve_output_path
 
 
-# 官方 rh 只实现了 AI 应用（/task/openapi/ai-app/run）。这里补上「原始 ComfyUI
-# 工作流图」这条路：提交完整 workflow JSON，并用经典的 outputs 端点轮询。
-UPLOAD_URL = f"{BASE_URL}/media/upload/binary"
-CREATE_URL = f"{API_HOST}/task/openapi/create"
-OUTPUTS_URL = f"{API_HOST}/task/openapi/outputs"
+def _site_urls(site: str = "cn") -> tuple[str, str, str]:
+    """返回 (upload_url, create_url, outputs_url) 三元组。"""
+    cfg = get_site_config(site)
+    api_host = cfg["api_host"]
+    base_url = cfg["base_url"]
+    return (
+        f"{base_url}/media/upload/binary",
+        f"{api_host}/task/openapi/create",
+        f"{api_host}/task/openapi/outputs",
+    )
+
+
+# 默认 URL（向后兼容）
+UPLOAD_URL = f"{BASE_URL_CN}/media/upload/binary"
+CREATE_URL = f"{API_HOST_CN}/task/openapi/create"
+OUTPUTS_URL = f"{API_HOST_CN}/task/openapi/outputs"
 
 MAX_POLL_SECONDS = 1200
 POLL_INTERVAL_SECONDS = 5
@@ -164,9 +175,10 @@ def _decode_duck(decoder: Path, duck_path: Path, out_path: Path, password: str) 
         raise RhCliError("DECODE_FAILED", f"解密未生成输出文件：{out_path}")
 
 
-def _upload_image(client: RhHttpClient, api_key: str, image_path: Path) -> str:
+def _upload_image(client: RhHttpClient, api_key: str, image_path: Path, upload_url: str = "") -> str:
+    url = upload_url or UPLOAD_URL
     response = client.upload_form(
-        UPLOAD_URL,
+        url,
         str(image_path),
         data={},
         headers={"Authorization": f"Bearer {api_key}"},
@@ -179,11 +191,14 @@ def _upload_image(client: RhHttpClient, api_key: str, image_path: Path) -> str:
     return str(file_name)
 
 
-def _submit(client: RhHttpClient, api_key: str, workflow_id: str, workflow_json: str) -> str:
+def _submit(client: RhHttpClient, api_key: str, workflow_id: str, workflow_json: str, instance_type: str = "", create_url: str = "") -> str:
+    url = create_url or CREATE_URL
     payload = {"apiKey": api_key, "workflowId": workflow_id, "workflow": workflow_json}
+    if instance_type:
+        payload["instanceType"] = instance_type
     delay = 10
     for attempt in range(5):
-        response = client.post_json(CREATE_URL, payload)
+        response = client.post_json(url, payload)
         code = response.get("code")
         if code == 0:
             task_id = response.get("data", {}).get("taskId")
@@ -206,12 +221,14 @@ def _poll_outputs(
     max_seconds: int,
     interval: int,
     on_tick: Callable[[int, str], None] | None = None,
+    outputs_url: str = "",
 ) -> list[dict[str, Any]]:
+    url = outputs_url or OUTPUTS_URL
     elapsed = 0
     while elapsed < max_seconds:
         time.sleep(interval)
         elapsed += interval
-        response = client.post_json(OUTPUTS_URL, {"apiKey": api_key, "taskId": task_id})
+        response = client.post_json(url, {"apiKey": api_key, "taskId": task_id})
         code = response.get("code")
         if code == 0:
             data = response.get("data", [])
@@ -236,6 +253,7 @@ def _poll_outputs(
 def run_workflow(
     *,
     api_key_arg: str | None,
+    key_name: str | None = None,
     workflow_file: str,
     workflow_id: str,
     input_image: str | None,
@@ -247,6 +265,8 @@ def run_workflow(
     password: str = "",
     title: str = "",
     decoder: str | None = None,
+    instance_type: str = "",
+    site: str = "cn",
     on_override: Callable[[list[str]], None] | None = None,
     on_encrypt: Callable[[list[str]], None] | None = None,
     on_decode: Callable[[str, str], None] | None = None,
@@ -254,7 +274,7 @@ def run_workflow(
     max_seconds: int = MAX_POLL_SECONDS,
     interval: int = POLL_INTERVAL_SECONDS,
 ) -> RunResult:
-    resolved = require_api_key(api_key_arg)
+    resolved = require_api_key(api_key_arg, key_name)
     assert resolved.value is not None
     api_key = resolved.value
 
@@ -280,12 +300,16 @@ def run_workflow(
         if on_encrypt:
             on_encrypt(injected)
 
-    with RhHttpClient(api_key) as client:
+    s_upload, s_create, s_outputs = _site_urls(site)
+
+    # AI 站点直连，绕过 SOCKS 代理
+    no_proxy = "runninghub.ai" if site == "ai" else ""
+    with RhHttpClient(api_key, no_proxy_host=no_proxy) as client:
         if input_image:
             img_path = Path(input_image).expanduser()
             if not img_path.exists():
                 raise RhCliError("FILE_NOT_FOUND", f"输入图片不存在：{img_path}")
-            uploaded = _upload_image(client, api_key, img_path)
+            uploaded = _upload_image(client, api_key, img_path, s_upload)
             node_id = load_image_node or find_load_image_node(workflow)
             if node_id and node_id in workflow:
                 workflow[node_id].setdefault("inputs", {})["image"] = uploaded
@@ -295,9 +319,9 @@ def run_workflow(
                     "提供了输入图片，但工作流里找不到 LoadImage 节点；可用 --load-image-node 手动指定。",
                 )
 
-        task_id = _submit(client, api_key, workflow_id, json.dumps(workflow))
+        task_id = _submit(client, api_key, workflow_id, json.dumps(workflow), instance_type, s_create)
         outputs = _poll_outputs(
-            client, api_key, task_id, max_seconds=max_seconds, interval=interval, on_tick=on_tick
+            client, api_key, task_id, max_seconds=max_seconds, interval=interval, on_tick=on_tick, outputs_url=s_outputs,
         )
 
         file_items = [item for item in outputs if item.get("fileUrl")]

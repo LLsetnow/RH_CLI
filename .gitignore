@@ -24,9 +24,11 @@ dist/
 venv/
 env/
 
-# Runtime outputs
-rh-output/
+# User data
+input/
 output/
+.playwright-mcp/
+rh-output/
 downloads/
 *.log
 *.tmp
