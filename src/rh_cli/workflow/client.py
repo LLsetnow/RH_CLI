@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -25,10 +26,25 @@ def _site_urls(site: str = "cn") -> tuple[str, str, str]:
     )
 
 
+def _site_cancel_url(site: str = "cn") -> str:
+    cfg = get_site_config(site)
+    return f"{cfg['api_host']}/task/openapi/cancel"
+
+
+def cancel_task(client: RhHttpClient, api_key: str, task_id: str, cancel_url: str = "") -> None:
+    """向 RunningHub 发送取消请求（best-effort，失败时静默）。"""
+    url = cancel_url or CANCEL_URL
+    try:
+        client.post_json(url, {"apiKey": api_key, "taskId": task_id})
+    except Exception:
+        pass
+
+
 # 默认 URL（向后兼容）
 UPLOAD_URL = f"{BASE_URL_CN}/media/upload/binary"
 CREATE_URL = f"{API_HOST_CN}/task/openapi/create"
 OUTPUTS_URL = f"{API_HOST_CN}/task/openapi/outputs"
+CANCEL_URL = f"{API_HOST_CN}/task/openapi/cancel"
 
 MAX_POLL_SECONDS = 1200
 POLL_INTERVAL_SECONDS = 5
@@ -222,12 +238,20 @@ def _poll_outputs(
     interval: int,
     on_tick: Callable[[int, str], None] | None = None,
     outputs_url: str = "",
+    cancel_event: threading.Event | None = None,
+    cancel_url: str = "",
 ) -> list[dict[str, Any]]:
     url = outputs_url or OUTPUTS_URL
     elapsed = 0
     while elapsed < max_seconds:
+        if cancel_event is not None and cancel_event.is_set():
+            cancel_task(client, api_key, task_id, cancel_url)
+            raise RhCliError("TASK_CANCELLED", f"任务已取消，taskId={task_id}")
         time.sleep(interval)
         elapsed += interval
+        if cancel_event is not None and cancel_event.is_set():
+            cancel_task(client, api_key, task_id, cancel_url)
+            raise RhCliError("TASK_CANCELLED", f"任务已取消，taskId={task_id}")
         response = client.post_json(url, {"apiKey": api_key, "taskId": task_id})
         code = response.get("code")
         if code == 0:
@@ -273,6 +297,7 @@ def run_workflow(
     on_tick: Callable[[int, str], None] | None = None,
     max_seconds: int = MAX_POLL_SECONDS,
     interval: int = POLL_INTERVAL_SECONDS,
+    cancel_event: threading.Event | None = None,
 ) -> RunResult:
     resolved = require_api_key(api_key_arg, key_name)
     assert resolved.value is not None
@@ -320,8 +345,11 @@ def run_workflow(
                 )
 
         task_id = _submit(client, api_key, workflow_id, json.dumps(workflow), instance_type, s_create)
+        s_cancel = _site_cancel_url(site)
         outputs = _poll_outputs(
-            client, api_key, task_id, max_seconds=max_seconds, interval=interval, on_tick=on_tick, outputs_url=s_outputs,
+            client, api_key, task_id, max_seconds=max_seconds, interval=interval,
+            on_tick=on_tick, outputs_url=s_outputs,
+            cancel_event=cancel_event, cancel_url=s_cancel,
         )
 
         file_items = [item for item in outputs if item.get("fileUrl")]
