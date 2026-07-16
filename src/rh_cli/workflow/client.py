@@ -274,6 +274,19 @@ def _poll_outputs(
     raise RhCliError("TASK_TIMEOUT", f"任务超过 {max_seconds}s 仍未完成，taskId={task_id}（可稍后手动查询）。")
 
 
+def _extract_task_cost(outputs: list[dict[str, Any]]) -> tuple[str | None, str | None, str | None]:
+    """从首个工作流输出中提取单项费用，优先 RH 币、金额兜底。"""
+    if not outputs:
+        return (None, None, None)
+    usage = outputs[0] if isinstance(outputs[0], dict) else {}
+    duration = usage.get("taskCostTime")
+    for field, cost_type in (("consumeCoins", "coins"), ("consumeMoney", "money")):
+        value = usage.get(field)
+        if value is not None and str(value).strip():
+            return (cost_type, str(value), duration)
+    return (None, None, duration)
+
+
 def run_workflow(
     *,
     api_key_arg: str | None,
@@ -351,6 +364,7 @@ def run_workflow(
             on_tick=on_tick, outputs_url=s_outputs,
             cancel_event=cancel_event, cancel_url=s_cancel,
         )
+        cost_type, cost, duration = _extract_task_cost(outputs)
 
         file_items = [item for item in outputs if item.get("fileUrl")]
         files: list[str] = []
@@ -376,5 +390,11 @@ def run_workflow(
             else:
                 client.download(url, str(final_path))
                 files.append(str(final_path.resolve()))
-
-    return RunResult(files=files, texts=[], task_id=task_id)
+    return RunResult(
+        files=files,
+        texts=[],
+        cost=cost,
+        cost_type=cost_type,
+        duration=duration,
+        task_id=task_id,
+    )

@@ -15,6 +15,7 @@ class RunResult:
     files: list[str]
     texts: list[str]
     cost: str | None = None
+    cost_type: str | None = None
     duration: str | int | float | None = None
     task_id: str | None = None
 
@@ -23,6 +24,7 @@ class RunResult:
             "files": self.files,
             "texts": self.texts,
             "cost": self.cost,
+            "cost_type": self.cost_type,
             "duration": self.duration,
             "task_id": self.task_id,
         }
@@ -68,6 +70,7 @@ def print_result(console: Console, result: RunResult, *, json_output: bool = Fal
     for path in result.files:
         console.print(f"[green]OUTPUT_FILE:[/green]{path}")
     if result.cost is not None:
-        console.print(f"[cyan]花费：¥{result.cost}[/cyan]")
+        label = "RH币" if result.cost_type == "coins" else "¥"
+        console.print(f"[cyan]花费：{label}{result.cost}[/cyan]")
     if result.duration not in (None, "", "0", 0):
         console.print(f"[cyan]耗时：{result.duration}s[/cyan]")
