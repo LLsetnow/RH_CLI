@@ -9,7 +9,7 @@ from rh_cli.catalog import find_best_for_task, find_endpoint
 from rh_cli.compat import fix_mov_to_mp4
 from rh_cli.config import require_api_key
 from rh_cli.errors import RhCliError
-from rh_cli.http import BASE_URL, RhHttpClient
+from rh_cli.http import get_site_config, RhHttpClient
 from rh_cli.output import RunResult, resolve_output_path
 from rh_cli.poll import poll_task
 
@@ -43,6 +43,7 @@ def execute_model(
     output: str | None,
     output_dir: Path | None,
     console: Console | None = None,
+    site: str = "cn",
 ) -> RunResult:
     resolved = require_api_key(api_key_arg)
     assert resolved.value is not None
@@ -60,9 +61,10 @@ def execute_model(
     else:
         raise RhCliError("INVALID_COMMAND", "必须提供 --endpoint 或 --task。")
 
+    base_url = get_site_config(site)["base_url"]
     with RhHttpClient(resolved.value) as client:
         payload = build_payload(client, endpoint_def, run_input)
-        response = client.post_json(f"{BASE_URL}/{endpoint_def['endpoint']}", payload)
+        response = client.post_json(f"{base_url}/{endpoint_def['endpoint']}", payload)
         task_id = _extract_task_id(response)
         if not task_id:
             raise RhCliError("SUBMIT_FAILED", "提交成功但响应中没有 taskId。", detail=response)
