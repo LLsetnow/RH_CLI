@@ -48,6 +48,8 @@ CANCEL_URL = f"{API_HOST_CN}/task/openapi/cancel"
 
 MAX_POLL_SECONDS = 1200
 POLL_INTERVAL_SECONDS = 5
+# 轮询期间允许的最大「连续」瞬时网络错误次数，超过才判定为真的连不上。
+MAX_POLL_NET_FAILS = 20
 
 # SS_tools 鸭鸭图加密节点（copyangle/SS_tools）：把真实图片隐写进一张鸭子图。
 DUCK_ENCODE_CLASS = "DuckHideNode"
@@ -243,6 +245,7 @@ def _poll_outputs(
 ) -> list[dict[str, Any]]:
     url = outputs_url or OUTPUTS_URL
     elapsed = 0
+    net_fails = 0  # 连续瞬时网络错误计数：单次抖断不该丢掉正在跑的任务
     while elapsed < max_seconds:
         if cancel_event is not None and cancel_event.is_set():
             cancel_task(client, api_key, task_id, cancel_url)
@@ -252,7 +255,25 @@ def _poll_outputs(
         if cancel_event is not None and cancel_event.is_set():
             cancel_task(client, api_key, task_id, cancel_url)
             raise RhCliError("TASK_CANCELLED", f"任务已取消，taskId={task_id}")
-        response = client.post_json(url, {"apiKey": api_key, "taskId": task_id})
+        try:
+            response = client.post_json(url, {"apiKey": api_key, "taskId": task_id})
+        except RhCliError as exc:
+            # 鉴权/余额类错误无法自愈，立即失败；其余（TLS 抖断、超时、5xx 等）自动重试，
+            # 因为任务多半仍在服务端运行，一次瞬断不该让整条命令崩掉。
+            if exc.code in ("AUTH_FAILED", "INSUFFICIENT_BALANCE"):
+                raise
+            net_fails += 1
+            if net_fails > MAX_POLL_NET_FAILS:
+                raise RhCliError(
+                    "TASK_POLL_ERROR",
+                    f"轮询连续失败 {net_fails} 次仍无法恢复，taskId={task_id}"
+                    f"（任务可能仍在运行，可稍后凭该 taskId 手动查询结果）。原因：{exc.message}",
+                    detail=exc.detail,
+                ) from exc
+            if on_tick:
+                on_tick(elapsed, f"NET_RETRY({net_fails})")
+            continue
+        net_fails = 0  # 一旦成功拿到响应就清零连续失败计数
         code = response.get("code")
         if code == 0:
             data = response.get("data", [])
