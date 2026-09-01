@@ -21,6 +21,16 @@
     login_required: "待登录", ready: "已登录", checking: "签到中",
     checked_in: "今日已签到", not_checked_in: "未返回奖励", error: "账号异常"
   };
+  var resolutionAspectRatios = [
+    "1:1 (Square)",
+    "2:3 (Portrait Photo)",
+    "3:2 (Photo)",
+    "3:4 (Portrait Standard)",
+    "4:3 (Standard)",
+    "9:16 (Portrait Widescreen)",
+    "16:9 (Widescreen)",
+    "21:9 (Ultrawide)"
+  ];
 
   function $(id) { return document.getElementById(id); }
   function esc(value) {
@@ -498,6 +508,23 @@
     return workflow;
   }
 
+  function applyResolutionValues(workflow, values, bypassedNodes) {
+    var bypassed = bypassedNodes || [];
+    Object.keys(values || {}).forEach(function (nodeId) {
+      if (bypassed.indexOf(nodeId) !== -1) return;
+      var config = values[nodeId] || {};
+      var node = workflow[nodeId];
+      if (!node || typeof node !== "object") return;
+      if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+      node.inputs.aspect_ratio = String(config.aspect_ratio || resolutionAspectRatios[0]).trim();
+      var rawMegapixels = String(config.megapixels == null ? "" : config.megapixels).trim();
+      var megapixels = Number(rawMegapixels);
+      node.inputs.megapixels = Number.isFinite(megapixels) ? megapixels : rawMegapixels;
+      node.inputs.multiple = 32;
+    });
+    return workflow;
+  }
+
   function applyBypassedNodes(workflow, bypassedNodes) {
     var bypassed = {};
     (bypassedNodes || []).forEach(function (nodeId) { bypassed[String(nodeId)] = true; });
@@ -535,6 +562,13 @@
       var mode = document.querySelector('.random-noise-mode[data-node-id="' + CSS.escape(nodeId) + '"]');
       if (seed && config.seed != null) seed.value = String(config.seed);
       if (mode && (config.mode === "fixed" || config.mode === "randomize")) mode.value = config.mode;
+    });
+    Object.keys(values.resolution || {}).forEach(function (nodeId) {
+      var config = values.resolution[nodeId] || {};
+      var aspect = document.querySelector('.resolution-aspect[data-node-id="' + CSS.escape(nodeId) + '"]');
+      var megapixels = document.querySelector('.resolution-megapixels[data-node-id="' + CSS.escape(nodeId) + '"]');
+      if (aspect && resolutionAspectRatios.indexOf(String(config.aspect_ratio || "")) !== -1) aspect.value = String(config.aspect_ratio);
+      if (megapixels && config.megapixels != null) megapixels.value = String(config.megapixels);
     });
     applyNodeBypassStates();
   }
@@ -588,19 +622,21 @@
     var files = analysis.file_inputs || [];
     var prompts = analysis.prompt_inputs || [];
     var randomNoise = analysis.random_noise_inputs || [];
+    var resolutions = analysis.resolution_inputs || [];
     summary.hidden = false;
     summary.innerHTML = '<div class="summary-item"><strong>' + files.length + '</strong> 个文件输入</div>' +
       '<div class="summary-item"><strong>' + prompts.length + '</strong> 个提示词节点</div>' +
+      '<div class="summary-item"><strong>' + resolutions.length + '</strong> 个尺寸节点</div>' +
       '<div class="summary-item"><strong>' + randomNoise.length + '</strong> 个 RandomNoise</div>' +
       '<div class="summary-item bypass-summary"><strong>' + bypassedNodeList().length + '</strong> 个旁路节点</div>' +
       '<div class="summary-item">已完成节点扫描</div>';
     var html = '<div class="input-node-toolbar"><div><span class="input-node-toolbar-title">可添加输入节点</span><small>节点会写入当前 API 工作流</small></div><button class="secondary-button" type="button" data-action="add-random-noise">＋ RandomNoise</button></div>';
-    var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; }));
+    var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(resolutions.map(function (item) { return { item: item, kind: "resolution" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; }));
     if (inputNodes.length) {
       html += '<div class="input-jump-bar"><div class="input-jump-heading"><span>输入节点</span><small>点击标签快速定位</small></div><div class="input-jump-list">';
       inputNodes.forEach(function (entry) {
         var item = entry.item;
-        var icon = entry.kind === "file" ? "▧" : (entry.kind === "prompt" ? "Aa" : "RN");
+        var icon = entry.kind === "file" ? "▧" : (entry.kind === "prompt" ? "Aa" : (entry.kind === "resolution" ? "WH" : "RN"));
         html += '<button class="input-jump-tag ' + entry.kind + '" type="button" data-action="jump-input" data-input-id="' + esc(item.id) + '" title="定位到 ' + esc(item.id) + '"><span class="input-jump-icon" aria-hidden="true">' + icon + '</span><span class="input-jump-title">' + esc(item.title || item.class_type) + '</span><code>' + esc(item.id) + '</code></button>';
       });
       html += '</div></div>';
@@ -630,6 +666,21 @@
           '<div class="prompt-tools"><input class="prompt-picker" data-input-id="' + esc(item.id) + '" type="file" accept=".txt,text/plain" hidden /><button class="file-button" data-action="pick-prompt" data-input-id="' + esc(item.id) + '" type="button">加载 TXT</button><span class="file-meta" data-prompt-meta-id="' + esc(item.id) + '">读取内容后仍可继续编辑</span></div></div>';
       });
     }
+    if (resolutions.length) {
+      html += '<div class="section-kicker resolution-section-label">尺寸节点 · 可编辑</div>';
+      resolutions.forEach(function (item) {
+        var aspect = resolutionAspectRatios.indexOf(String(item.aspect_ratio || "")) !== -1 ? String(item.aspect_ratio) : resolutionAspectRatios[0];
+        var megapixels = item.megapixels == null || item.megapixels === "" ? 0.4 : item.megapixels;
+        var options = (item.aspect_ratio_options || resolutionAspectRatios).map(function (option) {
+          return '<option value="' + esc(option) + '"' + (option === aspect ? ' selected' : '') + '>' + esc(option) + '</option>';
+        }).join("");
+        html += '<div class="input-card resolution-card' + (isNodeBypassed(item.node_id || item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title || "尺寸") + '</div><div class="input-type">' + esc(item.class_type || "ResolutionSelector") + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id || item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+          '<div class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</div>' +
+          '<div class="resolution-grid"><label class="field-group"><span class="field-label">宽高比例</span><select class="resolution-aspect" data-node-id="' + esc(item.node_id || item.id) + '">' + options + '</select></label>' +
+          '<label class="field-group"><span class="field-label">megapixels</span><input class="resolution-megapixels" data-node-id="' + esc(item.node_id || item.id) + '" type="number" min="0.1" max="4" step="0.1" inputmode="decimal" value="' + esc(megapixels) + '" /></label></div>' +
+          '<div class="file-meta">范围 0.1–4；multiple 固定为 32</div></div>';
+      });
+    }
     if (randomNoise.length) {
       html += '<div class="section-kicker random-noise-section-label">RandomNoise · 可编辑</div>';
       randomNoise.forEach(function (item) {
@@ -642,7 +693,7 @@
           '<div class="file-meta">导出或提交时写入 ' + esc(item.seed_field || "noise_seed") + ' 和 mode</div></div>';
       });
     }
-    if (!files.length && !prompts.length && !randomNoise.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>可以点击上方“＋ RandomNoise”添加随机噪声节点。</span></div>';
+    if (!files.length && !prompts.length && !resolutions.length && !randomNoise.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>可以点击上方“＋ RandomNoise”添加随机噪声节点。</span></div>';
     inputs.innerHTML = html;
     inputs.hidden = false;
     $("submitStrip").hidden = false;
@@ -718,6 +769,7 @@
         files: savedTask.files || {},
         prompts: savedTask.prompts || {},
         randomNoise: savedTask.random_noise || {},
+        resolution: savedTask.resolution || {},
         bypassedNodes: savedTask.bypassed_nodes || savedTask.bypassed_inputs || []
       });
       applyPendingPrompt();
@@ -931,7 +983,14 @@
       var mode = card.querySelector(".random-noise-mode");
       randomNoise[nodeId] = { seed: seed ? seed.value.trim() : "", mode: mode ? mode.value.trim() : "" };
     });
-    return { files: files, prompts: prompts, randomNoise: randomNoise, bypassedNodes: bypassedNodeList() };
+    var resolution = {};
+    document.querySelectorAll(".resolution-card").forEach(function (card) {
+      var nodeId = card.dataset.nodeId || card.dataset.inputId;
+      var aspect = card.querySelector(".resolution-aspect");
+      var megapixels = card.querySelector(".resolution-megapixels");
+      resolution[nodeId] = { aspect_ratio: aspect ? aspect.value.trim() : "", megapixels: megapixels ? megapixels.value.trim() : "" };
+    });
+    return { files: files, prompts: prompts, randomNoise: randomNoise, resolution: resolution, bypassedNodes: bypassedNodeList() };
   }
 
   function exportWorkflow() {
@@ -972,6 +1031,10 @@
     changes += Object.keys(values.randomNoise).filter(function (nodeId) {
       return values.bypassedNodes.indexOf(nodeId) === -1;
     }).length * 2;
+    applyResolutionValues(workflow, values.resolution, values.bypassedNodes);
+    changes += Object.keys(values.resolution).filter(function (nodeId) {
+      return values.bypassedNodes.indexOf(nodeId) === -1;
+    }).length * 2;
     applyBypassedNodes(workflow, values.bypassedNodes);
     var sourceName = appState.workflowName || "workflow_api.json";
     var stem = sourceName.replace(/\.json$/i, "") || "workflow";
@@ -1009,11 +1072,19 @@
       return !/^-?\d+$/.test(String(config.seed || "").trim()) || ["fixed", "randomize"].indexOf(config.mode) === -1;
     });
     if (invalidNoise) return showToast("RandomNoise 的随机种子必须是整数，模式只能是 fixed 或 randomize", true);
+    var invalidResolution = Object.keys(values.resolution).some(function (nodeId) {
+      if (values.bypassedNodes.indexOf(nodeId) !== -1) return false;
+      var config = values.resolution[nodeId];
+      var megapixels = Number(String(config.megapixels || "").trim());
+      return resolutionAspectRatios.indexOf(String(config.aspect_ratio || "").trim()) === -1 || !Number.isFinite(megapixels) || megapixels < 0.1 || megapixels > 4;
+    });
+    if (invalidResolution) return showToast("尺寸节点的比例无效，megapixels 范围必须是 0.1 到 4", true);
     var workflowPayload = null;
     if (appState.workflowDirty && appState.workflow) {
       try {
         workflowPayload = JSON.parse(JSON.stringify(appState.workflow));
         applyRandomNoiseValues(workflowPayload, values.randomNoise, values.bypassedNodes);
+        applyResolutionValues(workflowPayload, values.resolution, values.bypassedNodes);
       } catch (error) {
         return showToast("当前工作流无法保存", true);
       }
@@ -1035,6 +1106,7 @@
       files: values.files,
       prompts: values.prompts,
       random_noise: values.randomNoise,
+      resolution: values.resolution,
       bypassed_nodes: values.bypassedNodes,
       key_id: $("keySelect").value || null,
       output_dir: $("outputDir").value.trim() || null
