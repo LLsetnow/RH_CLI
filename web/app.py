@@ -564,7 +564,7 @@ class LocalStore:
             "created_at": task["created_at"],
             "updated_at": task["created_at"],
             "status": "queued",
-            "progress": "等待本地调度…",
+            "progress": "已加入本地等待队列，等待并发槽位…",
             "workflow_path": task["workflow_path"],
             "workflow_name": task["workflow_name"],
             "key_id": task.get("key_id"),
@@ -729,6 +729,10 @@ class TaskManager:
             task["remote_task_id"] = task.get("remote_task_id") or ""
             task["remote_workflow_id"] = task.get("remote_workflow_id") or ""
             result.append(task)
+        queued = sorted((item for item in result if item.get("status") == "queued"), key=lambda item: item.get("created_at", 0))
+        positions = {item["id"]: index for index, item in enumerate(queued, start=1)}
+        for task in result:
+            task["queue_position"] = positions.get(task["id"], 0)
         return result
 
     def public_keys(self) -> list[dict[str, Any]]:
@@ -939,6 +943,9 @@ class TaskManager:
                 continue
             record = self._select_key(task, keys, records)
             if not record:
+                wait_message = self._queue_wait_message(task, keys, records)
+                if task.get("progress") != wait_message:
+                    self.store.update_task(task["id"], progress=wait_message)
                 continue
             with self._lock:
                 if task["id"] in self._claimed:
@@ -952,6 +959,28 @@ class TaskManager:
             )
             self._log_stage(task["id"], "dispatch", f"已选择 {record['name']}，开始执行")
             self._executor.submit(self._run_task, task["id"], record, event)
+
+    def _queue_wait_message(
+        self,
+        task: dict[str, Any],
+        keys: list[dict[str, Any]],
+        records: dict[str, dict[str, Any]],
+    ) -> str:
+        if task.get("key_id"):
+            record = records.get(task["key_id"])
+            if record and record.get("status") == "ready":
+                active = self._active_by_key.get(record["id"], 0)
+                capacity = int(record.get("capacity") or 3)
+                return f"本地等待队列 · {record['name']} 并发已满（{active}/{capacity}）"
+            return "本地等待队列 · 等待指定 Key 可用"
+        ready = [item for item in keys if item.get("status") == "ready"]
+        if ready:
+            capacities = ", ".join(
+                f"{item['name']} {self._active_by_key.get(item['id'], 0)}/{int(item.get('capacity') or 3)}"
+                for item in ready
+            )
+            return f"本地等待队列 · 等待并发槽位（{capacities}）"
+        return "本地等待队列 · 等待可用 Key"
 
     def _select_key(
         self,

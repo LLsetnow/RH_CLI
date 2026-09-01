@@ -330,6 +330,39 @@ def test_submit_task_saves_modified_workflow_with_random_noise(tmp_path, monkeyp
         store._db.close()
 
 
+def test_personal_queue_keeps_fourth_task_until_slot_is_free(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        manager._stop.set()
+        manager._wake.set()
+        manager._dispatcher.join(timeout=1)
+        monkeypatch.setattr(manager._executor, "submit", lambda *args, **kwargs: None)
+        store.save_keys([_saved_key()])
+        workflow_id, _, _ = store.save_workflow("queue_api.json", json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}))
+
+        task_ids = [
+            manager.submit_task(workflow_id, {}, {}, "key_test", None, remote_workflow_id="123456")["id"]
+            for _ in range(4)
+        ]
+
+        manager._dispatch_once()
+        states = {task["id"]: task["status"] for task in store.tasks()}
+        assert sum(status == "submitting" for status in states.values()) == 3
+        waiting = [task_id for task_id in task_ids if states[task_id] == "queued"]
+        assert len(waiting) == 1
+        assert "本地等待队列" in store.task(waiting[0])["progress"]
+        assert next(task["queue_position"] for task in manager.public_tasks() if task["id"] == waiting[0]) == 1
+
+        manager._active_by_key["key_test"] = 2
+        manager._dispatch_once()
+
+        assert store.task(waiting[0])["status"] == "submitting"
+    finally:
+        manager.close()
+
+
 def test_local_file_preview_reads_image_without_copying(tmp_path):
     source = tmp_path / "existing.png"
     source.write_bytes(b"png-bytes")
