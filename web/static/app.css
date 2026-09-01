@@ -42,7 +42,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 16px; min-height: 48px; }
 .brand-lockup, .local-badge, .queue-caption, .panel-heading, .queue-heading, .credential-heading, .topbar-actions { display: flex; align-items: center; }
 .brand-home-link { color: inherit; text-decoration: none; }
-.brand-home-link > span:last-child { display: block; }
+.brand-lockup > span:last-child, .brand-lockup > div:last-child { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; }
 .brand-lockup { gap: 12px; }
 .brand-mark { display: block; width: 31px; height: 31px; flex: 0 0 auto; border: 0; border-radius: 9px; background: transparent; object-fit: contain; }
 .brand-name { font-size: 14px; font-weight: 700; letter-spacing: .01em; }
@@ -119,7 +119,7 @@ h2 { margin-top: 6px; font-size: 20px; letter-spacing: -.025em; }
 .random-noise-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 13px; }
 .random-noise-grid .field-group input, .random-noise-grid .field-group select { margin-top: 7px; }
 .resolution-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); gap: 10px; margin-top: 13px; }
-.resolution-grid .field-group input, .resolution-grid .field-group select { margin-top: 7px; }
+.resolution-grid .field-group input, .resolution-grid .field-group select { margin-top: 7px; font-size: 11px; line-height: 1.2; }
 .resolution-megapixels-group { position: relative; }
 .resolution-field-label { display: flex; align-items: center; gap: 6px; min-height: 16px; }
 .resolution-help { display: inline-grid; place-items: center; width: 15px; height: 15px; padding: 0; border: 1px solid var(--line); border-radius: 50%; color: var(--subtle); background: transparent; font-size: 9px; font-weight: 750; line-height: 1; }
@@ -146,6 +146,8 @@ h2 { margin-top: 6px; font-size: 20px; letter-spacing: -.025em; }
 .file-input-card.is-loading { border-color: var(--warm); background: rgba(255, 184, 107, .05); }
 .file-input-card.is-ready { border-color: rgba(110, 231, 216, .22); }
 .input-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.input-card-label { min-width: 0; }
+.input-card-subhead { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: start; gap: 8px; min-width: 0; }
 .input-card-actions { display: flex; align-items: center; flex-shrink: 0; gap: 9px; }
 .input-bypass-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 5px 2px 3px; border: 1px solid transparent; border-radius: 999px; color: var(--subtle); background: transparent; font-size: 9px; font-weight: 700; transition: border-color .18s ease, color .18s ease, background .18s ease; }
 .input-bypass-toggle:hover, .input-bypass-toggle:focus-visible { border-color: rgba(255, 184, 107, .34); color: var(--warm); background: rgba(255, 184, 107, .07); outline: none; }
@@ -154,9 +156,9 @@ h2 { margin-top: 6px; font-size: 20px; letter-spacing: -.025em; }
 .input-bypass-thumb { display: block; width: 8px; height: 8px; border-radius: 50%; background: currentColor; transition: transform .18s ease; }
 .input-bypass-toggle.is-active .input-bypass-track { background: rgba(255, 184, 107, .22); opacity: 1; }
 .input-bypass-toggle.is-active .input-bypass-thumb { transform: translateX(10px); }
-.input-bypass-note { margin-top: 9px; color: var(--warm); font-size: 10px; line-height: 1.5; }
+.input-bypass-note { min-width: 0; color: var(--warm); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .input-card.is-bypassed { border-color: rgba(255, 184, 107, .38); background: rgba(255, 184, 107, .045); }
-.input-card.is-bypassed .input-bypass-note { display: block; }
+.input-card.is-bypassed .input-bypass-note { display: inline; }
 .input-card.is-bypassed .file-dropzone { cursor: not-allowed; opacity: .58; }
 .input-title { font-size: 13px; font-weight: 650; }
 .input-type { color: var(--subtle); font-size: 10px; }

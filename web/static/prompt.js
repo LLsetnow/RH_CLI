@@ -7,7 +7,7 @@
   var promptApiReady = false;
   var stateSaveTimer = 0;
   var editingBlockId = "";
-  var state = { libraryBlocks: [], actions: [], libraryMode: "blocks", assemblyView: "stage", stage: [], groups: [], activeGroupId: "", filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
+  var state = { libraryBlocks: [], actions: [], actionSource: null, libraryMode: "blocks", assemblyView: "stage", stage: [], groups: [], activeGroupId: "", filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
   var toastTimer = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -70,7 +70,14 @@
       result.text = String(item.text || "");
     } else if (item.kind === "action") {
       result.action_id = item.sourceId || "";
-      result.snapshot = { title: item.title || "", text: item.text || "", tags: item.tags || [] };
+      result.snapshot = {
+        title: item.title || "",
+        text: item.text || "",
+        tags: item.tags || [],
+        color_image_url: item.colorImageUrl || item.imageUrl || "",
+        depth_image_url: item.depthImageUrl || "",
+        pair_status: item.pairStatus || "",
+      };
     } else {
       result.block_id = item.sourceId || "";
       result.snapshot = { title: item.title || "", text: item.text || "", tags: item.tags || [] };
@@ -90,7 +97,10 @@
       title: source ? source.title : (snapshot.title || (item.kind === "action" ? "动作已不可用" : "已删除积木")),
       text: source ? source.text : (snapshot.text || ""),
       tags: source ? (source.tags || []) : (snapshot.tags || []),
-      imageUrl: source && source.image_url ? source.image_url : "",
+      imageUrl: source ? (source.color_image_url || source.image_url || "") : (snapshot.color_image_url || ""),
+      colorImageUrl: source ? (source.color_image_url || source.image_url || "") : (snapshot.color_image_url || ""),
+      depthImageUrl: source ? (source.depth_image_url || "") : (snapshot.depth_image_url || ""),
+      pairStatus: source ? (source.pair_status || "") : (snapshot.pair_status || ""),
       missing: !source,
     };
   }
@@ -106,6 +116,18 @@
   }
   function applyActionSnapshot(snapshot) {
     state.actions = snapshot && Array.isArray(snapshot.actions) ? snapshot.actions : [];
+    state.actionSource = snapshot && snapshot.source_status ? snapshot.source_status : null;
+  }
+  function refreshActions() {
+    return jsonRequest("/api/prompt/actions").then(function (snapshot) {
+      applyActionSnapshot(snapshot);
+      renderFilters();
+      renderLibrary();
+      showToast("动作库已重新扫描");
+      return snapshot;
+    }).catch(function (error) {
+      showToast("动作库刷新失败：" + error.message, true);
+    });
   }
   function readLegacyState() {
     try {
@@ -176,26 +198,70 @@
     if (modeTabs) modeTabs.classList.toggle("is-actions", isActions);
     var actionCount = $("actionModeCount");
     if (actionCount) actionCount.textContent = String(state.actions.length);
+    var refreshButton = $("refreshActions");
+    if (refreshButton) refreshButton.hidden = !isActions;
+  }
+  function actionMediaMarkup(action, extraClass) {
+    var title = action.title || "动作图片";
+    var colorUrl = action.color_image_url || action.image_url || "";
+    var depthUrl = action.depth_image_url || "";
+    var colorAvailable = Boolean(action.color_image_available && colorUrl);
+    var depthAvailable = Boolean(action.depth_image_available && depthUrl);
+    var color = colorAvailable
+      ? '<button class="image-preview-trigger action-media-image is-active" type="button" data-action-media-image="color" data-image-preview="' + esc(colorUrl) + '" data-image-title="' + esc(title + " · 原图") + '" aria-label="放大查看「' + esc(title) + '」原图"><img src="' + esc(colorUrl) + '" alt="' + esc(title) + ' · 原图" loading="lazy" /></button>'
+      : '<div class="action-media-missing action-media-image is-active"><span>原图缺失</span></div>';
+    var depth = depthAvailable
+      ? '<button class="image-preview-trigger action-media-image" type="button" data-action-media-image="depth" data-image-preview="' + esc(depthUrl) + '" data-image-title="' + esc(title + " · 深度图") + '" aria-label="放大查看「' + esc(title) + '」深度图" hidden><img src="' + esc(depthUrl) + '" alt="' + esc(title) + ' · 深度图" loading="lazy" /></button>'
+      : '<div class="action-media-missing action-media-image" hidden><span>深度图缺失</span></div>';
+    return '<div class="action-media-shell ' + (extraClass || "") + '" data-action-media>' +
+      '<div class="action-media-viewport">' + color + depth + '</div>' +
+      '<div class="action-media-switcher" role="group" aria-label="切换动作图片"><button class="action-media-tab is-active" type="button" data-action-media-view="color">原图</button><button class="action-media-tab" type="button" data-action-media-view="depth"' + (depthAvailable ? "" : " disabled") + '>深度图</button></div>' +
+      '</div>';
+  }
+  function setActionMediaView(container, kind) {
+    if (!container || (kind !== "color" && kind !== "depth")) return;
+    var target = container.querySelector('[data-action-media-image="' + kind + '"]');
+    var tab = container.querySelector('[data-action-media-view="' + kind + '"]');
+    if (!target || !tab || tab.disabled) return;
+    container.querySelectorAll("[data-action-media-image]").forEach(function (image) {
+      image.hidden = image.dataset.actionMediaImage !== kind;
+      image.classList.toggle("is-active", image.dataset.actionMediaImage === kind);
+    });
+    container.querySelectorAll("[data-action-media-view]").forEach(function (button) {
+      button.classList.toggle("is-active", button.dataset.actionMediaView === kind);
+    });
+  }
+  function actionPairLabel(action) {
+    var labels = {
+      paired: "原图 + 深度图",
+      missing_depth: "缺少深度图",
+      missing_color: "缺少原图",
+      missing_both: "原图与深度图缺失",
+      mismatched: "文件名未匹配",
+    };
+    return labels[action.pair_status] || action.pair_message || "待检查配对";
+  }
+  function actionPairClass(action) {
+    return action.pair_status === "paired" ? "is-paired" : "is-warning";
   }
   function renderActionLibrary() {
     var actions = state.actions.filter(blockMatches);
     if (!actions.length) {
       $("libraryList").innerHTML = '<div class="library-empty">没有匹配的动作。<br />试试其他标签或搜索提示词。</div>';
       $("libraryCount").textContent = actions.length + " 个动作";
+      $("libraryFooterHint").textContent = state.actionSource ? state.actionSource.paired_count + "/" + state.actionSource.action_count + " 对已配对" : "点击或拖动加入";
       return;
     }
     $("libraryList").innerHTML = actions.map(function (action, index) {
-      var image = action.image_available && action.image_url
-        ? '<button class="image-preview-trigger" type="button" data-image-preview="' + esc(action.image_url) + '" data-image-title="' + esc(action.title) + '" aria-label="放大查看「' + esc(action.title) + '」图片"><img src="' + esc(action.image_url) + '" alt="' + esc(action.title) + '" loading="lazy" /></button>'
-        : '<span class="action-image-missing">无图</span>';
       return '<article class="action-library-card" draggable="true" data-action-id="' + esc(action.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
-        '<div class="action-card-media">' + image + '</div>' +
+        '<div class="action-card-media">' + actionMediaMarkup(action, "") + '</div>' +
         '<div class="action-card-body"><div class="library-block-top"><div class="library-block-title"><span class="block-type-dot action" aria-hidden="true"></span><span>' + esc(action.title) + '</span></div><span class="library-block-label">POSE</span></div>' +
         '<div class="action-library-text">' + esc(action.text) + '</div>' +
         '<div class="block-tags">' + (action.tags || []).map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' +
-        '<div class="library-block-footer"><button class="add-block-button" type="button" data-add-action="' + esc(action.id) + '">加入组装台&nbsp;→</button><span class="action-card-hint">图片 + 提示词</span></div></div></article>';
+        '<div class="library-block-footer"><button class="add-block-button" type="button" data-add-action="' + esc(action.id) + '">加入组装台&nbsp;→</button><span class="action-pair-status ' + actionPairClass(action) + '" title="' + esc(action.pair_message || "") + '">' + esc(actionPairLabel(action)) + '</span></div></div></article>';
     }).join("");
     $("libraryCount").textContent = actions.length + " 个动作";
+    $("libraryFooterHint").textContent = state.actionSource ? state.actionSource.paired_count + "/" + state.actionSource.action_count + " 对已配对" : "点击或拖动加入";
   }
   function renderLibrary() {
     renderLibraryMode();
@@ -220,13 +286,14 @@
     }
     $("libraryList").innerHTML = html;
     $("libraryCount").textContent = blocks.length + " 个固定积木";
+    $("libraryFooterHint").textContent = "点击或拖动加入";
   }
   function stageBlockMarkup(item, index, total) {
     var isText = item.kind === "text";
     var isAction = item.kind === "action";
     var tags = item.tags || [];
-    var actionThumb = isAction && item.imageUrl && !item.missing
-      ? '<button class="image-preview-trigger stage-action-thumb" type="button" data-image-preview="' + esc(item.imageUrl) + '" data-image-title="' + esc(item.title || "动作图片") + '" aria-label="放大查看「' + esc(item.title || "动作图片") + '」图片"><img src="' + esc(item.imageUrl) + '" alt="' + esc(item.title || "动作图片") + '" loading="lazy" /></button>'
+    var actionThumb = isAction && !item.missing && (item.colorImageUrl || item.imageUrl || item.depthImageUrl)
+      ? actionMediaMarkup({ title: item.title || "动作图片", color_image_url: item.colorImageUrl || item.imageUrl || "", depth_image_url: item.depthImageUrl || "", color_image_available: Boolean(item.colorImageUrl || item.imageUrl), depth_image_available: Boolean(item.depthImageUrl), pair_status: item.pairStatus || "" }, "stage-action-media")
       : "";
     var typeLabel = isText ? "自由文本" : (isAction ? (item.missing ? "动作 · 已不可用" : "动作库") : (item.missing ? "固定积木 · 已删除" : "固定积木"));
     return '<article class="stage-block ' + (isText ? "text" : (isAction ? "action" : "fixed")) + (item.missing ? " missing" : "") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + '">' +
@@ -343,7 +410,19 @@
     if (state.libraryMode === "actions") {
       var action = state.actions.find(function (item) { return item.id === id; });
       if (!action) return null;
-      return { instanceId: makeId("action"), kind: "action", sourceId: action.id, title: action.title, text: action.text, tags: action.tags || [], imageUrl: action.image_url || "", missing: !action.image_available };
+      return {
+        instanceId: makeId("action"),
+        kind: "action",
+        sourceId: action.id,
+        title: action.title,
+        text: action.text,
+        tags: action.tags || [],
+        imageUrl: action.color_image_url || action.image_url || "",
+        colorImageUrl: action.color_image_url || action.image_url || "",
+        depthImageUrl: action.depth_image_url || "",
+        pairStatus: action.pair_status || "",
+        missing: false,
+      };
     }
     var block = allBlocks().find(function (item) { return item.id === id; });
     if (!block) return null;
@@ -727,12 +806,12 @@
       renderLibrary();
     });
     $("libraryModeActions").addEventListener("click", function () {
-      if (state.libraryMode === "actions") return;
+      if (state.libraryMode === "actions") return refreshActions();
       state.libraryMode = "actions";
       state.filter = "全部";
-      renderFilters();
-      renderLibrary();
+      refreshActions();
     });
+    $("refreshActions").addEventListener("click", refreshActions);
     $("blockSearch").addEventListener("input", function () { state.search = this.value.trim(); renderLibrary(); });
     $("tagFilters").addEventListener("click", function (event) {
       var button = event.target.closest("[data-filter-tag]");
@@ -748,6 +827,8 @@
       if (deleteButton) deleteGroup(deleteButton.dataset.deleteGroup);
     });
     $("libraryList").addEventListener("click", function (event) {
+      var mediaTab = event.target.closest("[data-action-media-view]");
+      if (mediaTab) return setActionMediaView(mediaTab.closest("[data-action-media]"), mediaTab.dataset.actionMediaView);
       var previewButton = event.target.closest("[data-image-preview]");
       if (previewButton) return openImagePreview(previewButton.dataset.imagePreview, previewButton.dataset.imageTitle);
       var actionButton = event.target.closest("[data-add-action]");
@@ -799,6 +880,8 @@
       renderOutput();
     });
     $("stageList").addEventListener("click", function (event) {
+      var mediaTab = event.target.closest("[data-action-media-view]");
+      if (mediaTab) return setActionMediaView(mediaTab.closest("[data-action-media]"), mediaTab.dataset.actionMediaView);
       var previewButton = event.target.closest("[data-image-preview]");
       if (previewButton) return openImagePreview(previewButton.dataset.imagePreview, previewButton.dataset.imageTitle);
       var moveButton = event.target.closest("[data-move-stage]");

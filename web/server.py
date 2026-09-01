@@ -113,10 +113,22 @@ class LocalHandler(BaseHTTPRequestHandler):
             self._json(200, self.server.prompt_store.snapshot())  # type: ignore[attr-defined]
             return
         if path == "/api/prompt/actions":
-            self._json(200, {"actions": self.server.action_store.public_actions()})  # type: ignore[attr-defined]
+            action_store = self.server.action_store  # type: ignore[attr-defined]
+            # Resources.md is the source of truth. A hash check makes edits visible
+            # while the app is open without requiring a server restart.
+            action_store.refresh()
+            self._json(200, {"actions": action_store.public_actions(), "source_status": action_store.source_status()})
+            return
+        if path == "/api/prompt/actions/status":
+            action_store = self.server.action_store  # type: ignore[attr-defined]
+            action_store.refresh()
+            self._json(200, action_store.source_status())
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/depth"):
+            self._serve_action_image(path, "depth")
             return
         if path.startswith("/api/prompt/actions/") and path.endswith("/image"):
-            self._serve_action_image(path)
+            self._serve_action_image(path, "color")
             return
         if path.startswith("/api/tasks/") and "/output/" in path:
             self._serve_output(path)
@@ -400,17 +412,19 @@ class LocalHandler(BaseHTTPRequestHandler):
             # Browsers commonly cancel an old range request when the user seeks.
             return
 
-    def _serve_action_image(self, path: str) -> None:
+    def _serve_action_image(self, path: str, kind: str = "color") -> None:
         parts = path.split("/")
         action_id = parts[4] if len(parts) == 6 else ""
-        file_path = self.server.action_store.image_path(action_id)  # type: ignore[attr-defined]
+        file_path = self.server.action_store.image_path(action_id, kind)  # type: ignore[attr-defined]
         if file_path is None:
-            self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": "动作图片不存在"})
+            label = "深度图" if kind == "depth" else "原图"
+            self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": f"动作{label}不存在"})
             return
         try:
             data = file_path.read_bytes()
         except OSError:
-            self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": "动作图片不存在"})
+            label = "深度图" if kind == "depth" else "原图"
+            self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": f"动作{label}不存在"})
             return
         self.send_response(HTTPStatus.OK)
         self._headers(mimetypes.guess_type(str(file_path))[0] or "application/octet-stream", len(data))

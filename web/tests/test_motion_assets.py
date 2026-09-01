@@ -10,6 +10,14 @@ def test_all_web_pages_load_shared_motion_runtime():
         assert '<script src="/static/motion.js"></script>' in page
 
 
+def test_all_web_pages_share_the_same_brand_header_structure():
+    for page_name in ("index.html", "prompt.html", "outputs.html"):
+        page = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
+        assert 'class="brand-lockup brand-home-link"' in page
+        assert 'class="brand-name">RH Workflow Desk</span>' in page
+        assert 'class="brand-subtitle">本地工作流提交台</span>' in page
+
+
 def test_shuffle_runtime_covers_page_navigation_and_dialogs():
     motion = (STATIC_ROOT / "motion.js").read_text(encoding="utf-8")
     assert "prepareShuffleIn" in motion
