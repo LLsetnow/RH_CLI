@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" href="data:," />
+    <title>提示词工坊 · RH Workflow Desk</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/prompt.css" />
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem("rh-workflow-theme");
+          if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        } catch (error) {}
+      }());
+    </script>
+  </head>
+  <body>
+    <div class="app-shell prompt-shell">
+      <header class="topbar">
+        <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span>
+            <span class="brand-name">RH Workflow Desk</span>
+            <span class="brand-subtitle">本地工作流提交台</span>
+          </span>
+        </a>
+        <div class="topbar-actions">
+          <a class="tool-link" href="/">工作流提交台</a>
+          <div class="local-badge"><span class="status-dot"></span>本地积木</div>
+          <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到日间模式">
+            <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☀</span><span id="themeToggleLabel">日间</span>
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="prompt-intro">
+          <div>
+            <div class="eyebrow">PROMPT BUILDER / BLOCKS</div>
+            <h1>把提示词，<br /><em>拼成一条可复用的思路。</em></h1>
+            <p>把常用表达做成固定积木，把每次变化留给自由文本。按顺序加入、调整，右侧会实时生成一份可以直接复制的提示词。</p>
+          </div>
+          <div class="prompt-intro-note" aria-label="使用方式">
+            <span class="note-index">01—03</span>
+            <span>挑选积木</span>
+            <span class="note-arrow">→</span>
+            <span>组装顺序</span>
+            <span class="note-arrow">→</span>
+            <span>复制交付</span>
+          </div>
+        </section>
+
+        <section class="prompt-builder-grid" aria-label="提示词积木编辑器">
+          <aside class="panel library-panel">
+            <div class="panel-heading prompt-panel-heading">
+              <div>
+                <div class="section-kicker">01 / BLOCK LIBRARY</div>
+                <h2>积木库</h2>
+              </div>
+              <button id="openCustomBlock" class="icon-button" type="button" aria-label="添加自定义固定积木" title="添加自定义固定积木">＋</button>
+            </div>
+            <p class="panel-description">固定积木是可反复使用的句子片段；自由文本适合每次临时补充。</p>
+            <label class="prompt-search">
+              <span class="sr-only">搜索积木</span>
+              <input id="blockSearch" type="search" placeholder="搜索积木或文本" autocomplete="off" />
+              <span class="search-glyph" aria-hidden="true">⌕</span>
+            </label>
+            <div id="tagFilters" class="tag-filters" aria-label="按标签筛选"></div>
+            <div id="libraryList" class="library-list"></div>
+            <div class="library-footer"><span id="libraryCount">0 个固定积木</span><span>点击或拖动加入</span></div>
+          </aside>
+
+          <section class="panel assembly-panel">
+            <div class="panel-heading prompt-panel-heading">
+              <div>
+                <div class="section-kicker">02 / ASSEMBLY TABLE</div>
+                <h2>组装台</h2>
+              </div>
+              <span class="auto-save-label"><span class="status-dot"></span>自动保存</span>
+            </div>
+            <div class="stage-toolbar">
+              <div><strong id="stageCount">0 个积木</strong><span class="stage-toolbar-helper">按顺序以空行连接</span></div>
+              <div class="stage-toolbar-actions">
+                <button id="addTextStage" class="secondary-button text-block-add" type="button"><span>文本积木</span></button>
+                <button id="clearStage" class="text-button" type="button">清空组装台</button>
+              </div>
+            </div>
+            <div id="stageList" class="stage-list" aria-live="polite"></div>
+            <div class="assembly-hint"><span class="hint-mark">⋮⋮</span><span>抓住左侧手柄或卡片空白处上下拖动，也可以用右侧箭头。</span></div>
+          </section>
+
+          <aside class="panel output-panel">
+            <div class="panel-heading prompt-panel-heading">
+              <div>
+                <div class="section-kicker">03 / OUTPUT</div>
+                <h2>成品提示词</h2>
+              </div>
+              <span class="output-format">TXT</span>
+            </div>
+            <div class="output-actions">
+              <button id="copyPrompt" class="secondary-button" type="button">复制文本</button>
+              <button id="downloadPrompt" class="primary-button" type="button"><span class="button-glyph">↓</span><span>导出 TXT</span></button>
+            </div>
+            <div class="output-preview-wrap">
+              <textarea id="promptOutput" readonly spellcheck="false" placeholder="加入积木后，组合文本会在这里出现"></textarea>
+              <div class="output-foot"><span id="charCount">0 字</span><span id="lineCount">0 段</span></div>
+            </div>
+            <div class="output-note"><span class="note-line"></span><span>内容只保存在当前浏览器，不会上传到 RunningHub。</span></div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <div id="customBlockModal" class="modal-backdrop" hidden>
+      <section class="custom-block-dialog" role="dialog" aria-modal="true" aria-labelledby="customBlockTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">CUSTOM BLOCK</div>
+            <h2 id="customBlockTitle">添加固定积木</h2>
+          </div>
+          <button id="closeCustomBlock" class="close-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="modal-description">把你经常重复使用的表达保存下来，下次直接从积木库加入。</p>
+        <form id="customBlockForm">
+          <label class="field-group">
+            <span class="field-label">积木名称</span>
+            <input id="customBlockName" type="text" placeholder="例如：柔和自然光" maxlength="32" required />
+          </label>
+          <label class="field-group">
+            <span class="field-label">固定文本</span>
+            <textarea id="customBlockText" placeholder="输入这块积木要保存的文本内容" maxlength="600" required></textarea>
+          </label>
+          <label class="field-group">
+            <span class="field-label">标签 <span class="field-hint inline-hint">用逗号分隔，可添加多个</span></span>
+            <input id="customBlockTags" type="text" placeholder="例如：光线，风格" maxlength="80" />
+          </label>
+          <div class="dialog-actions">
+            <button id="cancelCustomBlock" class="secondary-button" type="button">取消</button>
+            <button class="primary-button" type="submit">保存积木</button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <div id="promptToast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/prompt.js"></script>
+  </body>
+</html>

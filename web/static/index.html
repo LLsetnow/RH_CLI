@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" href="data:," />
+    <title>RH Workflow Desk</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem("rh-workflow-theme");
+          if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        } catch (error) {}
+      }());
+    </script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <div class="brand-name">RH Workflow Desk</div>
+            <div class="brand-subtitle">本地工作流提交台</div>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="local-badge"><span class="status-dot"></span>仅本机运行</div>
+          <a class="settings-button tool-entry-link" href="/prompt"><span class="settings-icon" aria-hidden="true">＋</span><span>提示词工坊</span></a>
+          <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到日间模式">
+            <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☀</span><span id="themeToggleLabel">日间</span>
+          </button>
+          <button id="openSettings" class="settings-button" type="button" aria-haspopup="dialog" aria-controls="settingsModal">
+            <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <main class="main-column">
+          <section class="intro-block">
+            <div class="eyebrow">RUNNINGHUB / API WORKFLOW</div>
+            <h1>把工作流交给队列，<br /><em>让本地输入保持在手边。</em></h1>
+            <p>上传 API 格式工作流后，系统会识别文件输入和提示词节点。提交、轮询、下载都在本机完成。</p>
+          </section>
+
+          <section class="panel workflow-panel">
+            <div class="panel-heading">
+              <div>
+                <div class="section-kicker">01 / WORKFLOW</div>
+                <h2>导入 API 工作流</h2>
+              </div>
+              <div class="workflow-heading-actions">
+                <button id="exportWorkflowButton" class="secondary-button" type="button" hidden>导出当前 API</button>
+                <div class="step-pill">JSON</div>
+              </div>
+            </div>
+            <label class="dropzone" id="workflowDropzone" for="workflowFile">
+              <input id="workflowFile" type="file" accept=".json,application/json" />
+              <span class="drop-icon" aria-hidden="true">+</span>
+              <span class="drop-title" id="workflowFilename">选择或拖入 API 格式 JSON</span>
+              <span class="drop-hint">节点格式应为 { nodeId: { inputs, class_type } }</span>
+            </label>
+            <div id="analysisStatus" class="inline-status" hidden></div>
+            <div id="workflowSummary" class="workflow-summary" hidden></div>
+            <div id="workflowInputs" class="workflow-inputs" hidden></div>
+
+            <div class="submit-strip" id="submitStrip" hidden>
+              <div class="submit-config">
+                <label class="field-label" for="keySelect">调度凭据</label>
+                <select id="keySelect">
+                  <option value="">自动选择可用 Key</option>
+                </select>
+              </div>
+              <button id="submitButton" class="primary-button" type="button">
+                <span class="button-glyph">→</span><span>加入任务队列</span>
+              </button>
+            </div>
+          </section>
+
+        </main>
+
+        <aside class="queue-column">
+          <section class="panel queue-panel">
+            <div class="queue-heading">
+              <div>
+                <div class="section-kicker">03 / TASK QUEUE</div>
+                <h2>任务队列</h2>
+              </div>
+              <div id="queueCount" class="queue-count">0</div>
+            </div>
+            <div class="queue-caption"><span class="live-line"></span>自动更新 · 历史记录持续保留</div>
+            <div id="queueList" class="queue-list">
+              <div class="empty-queue">
+                <div class="empty-line"></div>
+                <strong>队列还是空的</strong>
+                <span>导入一个工作流，准备第一次提交。</span>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="settingsModal" class="modal-backdrop" hidden>
+      <section class="panel settings-panel settings-modal-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="panel-heading compact-heading">
+          <div>
+            <div class="section-kicker">LOCAL SETTINGS</div>
+            <h2 id="settingsTitle">本地设置</h2>
+          </div>
+          <button id="closeSettings" class="close-button" type="button" aria-label="关闭设置">×</button>
+        </div>
+        <div class="settings-note settings-description">数据只写入项目 web 目录；产物目录可使用绝对路径。</div>
+        <div class="setting-grid">
+          <label class="field-group">
+            <span class="field-label">默认产物目录</span>
+            <input id="outputDir" type="text" placeholder="web/data/outputs" />
+          </label>
+          <button id="saveOutputDir" class="secondary-button" type="button">保存路径</button>
+        </div>
+        <div class="divider"></div>
+        <div class="credential-heading">
+          <div>
+            <span class="field-label">RunningHub 凭据</span>
+            <span class="field-hint">每个 Key 独立计数：普通个人 3 并发，wallet/共享或企业 100 并发</span>
+          </div>
+          <button id="refreshKeys" class="text-button" type="button">刷新全部</button>
+        </div>
+        <div id="credentialList" class="credential-list"></div>
+        <form id="credentialForm" class="credential-editor">
+          <div class="editor-title">添加一个 API Key</div>
+          <div class="editor-grid">
+            <input id="keyName" type="text" placeholder="名称，例如：主账号" />
+            <select id="keySite">
+              <option value="cn">runninghub.cn</option>
+              <option value="ai">runninghub.ai</option>
+            </select>
+            <input id="keyValue" type="password" placeholder="粘贴 API Key" autocomplete="off" />
+            <button id="addKey" class="secondary-button" type="button">检测并保存</button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <div id="taskModal" class="modal-backdrop" hidden>
+      <div class="task-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">TASK DETAIL</div>
+            <h2 id="modalTitle">任务详情</h2>
+          </div>
+          <button id="closeModal" class="close-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <div id="modalMeta" class="modal-meta"></div>
+        <div id="modalOutputs" class="modal-outputs"></div>
+      </div>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
