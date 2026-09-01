@@ -10,7 +10,7 @@
     { id: "preset-depth", title: "浅景深", text: "浅景深，主体与背景分离，背景自然虚化。", tags: ["镜头", "画面"] },
     { id: "preset-texture", title: "真实质感", text: "真实纹理与细腻表面质感，画面干净，没有多余元素。", tags: ["质量", "画面"] }
   ];
-  var state = { customBlocks: [], stage: [], filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [] };
+  var state = { customBlocks: [], stage: [], filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
   var toastTimer = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -114,7 +114,7 @@
   function stageBlockMarkup(item, index, total) {
     var isText = item.kind === "text";
     var tags = item.tags || [];
-    return '<article class="stage-block ' + (isText ? "text" : "fixed") + '" draggable="true" data-stage-index="' + index + '">' +
+    return '<article class="stage-block ' + (isText ? "text" : "fixed") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + '">' +
       '<div class="stage-block-grip" data-drag-handle title="拖动排序" aria-label="拖动排序">⋮⋮</div>' +
       '<div class="stage-block-main"><div class="stage-block-top"><span class="stage-index">' + String(index + 1).padStart(2, "0") + '</span><span class="stage-type-label">' + (isText ? "自由文本" : "固定积木") + '</span></div>' +
       '<h3>' + esc(item.title || (isText ? "自由文本" : "固定积木")) + '</h3>' +
@@ -252,13 +252,15 @@
   function captureStagePositions() {
     var positions = {};
     document.querySelectorAll(".stage-block").forEach(function (card) {
-      positions[card.dataset.stageIndex] = card.getBoundingClientRect().top;
+      var key = card.dataset.stageInstanceId || card.dataset.stageIndex;
+      positions[key] = card.getBoundingClientRect().top;
     });
     return positions;
   }
   function animateStageReflow(previousPositions) {
     document.querySelectorAll(".stage-block").forEach(function (card) {
-      var previousTop = previousPositions[card.dataset.stageIndex];
+      var key = card.dataset.stageInstanceId || card.dataset.stageIndex;
+      var previousTop = previousPositions[key];
       if (previousTop == null) return;
       var offset = previousTop - card.getBoundingClientRect().top;
       if (Math.abs(offset) < 1) return;
@@ -294,12 +296,99 @@
     card.classList.add("drop-target", insertAfter ? "drop-after" : "drop-before");
     animateStageReflow(previousPositions);
   }
-  function setDropIndicator(card, event) {
-    clearDropIndicators();
+  function findDraggedStageCard() {
+    return document.querySelector('.stage-block[data-stage-index="' + state.draggedIndex + '"]');
+  }
+  function setStageDropPreview(card, event) {
+    var draggedCard = findDraggedStageCard();
+    if (!draggedCard || draggedCard === card) return;
+    var cards = Array.from($("stageList").querySelectorAll(".stage-block"));
+    var sourceIndex = state.draggedIndex;
+    var targetIndex = cards.indexOf(card);
+    if (sourceIndex < 0 || targetIndex < 0) return;
     var rect = card.getBoundingClientRect();
     var insertAfter = event.clientY > rect.top + rect.height / 2;
+    var insertIndex = targetIndex + (insertAfter ? 1 : 0);
+    if (sourceIndex < insertIndex) insertIndex -= 1;
+    if (state.dragPreviewIndex === insertIndex) {
+      clearDropHighlights();
+      card.classList.add("drop-target", insertAfter ? "drop-after" : "drop-before");
+      return;
+    }
+    stopStageMotion();
+    var previousPositions = captureStagePositions();
+    clearDropHighlights();
     card.classList.add("drop-target", insertAfter ? "drop-after" : "drop-before");
-    return insertAfter;
+    state.dragPreviewIndex = insertIndex;
+    document.querySelectorAll(".drag-placeholder").forEach(function (marker) { marker.remove(); });
+    if (insertIndex !== sourceIndex) {
+      var marker = document.createElement("div");
+      marker.className = "drag-placeholder";
+      marker.setAttribute("aria-hidden", "true");
+      marker.innerHTML = '<span class="drag-placeholder-mark">＋</span><span>放在这里</span>';
+      var domInsertIndex = insertIndex + (sourceIndex <= insertIndex ? 1 : 0);
+      $("stageList").insertBefore(marker, cards[domInsertIndex] || null);
+    }
+    animateStageReflow(previousPositions);
+  }
+  function stageCardAtPointer(event, sourceCard) {
+    var sourceRect = sourceCard.getBoundingClientRect();
+    if (event.clientX >= sourceRect.left && event.clientX <= sourceRect.right && event.clientY >= sourceRect.top && event.clientY <= sourceRect.bottom) return sourceCard;
+    var underPointer = typeof document.elementFromPoint === "function" ? document.elementFromPoint(event.clientX, event.clientY) : null;
+    var card = underPointer && underPointer.closest ? underPointer.closest(".stage-block") : null;
+    if (card && card !== sourceCard) return card;
+    var cards = Array.from($("stageList").querySelectorAll(".stage-block")).filter(function (item) { return item !== sourceCard; });
+    var next = cards.find(function (item) {
+      var rect = item.getBoundingClientRect();
+      return event.clientY < rect.top + rect.height / 2;
+    });
+    return next || cards[cards.length - 1] || null;
+  }
+  function stageInsertIndexAtPointer(x, y, sourceCard) {
+    var sourceIndex = state.draggedIndex;
+    if (sourceIndex == null || sourceIndex < 0) return sourceIndex;
+    var targetCard = stageCardAtPointer({ clientX: x, clientY: y }, sourceCard);
+    if (!targetCard || targetCard === sourceCard) return sourceIndex;
+    var targetIndex = Number(targetCard.dataset.stageIndex);
+    if (targetIndex < 0 || targetIndex >= state.stage.length) return sourceIndex;
+    var rect = targetCard.getBoundingClientRect();
+    var insertIndex = targetIndex + (y > rect.top + rect.height / 2 ? 1 : 0);
+    if (sourceIndex < insertIndex) insertIndex -= 1;
+    return Math.max(0, Math.min(insertIndex, state.stage.length - 1));
+  }
+  function finishPointerStageDrag(commit) {
+    var drag = state.pointerDrag;
+    if (!drag) return;
+    var sourceIndex = state.draggedIndex;
+    if (drag.card.hasPointerCapture && drag.card.hasPointerCapture(drag.pointerId)) drag.card.releasePointerCapture(drag.pointerId);
+    if (typeof sourceIndex !== "number" || sourceIndex < 0 || sourceIndex >= state.stage.length || !drag.card.isConnected) {
+      clearDropIndicators();
+      state.pointerDrag = null;
+      state.draggedIndex = null;
+      state.dragPreviewIndex = null;
+      return;
+    }
+    var insertIndex = state.dragPreviewIndex;
+    if (insertIndex == null && commit) insertIndex = stageInsertIndexAtPointer(drag.x, drag.y, drag.card);
+    if (insertIndex == null) insertIndex = sourceIndex;
+    insertIndex = Math.max(0, Math.min(insertIndex, state.stage.length - 1));
+    if (commit) {
+      var item = state.stage.splice(sourceIndex, 1)[0];
+      if (item) state.stage.splice(insertIndex, 0, item);
+      clearDropIndicators();
+      drag.card.classList.remove("dragging");
+      drag.card.remove();
+      $("stageList").insertBefore(drag.card, $("stageList").querySelectorAll(".stage-block")[insertIndex] || null);
+      updateStageDom();
+      saveState();
+      renderOutput();
+    } else {
+      clearDropIndicators();
+      drag.card.classList.remove("dragging");
+    }
+    state.pointerDrag = null;
+    state.draggedIndex = null;
+    state.dragPreviewIndex = null;
   }
   function openCustomModal() {
     $("customBlockModal").hidden = false;
@@ -378,6 +467,7 @@
       if (card && event.target.closest("button")) return event.preventDefault();
       state.draggedIndex = null;
       state.draggedLibraryId = card ? card.dataset.libraryBlockId : "__free_text__";
+      state.dragPreviewIndex = null;
       clearDropIndicators();
       (card || freeCard).classList.add("dragging");
       event.dataTransfer.effectAllowed = "copy";
@@ -403,25 +493,50 @@
       var removeButton = event.target.closest("[data-remove-stage]");
       if (removeButton) removeStage(Number(removeButton.dataset.removeStage));
     });
-    $("stageList").addEventListener("dragstart", function (event) {
-      var card = event.target.closest("[data-stage-index]");
-      if (!card || event.target.closest("button, textarea, input, select, a")) return event.preventDefault();
+    $("stageList").addEventListener("pointerdown", function (event) {
+      var card = event.target.closest(".stage-block");
+      if (!card || event.target.closest("button, textarea, input, select, a")) return;
+      if (event.pointerType === "mouse" && event.button !== 0) return;
       state.draggedIndex = Number(card.dataset.stageIndex);
       state.draggedLibraryId = "";
       clearDropIndicators();
+      state.pointerDrag = { card: card, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
       card.classList.add("dragging");
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", String(state.draggedIndex));
+      if (card.setPointerCapture) card.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    document.addEventListener("pointermove", function (event) {
+      var drag = state.pointerDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      event.preventDefault();
+      var card = stageCardAtPointer(event, drag.card);
+      if (card && card !== drag.card) setStageDropPreview(card, event);
+    });
+    document.addEventListener("pointerup", function (event) {
+      if (!state.pointerDrag || state.pointerDrag.pointerId !== event.pointerId) return;
+      state.pointerDrag.x = event.clientX;
+      state.pointerDrag.y = event.clientY;
+      event.preventDefault();
+      finishPointerStageDrag(true);
+    });
+    document.addEventListener("pointercancel", function (event) {
+      if (!state.pointerDrag || state.pointerDrag.pointerId !== event.pointerId) return;
+      finishPointerStageDrag(false);
     });
     $("stageList").addEventListener("dragover", function (event) {
       var card = event.target.closest("[data-stage-index]");
-      var hasStageSource = state.draggedIndex !== null;
       var hasLibrarySource = Boolean(state.draggedLibraryId);
-      if (!hasStageSource && !hasLibrarySource) return;
+      var stageSurface = event.target === event.currentTarget;
+      if (!hasLibrarySource) return;
       if (card) {
         event.preventDefault();
-        if (hasLibrarySource) setLibraryDropPreview(card, event);
-        else setDropIndicator(card, event);
+        setLibraryDropPreview(card, event);
+        return;
+      }
+      if (stageSurface && state.dragPreviewIndex != null) {
+        event.preventDefault();
         return;
       }
       var placeholder = event.target.closest(".drag-placeholder");
@@ -447,7 +562,8 @@
       var card = event.target.closest("[data-stage-index]");
       var placeholder = event.target.closest(".drag-placeholder");
       var emptyStage = event.target.closest(".stage-empty");
-      if (state.draggedLibraryId && (card || placeholder || emptyStage)) {
+      var stageSurface = event.target === event.currentTarget;
+      if (state.draggedLibraryId && (card || placeholder || emptyStage || (stageSurface && state.dragPreviewIndex != null))) {
         event.preventDefault();
         var libraryId = state.draggedLibraryId;
         var insertIndex = state.dragPreviewIndex == null ? state.stage.length : state.dragPreviewIndex;
@@ -459,33 +575,7 @@
         state.draggedLibraryId = "";
         clearDropIndicators();
         insertLibraryBlock(libraryId, insertIndex);
-        return;
       }
-      if (state.draggedIndex === null || !card) return;
-      event.preventDefault();
-      var targetIndex = Number(card.dataset.stageIndex);
-      var rect = card.getBoundingClientRect();
-      var insertIndex = targetIndex + (event.clientY > rect.top + rect.height / 2 ? 1 : 0);
-      var sourceIndex = state.draggedIndex;
-      var draggedCard = document.querySelector('.stage-block[data-stage-index="' + sourceIndex + '"]');
-      var item = state.stage.splice(sourceIndex, 1)[0];
-      if (sourceIndex < insertIndex) insertIndex -= 1;
-      state.stage.splice(insertIndex, 0, item);
-      state.draggedIndex = null;
-      clearDropIndicators();
-      if (draggedCard && insertIndex !== sourceIndex) {
-        draggedCard.remove();
-        $("stageList").insertBefore(draggedCard, $("stageList").querySelectorAll(".stage-block")[insertIndex] || null);
-      }
-      updateStageDom();
-      saveState();
-      renderOutput();
-    });
-    $("stageList").addEventListener("dragend", function () {
-      state.draggedIndex = null;
-      state.draggedLibraryId = "";
-      clearDropIndicators();
-      document.querySelectorAll(".stage-block").forEach(function (card) { card.classList.remove("dragging"); });
     });
     $("clearStage").addEventListener("click", function () {
       if (!state.stage.length) return showToast("组装台已经是空的");

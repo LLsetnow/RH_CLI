@@ -70,10 +70,10 @@ body {
 .stage-toolbar .text-block-add > span { display: inline-flex; align-items: center; justify-content: center; overflow: visible; color: inherit; font-size: inherit; line-height: 1; text-overflow: clip; white-space: nowrap; }
 .stage-toolbar .text-button { flex: 0 0 auto; font-size: 10px; }
 .stage-list { display: grid; gap: 9px; min-height: 330px; margin-top: 12px; }
-.stage-block { display: flex; align-items: stretch; min-width: 0; border: 1px solid var(--line-soft); border-radius: 14px; background: rgba(9, 14, 27, .43); cursor: grab; transition: border-color .18s ease, background .18s ease, transform .18s ease, opacity .18s ease, box-shadow .18s ease; animation: prompt-rise .32s ease both; }
+.stage-block { display: flex; align-items: stretch; min-width: 0; border: 1px solid var(--line-soft); border-radius: 14px; background: rgba(9, 14, 27, .43); cursor: grab; touch-action: none; transition: border-color .18s ease, background .18s ease, transform .18s ease, opacity .18s ease, box-shadow .18s ease; animation: prompt-rise .32s ease both; }
 .stage-block:hover { border-color: #405271; background: rgba(23, 33, 56, .58); }
 .stage-block:active { cursor: grabbing; }
-.stage-block.dragging { opacity: .42; }
+.stage-block.dragging { opacity: .42; z-index: 1; user-select: none; }
 .stage-block.drop-target { border-color: var(--accent); background: rgba(110, 231, 216, .065); }
 .stage-block.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .stage-block.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
