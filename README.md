@@ -44,6 +44,18 @@ python -m pip install -e ".[test]"
 
 ---
 
+## 🖥️ macOS 桌面版
+
+本项目同时提供 RH Workflow Desk macOS 桌面安装包，适用于 Apple Silicon（arm64）Mac。它把本地工作流提交台、提示词积木和文件预览整合在一个窗口中；应用数据保存在 macOS 的用户数据目录，不会写入安装包。
+
+- [下载最新 macOS 安装包](https://github.com/LLsetnow/RH_CLI/releases/latest)
+- [直接下载 RH Workflow Desk 0.1.0（Apple Silicon `.dmg`）](https://github.com/LLsetnow/RH_CLI/releases/download/v0.1.0/RH-Workflow-Desk-0.1.0-arm64.dmg)
+- [查看 SHA-256 校验值](https://github.com/LLsetnow/RH_CLI/releases/download/v0.1.0/SHA256SUMS.txt)
+
+当前发布包未使用 Apple Developer ID 签名。首次打开时如果 macOS 提示无法验证开发者，请在 Finder 中右键应用选择“打开”，或到“系统设置 → 隐私与安全性”允许打开。需要从源码开发或重新打包时，见 [`web/README.md`](web/README.md)。
+
+---
+
 ## 🚀 快速开始
 
 ```bash

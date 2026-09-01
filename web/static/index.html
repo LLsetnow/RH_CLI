@@ -64,6 +64,13 @@
               <span class="drop-hint">节点格式应为 { nodeId: { inputs, class_type } }</span>
             </label>
             <div id="analysisStatus" class="inline-status" hidden></div>
+            <div id="workflowRemoteConfig" class="workflow-remote-config" hidden>
+              <label class="field-group" for="remoteWorkflowId">
+                <span class="field-label">RunningHub workflowId <span class="required-mark">必填</span></span>
+                <input id="remoteWorkflowId" type="text" inputmode="numeric" autocomplete="off" placeholder="输入 RunningHub 工作流 ID" />
+                <span class="field-hint">这是远程工作流 ID，不是本地 wf_... ID；可从 RunningHub 工作流页面 URL 获取。</span>
+              </label>
+            </div>
             <div id="workflowSummary" class="workflow-summary" hidden></div>
             <div id="workflowInputs" class="workflow-inputs" hidden></div>
 
@@ -73,6 +80,7 @@
                 <select id="keySelect">
                   <option value="">自动选择可用 Key</option>
                 </select>
+                <span class="field-hint">Ctrl + Enter 快捷提交</span>
               </div>
               <button id="submitButton" class="primary-button" type="button">
                 <span class="button-glyph">→</span><span>加入任务队列</span>
@@ -120,7 +128,10 @@
             <span class="field-label">默认产物目录</span>
             <input id="outputDir" type="text" placeholder="web/data/outputs" />
           </label>
-          <button id="saveOutputDir" class="secondary-button" type="button">保存路径</button>
+          <div class="setting-actions">
+            <button id="chooseOutputDir" class="secondary-button" type="button">选择文件夹</button>
+            <button id="saveOutputDir" class="secondary-button" type="button">保存路径</button>
+          </div>
         </div>
         <div class="divider"></div>
         <div class="credential-heading">
@@ -155,6 +166,7 @@
           <button id="closeModal" class="close-button" type="button" aria-label="关闭">×</button>
         </div>
         <div id="modalMeta" class="modal-meta"></div>
+        <div id="modalDiagnostics" class="modal-diagnostics"></div>
         <div id="modalOutputs" class="modal-outputs"></div>
       </div>
     </div>

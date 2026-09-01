@@ -1,8 +1,9 @@
 (function () {
   "use strict";
 
-  var appState = { workflowId: "", workflow: null, workflowName: "", analysis: null, keys: [], tasks: [], settings: null, loading: false };
+  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", analysis: null, workflowDirty: false, keys: [], tasks: [], settings: null, loading: false };
   var previewUrls = {};
+  var credentialBusy = {};
   var toastTimer = 0;
   var statusLabels = {
     queued: "排队中", submitting: "提交中", running: "执行中", completed: "已完成",
@@ -21,6 +22,15 @@
     var date = new Date(Number(timestamp));
     if (isNaN(date.getTime())) return "—";
     return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+  function relativeTime(timestamp) {
+    var value = Number(timestamp);
+    if (!value || isNaN(value)) return "未查询";
+    var seconds = Math.max(0, Math.floor((Date.now() - value) / 1000));
+    if (seconds < 60) return "刚刚";
+    if (seconds < 3600) return Math.floor(seconds / 60) + " 分钟前";
+    if (seconds < 86400) return Math.floor(seconds / 3600) + " 小时前";
+    return formatTime(value);
   }
   function statusLabel(status) { return statusLabels[status] || status || "未知"; }
   function showToast(message, isError) {
@@ -46,6 +56,24 @@
     });
   }
 
+  function credentialBalanceMarkup(key) {
+    if (!Number(key.balance_checked_at)) {
+      return '<div class="credential-balance credential-balance-empty"><span>余额</span><span>未查询</span></div>';
+    }
+    var symbol = key.symbol || (key.site === "cn" ? "¥" : "$");
+    var balance = key.balance == null || key.balance === "" ? "—" : key.balance;
+    var coins = key.coins == null || key.coins === "" ? "—" : key.coins;
+    return '<div class="credential-balance"><span><span class="credential-balance-label">余额</span> <strong>' + esc(symbol) + esc(balance) + '</strong><span class="credential-coins"> · ' + esc(coins) + ' RH 币</span></span>' +
+      '<span class="credential-balance-time">更新于 ' + esc(relativeTime(key.balance_checked_at)) + '</span></div>';
+  }
+
+  function credentialActionButton(key, action, label, className) {
+    var busy = credentialBusy[key.id] === action;
+    var busyLabel = action === "check-key" ? "检测中…" : (action === "refresh-balance" ? "刷新中…" : "删除中…");
+    return '<button class="credential-action ' + className + '" type="button" data-action="' + action + '" data-key-id="' + esc(key.id) + '"' + (busy ? ' disabled' : '') + '>' +
+      esc(busy ? busyLabel : label) + '</button>';
+  }
+
   function renderKeys() {
     var list = $("credentialList");
     var select = $("keySelect");
@@ -62,9 +90,11 @@
           '<div class="credential-tags"><span class="status-chip ' + statusClass + '">' + statusText + '</span>' +
           '<span class="capacity-chip">' + esc(key.capacity) + ' 并发</span></div></div>' +
           '<div class="credential-key">' + esc(key.masked_key) + ' · ' + esc(key.site) + '</div>' +
+          credentialBalanceMarkup(key) +
           '<div class="credential-bottom"><span>运行 ' + esc(key.active_tasks) + ' / ' + esc(key.capacity) + ' · ' + esc(key.api_type || "类型待识别") + '</span>' +
-          '<span class="credential-actions"><button type="button" data-action="check-key" data-key-id="' + esc(key.id) + '">检测</button>' +
-          '<button type="button" data-action="delete-key" data-key-id="' + esc(key.id) + '">删除</button></span></div></div>';
+          '<span class="credential-actions">' + credentialActionButton(key, "check-key", "检测", "credential-action-check") +
+          credentialActionButton(key, "refresh-balance", "刷新余额", "credential-action-refresh") +
+          credentialActionButton(key, "delete-key", "删除", "credential-action-delete") + '</span></div></div>';
       }).join("");
     }
     var options = '<option value="">自动选择可用 Key</option>';
@@ -73,6 +103,18 @@
     });
     select.innerHTML = options;
     if (current && appState.keys.some(function (key) { return key.id === current && key.status === "ready"; })) select.value = current;
+  }
+
+  function formatTaskCost(task) {
+    if (!task || task.cost == null || String(task.cost).trim() === "" || !task.cost_type) {
+      return task && task.status === "completed" ? "费用未返回" : "";
+    }
+    if (task.cost_type === "coins") return "消耗 " + String(task.cost) + " RH 币";
+    if (task.cost_type === "money") {
+      var symbol = task.key_site === "ai" ? "$" : (task.key_site === "cn" ? "¥" : "");
+      return "消耗 " + (symbol || "金额 ") + String(task.cost);
+    }
+    return "";
   }
 
   function renderTasks() {
@@ -85,16 +127,18 @@
     }
     list.innerHTML = tasks.map(function (task) {
       var outputCount = (task.outputs || []).filter(function (item) { return item.kind === "file"; }).length;
+      var outputLabel = outputCount ? outputCount + " 个产物" : (task.status === "completed" ? "无文件产物" : "");
+      var costLabel = formatTaskCost(task);
       var canCancel = ["queued", "submitting", "running"].indexOf(task.status) !== -1;
       var canDelete = ["completed", "failed", "cancelled", "interrupted"].indexOf(task.status) !== -1;
       var statusClass = esc(task.status);
       return '<article class="task-card ' + statusClass + '" data-task-id="' + esc(task.id) + '">' +
         '<div class="task-top"><div class="task-name" title="' + esc(task.workflow_name) + '">' + esc(task.workflow_name) + '</div>' +
         '<span class="task-status ' + statusClass + '">' + statusLabel(task.status) + '</span></div>' +
-        '<div class="task-meta"><span>' + esc(task.key_name || "自动调度") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
+        '<div class="task-meta"><span>' + esc(task.key_name || "自动调度") + '</span><span>·</span><span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
         '<div class="task-progress">' + esc(task.progress || "等待调度…") + (task.error ? '<br /><span style="color:var(--danger)">' + esc(task.error) + '</span>' : "") + '</div>' +
-        '<div class="task-footer"><span class="task-output-count">' + (outputCount ? outputCount + ' 个产物' : (task.status === "completed" ? "无文件产物" : "")) + '</span>' +
-        '<span class="task-actions"><button type="button" data-action="open-task">打开</button>' +
+        '<div class="task-footer"><span class="task-footer-info"><span class="task-output-count">' + esc(outputLabel) + '</span>' + (costLabel ? '<span class="task-cost">' + esc(costLabel) + '</span>' : '') + '</span>' +
+        '<span class="task-actions"><button class="task-load-button" type="button" data-action="load-task">加载</button><button type="button" data-action="open-task">打开</button>' +
         (canCancel ? '<button type="button" data-action="cancel-task">取消</button>' : "") +
         (canDelete ? '<button type="button" data-action="delete-task">删除</button>' : "") + '</span></div></article>';
     }).join("");
@@ -124,6 +168,12 @@
     element.textContent = message || "";
   }
 
+  function setRemoteWorkflowId(value) {
+    appState.remoteWorkflowId = String(value || "").trim();
+    var input = $("remoteWorkflowId");
+    if (input) input.value = appState.remoteWorkflowId;
+  }
+
   function updateThemeToggle() {
     var button = $("themeToggle");
     var icon = $("themeToggleIcon");
@@ -136,22 +186,122 @@
     button.title = isLight ? "切换到夜间模式" : "切换到日间模式";
   }
 
+  function jumpToInput(inputId) {
+    var card = document.querySelector('.input-card[data-input-id="' + CSS.escape(inputId) + '"]');
+    if (!card) return;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.classList.remove("input-target");
+    void card.offsetWidth;
+    card.classList.add("input-target");
+    window.setTimeout(function () { card.classList.remove("input-target"); }, 1300);
+  }
+
+  function applyRandomNoiseValues(workflow, values) {
+    Object.keys(values || {}).forEach(function (nodeId) {
+      var config = values[nodeId] || {};
+      var node = workflow[nodeId];
+      if (!node || typeof node !== "object") return;
+      if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+      var seedField = Object.prototype.hasOwnProperty.call(node.inputs, "noise_seed") || !Object.prototype.hasOwnProperty.call(node.inputs, "seed") ? "noise_seed" : "seed";
+      var rawSeed = String(config.seed == null ? "" : config.seed).trim();
+      node.inputs[seedField] = /^-?\d+$/.test(rawSeed) ? Number(rawSeed) : rawSeed;
+      node.inputs.mode = String(config.mode || "randomize").trim().toLowerCase();
+    });
+    return workflow;
+  }
+
+  function restoreInputValues(values) {
+    values = values || {};
+    Object.keys(values.files || {}).forEach(function (inputId) {
+      var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
+      var value = String(values.files[inputId] || "").trim();
+      if (!path) return;
+      path.value = value;
+      if (value) previewLocalPath(inputId, value);
+    });
+    Object.keys(values.prompts || {}).forEach(function (inputId) {
+      var prompt = document.querySelector('.prompt-value[data-input-id="' + CSS.escape(inputId) + '"]');
+      if (prompt) prompt.value = String(values.prompts[inputId] == null ? "" : values.prompts[inputId]);
+    });
+    Object.keys(values.randomNoise || {}).forEach(function (nodeId) {
+      var config = values.randomNoise[nodeId] || {};
+      var seed = document.querySelector('.random-noise-seed[data-node-id="' + CSS.escape(nodeId) + '"]');
+      var mode = document.querySelector('.random-noise-mode[data-node-id="' + CSS.escape(nodeId) + '"]');
+      if (seed && config.seed != null) seed.value = String(config.seed);
+      if (mode && (config.mode === "fixed" || config.mode === "randomize")) mode.value = config.mode;
+    });
+  }
+
+  function nextWorkflowNodeId() {
+    var maxId = 0;
+    Object.keys(appState.workflow || {}).forEach(function (nodeId) {
+      if (/^\d+$/.test(nodeId)) maxId = Math.max(maxId, Number(nodeId));
+    });
+    return String(maxId + 1);
+  }
+
+  function addRandomNoiseNode() {
+    if (!appState.workflow || !appState.analysis) {
+      showToast("请先导入或加载 API 工作流", true);
+      return;
+    }
+    var values = collectInputs();
+    var nodeId = nextWorkflowNodeId();
+    appState.workflow[nodeId] = {
+      inputs: { noise_seed: 0, mode: "randomize" },
+      class_type: "RandomNoise",
+      _meta: { title: "RandomNoise" }
+    };
+    var analysis = JSON.parse(JSON.stringify(appState.analysis));
+    analysis.random_noise_inputs = analysis.random_noise_inputs || [];
+    analysis.random_noise_inputs.push({
+      id: nodeId,
+      node_id: nodeId,
+      title: "RandomNoise",
+      class_type: "RandomNoise",
+      seed_field: "noise_seed",
+      mode_field: "mode",
+      seed: 0,
+      mode: "randomize"
+    });
+    analysis.random_noise_count = analysis.random_noise_inputs.length;
+    appState.analysis = analysis;
+    appState.workflowDirty = true;
+    values.randomNoise[nodeId] = { seed: "0", mode: "randomize" };
+    renderAnalysis(analysis);
+    restoreInputValues(values);
+    jumpToInput(nodeId);
+    showToast("已添加 RandomNoise 节点 " + nodeId);
+  }
+
   function renderAnalysis(analysis) {
     var summary = $("workflowSummary");
     var inputs = $("workflowInputs");
     var files = analysis.file_inputs || [];
     var prompts = analysis.prompt_inputs || [];
+    var randomNoise = analysis.random_noise_inputs || [];
     summary.hidden = false;
     summary.innerHTML = '<div class="summary-item"><strong>' + files.length + '</strong> 个文件输入</div>' +
       '<div class="summary-item"><strong>' + prompts.length + '</strong> 个提示词节点</div>' +
+      '<div class="summary-item"><strong>' + randomNoise.length + '</strong> 个 RandomNoise</div>' +
       '<div class="summary-item">已完成节点扫描</div>';
-    var html = "";
+    var html = '<div class="input-node-toolbar"><div><span class="input-node-toolbar-title">可添加输入节点</span><small>节点会写入当前 API 工作流</small></div><button class="secondary-button" type="button" data-action="add-random-noise">＋ RandomNoise</button></div>';
+    var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; }));
+    if (inputNodes.length) {
+      html += '<div class="input-jump-bar"><div class="input-jump-heading"><span>输入节点</span><small>点击标签快速定位</small></div><div class="input-jump-list">';
+      inputNodes.forEach(function (entry) {
+        var item = entry.item;
+        var icon = entry.kind === "file" ? "▧" : (entry.kind === "prompt" ? "Aa" : "RN");
+        html += '<button class="input-jump-tag ' + entry.kind + '" type="button" data-action="jump-input" data-input-id="' + esc(item.id) + '" title="定位到 ' + esc(item.id) + '"><span class="input-jump-icon" aria-hidden="true">' + icon + '</span><span class="input-jump-title">' + esc(item.title || item.class_type) + '</span><code>' + esc(item.id) + '</code></button>';
+      });
+      html += '</div></div>';
+    }
     if (files.length) {
       html += '<div class="section-kicker">文件输入 · 必填</div>';
       files.forEach(function (item) {
         var originalFileValue = String(item.default || "");
         var visibleFileValue = /^(\/|[A-Za-z]:[\\/])/.test(originalFileValue) ? originalFileValue : "";
-        html += '<div class="input-card file-input-card"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><span class="field-code">' + esc(item.id) + '</span></div>' +
+        html += '<div class="input-card file-input-card" data-input-id="' + esc(item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><span class="field-code">' + esc(item.id) + '</span></div>' +
           '<div class="file-input-layout"><div class="file-input-controls">' +
           '<div class="file-dropzone" data-action="pick-file" data-input-id="' + esc(item.id) + '" tabindex="0" role="group" aria-label="文件拖放区域">' +
           '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">拖入或点击“预览”查看图片</small></span>' +
@@ -164,21 +314,45 @@
     if (prompts.length) {
       html += '<div class="section-kicker prompt-section-label">提示词节点 · 可选</div>';
       prompts.forEach(function (item) {
-        html += '<div class="input-card"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><span class="field-code">' + esc(item.id) + '</span></div>' +
+        html += '<div class="input-card" data-input-id="' + esc(item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><span class="field-code">' + esc(item.id) + '</span></div>' +
           '<textarea class="prompt-value" data-input-id="' + esc(item.id) + '" placeholder="可以直接输入，也可以从下方加载 .txt">' + esc(item.default || "") + '</textarea>' +
           '<div class="prompt-tools"><input class="prompt-picker" data-input-id="' + esc(item.id) + '" type="file" accept=".txt,text/plain" hidden /><button class="file-button" data-action="pick-prompt" data-input-id="' + esc(item.id) + '" type="button">加载 TXT</button><span class="file-meta" data-prompt-meta-id="' + esc(item.id) + '">读取内容后仍可继续编辑</span></div></div>';
       });
     }
-    if (!files.length && !prompts.length) html = '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>这个工作流可能只依赖固定节点参数。</span></div>';
+    if (randomNoise.length) {
+      html += '<div class="section-kicker random-noise-section-label">RandomNoise · 可编辑</div>';
+      randomNoise.forEach(function (item) {
+        var seed = item.seed == null || item.seed === "" ? 0 : item.seed;
+        var mode = item.mode === "fixed" ? "fixed" : "randomize";
+        html += '<div class="input-card random-noise-card" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title || "RandomNoise") + '</div><div class="input-type">' + esc(item.class_type || "RandomNoise") + '</div></div><span class="field-code">' + esc(item.id) + '</span></div>' +
+          '<div class="random-noise-grid"><label class="field-group"><span class="field-label">随机种子</span><input class="random-noise-seed" data-node-id="' + esc(item.node_id || item.id) + '" type="number" inputmode="numeric" step="1" value="' + esc(seed) + '" /></label>' +
+          '<label class="field-group"><span class="field-label">模式</span><select class="random-noise-mode" data-node-id="' + esc(item.node_id || item.id) + '"><option value="fixed"' + (mode === "fixed" ? " selected" : "") + '>fixed</option><option value="randomize"' + (mode === "randomize" ? " selected" : "") + '>randomize</option></select></label></div>' +
+          '<div class="file-meta">导出或提交时写入 ' + esc(item.seed_field || "noise_seed") + ' 和 mode</div></div>';
+      });
+    }
+    if (!files.length && !prompts.length && !randomNoise.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>可以点击上方“＋ RandomNoise”添加随机噪声节点。</span></div>';
     inputs.innerHTML = html;
     inputs.hidden = false;
     $("submitStrip").hidden = false;
+    files.forEach(function (item) {
+      var value = String(item.default || "").trim();
+      if (/^(\/|[A-Za-z]:[\\/])/.test(value) || appState.workflowSourceDir) previewLocalPath(item.id, value);
+    });
   }
 
   function analyzeFile(file) {
     if (!file) return;
     setAnalysisStatus("正在读取并分析工作流…", false);
     $("workflowFilename").textContent = file.name;
+    $("workflowRemoteConfig").hidden = true;
+    setRemoteWorkflowId("");
+    appState.workflowSourceDir = "";
+    if (window.rhElectron && typeof window.rhElectron.getPathForFile === "function") {
+      try {
+        var workflowPath = String(window.rhElectron.getPathForFile(file) || "").trim();
+        if (workflowPath) appState.workflowSourceDir = workflowPath.replace(/[\\/][^\\/]*$/, "");
+      } catch (error) {}
+    }
     file.text().then(function (content) {
       return jsonRequest("/api/workflows/analyze", "POST", { filename: file.name, content: content }).then(function (data) {
         return { data: data, workflow: JSON.parse(content) };
@@ -186,21 +360,55 @@
     }).then(function (result) {
       var data = result.data;
       appState.workflowId = data.workflow_id;
+      setRemoteWorkflowId(data.remote_workflow_id || (data.analysis && data.analysis.remote_workflow_id) || "");
       appState.workflow = result.workflow;
       appState.workflowName = file.name;
+      appState.workflowDirty = false;
       appState.analysis = data.analysis;
       renderAnalysis(data.analysis);
+      $("workflowRemoteConfig").hidden = false;
       $("exportWorkflowButton").hidden = false;
       setAnalysisStatus("工作流已识别，可以准备输入并提交。", false);
       showToast("工作流分析完成");
     }).catch(function (error) {
       appState.workflowId = "";
+      setRemoteWorkflowId("");
       appState.workflow = null;
       appState.workflowName = "";
+      appState.workflowSourceDir = "";
+      appState.workflowDirty = false;
       $("workflowInputs").hidden = true;
       $("submitStrip").hidden = true;
+      $("workflowRemoteConfig").hidden = true;
       $("exportWorkflowButton").hidden = true;
       setAnalysisStatus(error.message, true);
+    });
+  }
+
+  function loadTask(task) {
+    return request("/api/tasks/" + encodeURIComponent(task.id) + "/load").then(function (data) {
+      var savedTask = data.task || task;
+      appState.workflowId = data.workflow_id || "";
+      appState.remoteWorkflowId = String(savedTask.remote_workflow_id || (data.analysis && data.analysis.remote_workflow_id) || "").trim();
+      appState.workflow = data.workflow || null;
+      appState.workflowName = savedTask.workflow_name || data.filename || "workflow_api.json";
+      appState.workflowSourceDir = "";
+      appState.workflowDirty = false;
+      appState.analysis = data.analysis || {};
+      renderAnalysis(appState.analysis);
+      setRemoteWorkflowId(appState.remoteWorkflowId);
+      restoreInputValues({
+        files: savedTask.files || {},
+        prompts: savedTask.prompts || {},
+        randomNoise: savedTask.random_noise || {}
+      });
+      $("workflowFilename").textContent = "已加载 " + appState.workflowName;
+      $("workflowRemoteConfig").hidden = false;
+      $("exportWorkflowButton").hidden = false;
+      setAnalysisStatus("已加载任务数据，可以继续修改后提交。", false);
+      var panel = document.querySelector(".workflow-panel");
+      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      showToast("已加载任务：" + appState.workflowName);
     });
   }
 
@@ -235,15 +443,18 @@
     var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
     var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
     var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+    var card = zone && zone.closest(".file-input-card");
     var selectedPath = droppedFilePath(event, file);
     updateImagePreview(inputId, file);
     if (path) path.value = selectedPath;
+    if (card) card.classList.remove("is-loading", "is-dragging");
     if (zone) {
       zone.classList.remove("is-loading", "is-dragging");
       zone.classList.add("is-ready");
       zone.querySelector(".file-drop-title").textContent = "已选择 " + file.name;
       zone.querySelector(".file-drop-hint").textContent = selectedPath ? "路径已记录，可重新拖入替换" : "预览已显示，请点击旁边的选择文件记录路径";
     }
+    if (card) card.classList.add("is-ready");
     if (meta) meta.textContent = selectedPath ? file.name + " · 路径已记录，不会复制文件" : file.name + " · 已显示预览；请点击旁边的选择文件同步绝对路径";
   }
 
@@ -259,23 +470,53 @@
   }
 
   function pickNativeInput(inputId, button) {
-      var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
-      var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
-      var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+    var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
+    var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
+    var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+    var card = zone && zone.closest(".file-input-card");
     var original = button.textContent;
     button.disabled = true;
     button.textContent = "选择中…";
     request("/api/pick-file", { method: "POST" }).then(function (selected) {
       if (path) path.value = selected.path;
       setPathPreview(inputId, selected);
+      if (card) card.classList.remove("is-loading", "is-dragging");
       if (zone) {
         zone.classList.remove("is-loading", "is-dragging");
         zone.classList.add("is-ready");
         zone.querySelector(".file-drop-title").textContent = "已选择 " + selected.name;
         zone.querySelector(".file-drop-hint").textContent = "路径已记录，可重新选择";
       }
+      if (card) card.classList.add("is-ready");
       if (meta) meta.textContent = selected.name + " · 路径已记录，不会复制文件";
       showToast("已记录本机文件路径");
+    }).catch(function (error) {
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = original;
+    });
+  }
+
+  function chooseOutputDirectory() {
+    if (window.rhElectron && typeof window.rhElectron.selectDirectory === "function") {
+      return Promise.resolve(window.rhElectron.selectDirectory()).then(function (path) {
+        return String(path || "").trim();
+      });
+    }
+    return request("/api/pick-directory", { method: "POST" }).then(function (selected) {
+      return String(selected.path || "").trim();
+    });
+  }
+
+  function pickOutputDirectory(button) {
+    var original = button.textContent;
+    button.disabled = true;
+    button.textContent = "选择中…";
+    chooseOutputDirectory().then(function (path) {
+      if (!path) return;
+      $("outputDir").value = path;
+      showToast("已选择产物目录，请点击“保存路径”确认");
     }).catch(function (error) {
       showToast(error.message, true);
     }).finally(function () {
@@ -294,6 +535,40 @@
     preview.querySelector("img").alt = selected.name || "输入图片预览";
     preview.querySelector(".file-preview-name").textContent = selected.name || "";
     preview.hidden = false;
+  }
+
+  function previewLocalPath(inputId, value) {
+    var normalized = String(value || "").trim();
+    var requestPath = normalized;
+    if (!/^(\/|[A-Za-z]:[\\/])/.test(requestPath) && appState.workflowSourceDir && requestPath && !/^[a-z]+:\/\//i.test(requestPath)) {
+      requestPath = appState.workflowSourceDir.replace(/[\\/]$/, "") + "/" + requestPath.replace(/^[/\\]+/, "");
+    }
+    if (!/^(\/|[A-Za-z]:[\\/])/.test(requestPath)) {
+      clearImagePreview(inputId);
+      return;
+    }
+    request("/api/preview-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: requestPath })
+    }).then(function (selected) {
+      var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
+      if (!path || (path.value.trim() !== normalized && path.value.trim() !== requestPath && path.value.trim() !== "")) return;
+      if (path.value.trim() !== selected.path) path.value = selected.path;
+      var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+      var card = zone && zone.closest(".file-input-card");
+      var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
+      setPathPreview(inputId, selected);
+      if (card) card.classList.add("is-ready");
+      if (zone) {
+        zone.classList.add("is-ready");
+        zone.querySelector(".file-drop-title").textContent = "已识别 " + selected.name;
+        zone.querySelector(".file-drop-hint").textContent = selected.preview_url ? "已从本机路径加载预览，可重新选择" : "路径已记录，可重新选择";
+      }
+      if (meta) meta.textContent = selected.preview_url ? selected.name + " · 已从本机路径加载预览" : selected.name + " · 路径已记录，不会复制文件";
+    }).catch(function () {
+      // 工作流中的旧路径可能已经失效；保留路径，让用户可以直接替换它。
+    });
   }
 
   function updateImagePreview(inputId, file) {
@@ -320,7 +595,14 @@
     document.querySelectorAll(".file-path").forEach(function (input) { files[input.dataset.inputId] = input.value.trim(); });
     var prompts = {};
     document.querySelectorAll(".prompt-value").forEach(function (input) { prompts[input.dataset.inputId] = input.value; });
-    return { files: files, prompts: prompts };
+    var randomNoise = {};
+    document.querySelectorAll(".random-noise-card").forEach(function (card) {
+      var nodeId = card.dataset.nodeId || card.dataset.inputId;
+      var seed = card.querySelector(".random-noise-seed");
+      var mode = card.querySelector(".random-noise-mode");
+      randomNoise[nodeId] = { seed: seed ? seed.value.trim() : "", mode: mode ? mode.value.trim() : "" };
+    });
+    return { files: files, prompts: prompts, randomNoise: randomNoise };
   }
 
   function exportWorkflow() {
@@ -331,6 +613,9 @@
     } catch (error) {
       return showToast("当前工作流无法导出", true);
     }
+    delete workflow.__rh_meta__;
+    var currentRemoteWorkflowId = $("remoteWorkflowId") ? $("remoteWorkflowId").value.trim() : "";
+    if (currentRemoteWorkflowId) workflow.__rh_meta__ = { workflowId: currentRemoteWorkflowId };
     var values = collectInputs();
     var changes = 0;
     [values.files, values.prompts].forEach(function (group) {
@@ -351,6 +636,8 @@
         changes += 1;
       });
     });
+    applyRandomNoiseValues(workflow, values.randomNoise);
+    changes += Object.keys(values.randomNoise).length * 2;
     var sourceName = appState.workflowName || "workflow_api.json";
     var stem = sourceName.replace(/\.json$/i, "") || "workflow";
     var blob = new Blob([JSON.stringify(workflow, null, 2) + "\n"], { type: "application/json;charset=utf-8" });
@@ -362,21 +649,46 @@
     link.click();
     link.remove();
     window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    showToast("已导出当前 API 工作流，保留了 " + changes + " 个输入配置");
+    showToast("已导出当前 API 工作流，保留了 " + changes + " 个输入配置" + (currentRemoteWorkflowId ? "和 workflowId" : ""));
   }
 
   function submitTask() {
+    var button = $("submitButton");
+    if (button.disabled) return;
     if (!appState.workflowId) return showToast("请先导入 API 工作流", true);
+    var currentRemoteWorkflowId = $("remoteWorkflowId") ? $("remoteWorkflowId").value.trim() : "";
+    if (!currentRemoteWorkflowId) {
+      showToast("请先填写 RunningHub workflowId", true);
+      $("remoteWorkflowId").focus();
+      return;
+    }
     var values = collectInputs();
     var required = (appState.analysis && appState.analysis.file_inputs) || [];
     var missing = required.some(function (item) { return !values.files[item.id]; });
     if (missing) return showToast("请先为所有文件输入选择本地文件", true);
-    var button = $("submitButton");
+    var invalidNoise = Object.keys(values.randomNoise).some(function (nodeId) {
+      var config = values.randomNoise[nodeId];
+      return !/^-?\d+$/.test(String(config.seed || "").trim()) || ["fixed", "randomize"].indexOf(config.mode) === -1;
+    });
+    if (invalidNoise) return showToast("RandomNoise 的随机种子必须是整数，模式只能是 fixed 或 randomize", true);
+    var workflowPayload = null;
+    if (appState.workflowDirty && appState.workflow) {
+      try {
+        workflowPayload = JSON.parse(JSON.stringify(appState.workflow));
+        applyRandomNoiseValues(workflowPayload, values.randomNoise);
+      } catch (error) {
+        return showToast("当前工作流无法保存", true);
+      }
+    }
     button.disabled = true;
     jsonRequest("/api/tasks", "POST", {
       workflow_id: appState.workflowId,
+      workflow: workflowPayload,
+      workflow_name: appState.workflowName,
+      remote_workflow_id: currentRemoteWorkflowId,
       files: values.files,
       prompts: values.prompts,
+      random_noise: values.randomNoise,
       key_id: $("keySelect").value || null,
       output_dir: $("outputDir").value.trim() || null
     }).then(function () {
@@ -385,10 +697,53 @@
     }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
   }
 
+  function stageLabel(stage) {
+    return {
+      queue: "排队",
+      dispatch: "调度",
+      prepare: "准备",
+      upload: "输入上传",
+      submit: "提交",
+      poll: "远程轮询",
+      download: "保存产物",
+      complete: "完成",
+      failed: "失败",
+      cancelled: "取消"
+    }[stage] || stage || "阶段";
+  }
+
+  function logTime(timestamp) {
+    if (!timestamp) return "—";
+    var date = new Date(Number(timestamp));
+    if (isNaN(date.getTime())) return "—";
+    return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function jsonPreview(value) {
+    try { return esc(JSON.stringify(value, null, 2)); } catch (error) { return esc(String(value)); }
+  }
+
+  function renderDiagnostics(task) {
+    var diagnostics = $("modalDiagnostics");
+    var logs = Array.isArray(task.stage_logs) ? task.stage_logs : [];
+    var errorDetail = task.error_detail;
+    var hasErrorDetail = errorDetail && (typeof errorDetail !== "object" || Object.keys(errorDetail).length > 0);
+    var logMarkup = logs.length ? '<ol class="stage-log-list">' + logs.map(function (log) {
+      var detail = log && log.detail != null ? '<details class="stage-log-detail"><summary>查看阶段详情</summary><pre>' + jsonPreview(log.detail) + '</pre></details>' : '';
+      return '<li class="stage-log-item ' + (log.level === "error" ? "error" : (log.level === "warning" ? "warning" : "")) + '">' +
+        '<div class="stage-log-marker"></div><div class="stage-log-body"><div class="stage-log-top"><span class="stage-log-stage">' + esc(stageLabel(log.stage)) + '</span><time>' + logTime(log.at) + '</time></div>' +
+        '<div class="stage-log-message">' + esc(log.message || "") + '</div>' + detail + '</div></li>';
+    }).join("") + '</ol>' : '<div class="diagnostics-empty">暂无阶段日志</div>';
+    var errorMarkup = hasErrorDetail ? '<details class="error-detail" open><summary>错误详情</summary><pre>' + jsonPreview(errorDetail) + '</pre></details>' : '';
+    diagnostics.innerHTML = '<section class="diagnostics-section"><div class="diagnostics-heading"><span>阶段日志</span><span class="diagnostics-count">' + logs.length + '</span></div>' + logMarkup + errorMarkup + '</section>';
+  }
+
   function openTask(task) {
     $("modalTitle").textContent = task.workflow_name || "任务详情";
     var meta = $("modalMeta");
-    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>' + esc(task.key_name || "自动调度") + '</span><span>' + esc(task.remote_task_id || "尚未返回 taskId") + '</span><span>' + formatTime(task.created_at) + '</span>';
+    var costLabel = formatTaskCost(task);
+    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>' + esc(task.key_name || "自动调度") + '</span><span>workflowId：' + esc(task.remote_workflow_id || "未记录") + '</span><span>taskId：' + esc(task.remote_task_id || "尚未返回") + '</span>' + (costLabel ? '<span>' + esc(costLabel) + '</span>' : '') + '<span>' + formatTime(task.created_at) + '</span>';
+    renderDiagnostics(task);
     var outputs = $("modalOutputs");
     var items = task.outputs || [];
     if (!items.length) outputs.innerHTML = '<div class="output-empty">任务当前没有可预览的产物。</div>';
@@ -414,6 +769,10 @@
     if (!card || !action) return;
     var task = appState.tasks.find(function (item) { return item.id === card.dataset.taskId; });
     if (!task) return;
+    if (action === "load-task") {
+      loadTask(task).catch(function (error) { showToast(error.message, true); });
+      return;
+    }
     if (action === "open-task") openTask(task);
     if (action === "cancel-task") {
       jsonRequest("/api/tasks/" + encodeURIComponent(task.id) + "/cancel", "POST", {}).then(function () {
@@ -431,22 +790,39 @@
   }
 
   function handleCredentialClick(event) {
-    var action = event.target.dataset.action;
-    var keyId = event.target.dataset.keyId;
+    var trigger = event.target.closest("button[data-action]");
+    if (!trigger) return;
+    var action = trigger.dataset.action;
+    var keyId = trigger.dataset.keyId;
     if (!action || !keyId) return;
-    if (action === "check-key") {
-      event.target.disabled = true;
-      request("/api/keys/" + encodeURIComponent(keyId) + "/check", { method: "POST" }).then(function (data) {
-        showToast(data.key.status === "ready" ? "凭据检测成功" : data.key.status_message, data.key.status !== "ready");
+    if (credentialBusy[keyId]) return;
+    if (action === "check-key" || action === "refresh-balance") {
+      credentialBusy[keyId] = action;
+      renderKeys();
+      var endpoint = action === "check-key" ? "/check" : "/balance";
+      request("/api/keys/" + encodeURIComponent(keyId) + endpoint, { method: "POST" }).then(function (data) {
+        if (action === "check-key") {
+          showToast(data.key.status === "ready" ? "凭据检测成功，余额已更新" : data.key.status_message, data.key.status !== "ready");
+        } else {
+          showToast("余额已更新");
+        }
         return refresh(true);
-      }).catch(function (error) { showToast(error.message, true); }).finally(function () { event.target.disabled = false; });
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () {
+        delete credentialBusy[keyId];
+        renderKeys();
+      });
     }
     if (action === "delete-key") {
       if (!window.confirm("确定删除这个本地凭据吗？")) return;
+      credentialBusy[keyId] = action;
+      renderKeys();
       request("/api/keys/" + encodeURIComponent(keyId), { method: "DELETE" }).then(function () {
         showToast("凭据已删除");
         refresh(true);
-      }).catch(function (error) { showToast(error.message, true); });
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () {
+        delete credentialBusy[keyId];
+        renderKeys();
+      });
     }
   }
 
@@ -459,6 +835,7 @@
       updateThemeToggle();
     });
     $("workflowFile").addEventListener("change", function () { analyzeFile(this.files[0]); });
+    $("remoteWorkflowId").addEventListener("input", function () { appState.remoteWorkflowId = this.value.trim(); });
     var dropzone = $("workflowDropzone");
     ["dragenter", "dragover"].forEach(function (name) { dropzone.addEventListener(name, function (event) { event.preventDefault(); dropzone.classList.add("dragging"); }); });
     ["dragleave", "drop"].forEach(function (name) { dropzone.addEventListener(name, function (event) { event.preventDefault(); dropzone.classList.remove("dragging"); }); });
@@ -468,9 +845,17 @@
       if (!trigger || !$("workflowInputs").contains(trigger)) return;
       var action = trigger.dataset.action;
       var inputId = trigger.dataset.inputId;
+      if (action === "jump-input") jumpToInput(inputId);
+      if (action === "add-random-noise") addRandomNoiseNode();
       if (action === "pick-file") document.querySelector('.file-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
       if (action === "pick-native-file") pickNativeInput(inputId, trigger);
       if (action === "pick-prompt") document.querySelector('.prompt-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
+    });
+    $("workflowInputs").addEventListener("input", function (event) {
+      if (event.target.classList.contains("random-noise-seed")) appState.workflowDirty = true;
+    });
+    $("workflowInputs").addEventListener("change", function (event) {
+      if (event.target.classList.contains("random-noise-mode")) appState.workflowDirty = true;
     });
     $("workflowInputs").addEventListener("keydown", function (event) {
       var zone = event.target.closest(".file-dropzone");
@@ -479,30 +864,41 @@
       document.querySelector('.file-picker[data-input-id="' + CSS.escape(zone.dataset.inputId) + '"]').click();
     });
     $("workflowInputs").addEventListener("dragenter", function (event) {
-      var zone = event.target.closest(".file-dropzone");
-      if (!zone) return;
+      var card = event.target.closest(".file-input-card");
+      if (!card) return;
       event.preventDefault();
-      zone.classList.add("is-dragging");
+      card.classList.add("is-dragging");
+      var zone = card.querySelector(".file-dropzone");
+      if (zone) zone.classList.add("is-dragging");
     });
     $("workflowInputs").addEventListener("dragover", function (event) {
-      var zone = event.target.closest(".file-dropzone");
-      if (!zone) return;
+      var card = event.target.closest(".file-input-card");
+      if (!card) return;
       event.preventDefault();
-      zone.classList.add("is-dragging");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      card.classList.add("is-dragging");
+      var zone = card.querySelector(".file-dropzone");
+      if (zone) zone.classList.add("is-dragging");
     });
     $("workflowInputs").addEventListener("dragleave", function (event) {
-      var zone = event.target.closest(".file-dropzone");
-      if (zone && !zone.contains(event.relatedTarget)) zone.classList.remove("is-dragging");
+      var card = event.target.closest(".file-input-card");
+      if (!card || (event.relatedTarget && card.contains(event.relatedTarget))) return;
+      card.classList.remove("is-dragging");
+      var zone = card.querySelector(".file-dropzone");
+      if (zone) zone.classList.remove("is-dragging");
     });
     $("workflowInputs").addEventListener("drop", function (event) {
-      var zone = event.target.closest(".file-dropzone");
-      if (!zone) return;
+      var card = event.target.closest(".file-input-card");
+      if (!card) return;
       event.preventDefault();
-      zone.classList.remove("is-dragging");
+      card.classList.remove("is-dragging");
+      var zone = card.querySelector(".file-dropzone");
+      if (zone) zone.classList.remove("is-dragging");
       var file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
       if (!file) return;
-      zone.classList.add("is-loading");
-      recordInputFileWithEvent(zone.dataset.inputId, file, event);
+      card.classList.add("is-loading");
+      if (zone) zone.classList.add("is-loading");
+      recordInputFileWithEvent(card.dataset.inputId, file, event);
     });
     $("workflowInputs").addEventListener("change", function (event) {
       var inputId = event.target.dataset.inputId;
@@ -521,6 +917,9 @@
         }).catch(function (error) { showToast(error.message, true); });
       }
     });
+    $("workflowInputs").addEventListener("blur", function (event) {
+      if (event.target.classList.contains("file-path")) previewLocalPath(event.target.dataset.inputId, event.target.value);
+    }, true);
     $("submitButton").addEventListener("click", submitTask);
     $("exportWorkflowButton").addEventListener("click", exportWorkflow);
     $("queueList").addEventListener("click", handleQueueClick);
@@ -533,7 +932,7 @@
       jsonRequest("/api/keys", "POST", { name: $("keyName").value.trim(), site: $("keySite").value, api_key: apiKey }).then(function (data) {
         $("keyValue").value = "";
         $("keyName").value = "";
-        showToast(data.key.status === "ready" ? "凭据已验证并保存" : data.key.status_message, data.key.status !== "ready");
+        showToast(data.key.status === "ready" ? "凭据已验证并保存，余额已更新" : data.key.status_message, data.key.status !== "ready");
         refresh(true);
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
     });
@@ -552,6 +951,7 @@
         showToast("默认产物目录已保存");
       }).catch(function (error) { showToast(error.message, true); });
     });
+    $("chooseOutputDir").addEventListener("click", function () { pickOutputDirectory(this); });
     $("openSettings").addEventListener("click", function () {
       $("settingsModal").hidden = false;
       window.setTimeout(function () { $("outputDir").focus(); }, 0);
@@ -562,6 +962,13 @@
     $("closeModal").addEventListener("click", function () { $("taskModal").hidden = true; });
     $("taskModal").addEventListener("click", function (event) { if (event.target === $("taskModal")) $("taskModal").hidden = true; });
     document.addEventListener("keydown", function (event) {
+      if (event.ctrlKey && event.key === "Enter" && !event.shiftKey && !event.altKey && !event.metaKey && !event.isComposing) {
+        if ($("settingsModal").hidden && $("taskModal").hidden) {
+          event.preventDefault();
+          submitTask();
+        }
+        return;
+      }
       if (event.key !== "Escape") return;
       $("taskModal").hidden = true;
       $("settingsModal").hidden = true;

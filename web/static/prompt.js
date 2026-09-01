@@ -3,13 +3,7 @@
 
   var STORAGE_KEY = "rh-workflow-desk-prompt-builder-v1";
   var idCounter = 0;
-  var defaultBlocks = [
-    { id: "preset-subject", title: "主体细节", text: "主体清晰突出，细节自然，材质纹理真实。", tags: ["画面", "质量"] },
-    { id: "preset-light", title: "电影光线", text: "电影感光线，柔和侧光，明暗层次自然，保留高光细节。", tags: ["光线", "风格"] },
-    { id: "preset-camera", title: "镜头推进", text: "镜头缓慢向前推进，运动平稳，始终保持主体在视觉中心。", tags: ["镜头", "动作"] },
-    { id: "preset-depth", title: "浅景深", text: "浅景深，主体与背景分离，背景自然虚化。", tags: ["镜头", "画面"] },
-    { id: "preset-texture", title: "真实质感", text: "真实纹理与细腻表面质感，画面干净，没有多余元素。", tags: ["质量", "画面"] }
-  ];
+  var defaultBlocks = [];
   var state = { customBlocks: [], stage: [], filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
   var toastTimer = 0;
 

@@ -1,5 +1,6 @@
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
+const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
@@ -7,10 +8,19 @@ const path = require("node:path");
 const webRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(webRoot, "..");
 const serverScript = path.join(webRoot, "start.sh");
+const packagedBackend = path.join(process.resourcesPath, "rh-workflow-desk-server");
 const healthTimeoutMs = 15000;
 
 let mainWindow = null;
 let backendProcess = null;
+
+ipcMain.handle("select-directory", async () => {
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: "选择默认产物目录",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  return result.canceled ? "" : (result.filePaths[0] || "");
+});
 
 function findFreePort() {
   return new Promise((resolve, reject) => {
@@ -58,15 +68,26 @@ function stopBackend() {
 
 async function startBackend() {
   const port = await findFreePort();
-  backendProcess = spawn(
-    "/bin/sh",
-    [serverScript, "--no-browser", "--host", "127.0.0.1", "--port", String(port)],
-    {
+  const args = ["--no-browser", "--host", "127.0.0.1", "--port", String(port)];
+  const packaged = app.isPackaged;
+  if (packaged && !fs.existsSync(packagedBackend)) {
+    throw new Error(`安装包缺少本地服务：${packagedBackend}`);
+  }
+  backendProcess = packaged
+    ? spawn(packagedBackend, args, {
+      cwd: app.getPath("userData"),
+      env: {
+        ...process.env,
+        RH_ELECTRON: "1",
+        RH_WORKFLOW_DESK_DATA_ROOT: path.join(app.getPath("userData"), "data")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    })
+    : spawn("/bin/sh", [serverScript, ...args], {
       cwd: repoRoot,
       env: { ...process.env, RH_ELECTRON: "1" },
       stdio: ["ignore", "pipe", "pipe"]
-    }
-  );
+    });
   backendProcess.stdout.on("data", (chunk) => process.stdout.write(`[rh-web] ${chunk}`));
   backendProcess.stderr.on("data", (chunk) => process.stderr.write(`[rh-web] ${chunk}`));
   backendProcess.once("exit", (code, signal) => {

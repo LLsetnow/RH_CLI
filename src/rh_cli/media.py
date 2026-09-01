@@ -67,8 +67,8 @@ def upload_app_file(
         data={"apiKey": client.api_key, "fileType": "input"},
     )
     if response.get("code") != 0 or response.get("msg") != "success":
-        raise RhCliError("UPLOAD_FAILED", f"上传失败：{response.get('msg', response)}")
+        raise RhCliError("UPLOAD_FAILED", f"上传失败：{response.get('msg', response)}", detail=response)
     file_name = response.get("data", {}).get("fileName")
     if not file_name:
-        raise RhCliError("UPLOAD_FAILED", "上传成功但响应中没有 fileName。")
+        raise RhCliError("UPLOAD_FAILED", "上传成功但响应中没有 fileName。", detail=response)
     return str(file_name)

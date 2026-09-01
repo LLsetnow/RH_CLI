@@ -12,10 +12,33 @@ from urllib.parse import unquote, urlparse
 
 from rh_cli.errors import RhCliError
 
-from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_file_on_macos, public_key, public_state
+from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_key, public_state
 
 
 STATIC_ROOT = WEB_ROOT / "static"
+LOCAL_PREVIEW_LIMIT = 8 * 1024 * 1024
+
+
+def local_file_preview(path_value: str) -> dict[str, object]:
+    """Read a local image into memory for preview; never copy it into web/data."""
+    path = Path(str(path_value or "")).expanduser().resolve()
+    if not path.is_file():
+        raise RhCliError("FILE_NOT_FOUND", f"本地文件不存在：{path}")
+    stat = path.stat()
+    mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    preview_url = ""
+    if mime.startswith("image/") and stat.st_size <= LOCAL_PREVIEW_LIMIT:
+        try:
+            preview_url = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        except OSError:
+            preview_url = ""
+    return {
+        "path": str(path),
+        "name": path.name,
+        "size": stat.st_size,
+        "mime": mime,
+        "preview_url": preview_url,
+    }
 
 
 class LocalHandler(BaseHTTPRequestHandler):
@@ -83,6 +106,14 @@ class LocalHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/tasks/") and "/output/" in path:
             self._serve_output(path)
             return
+        if path.startswith("/api/tasks/") and path.endswith("/load"):
+            task_id = path.split("/")[3]
+            store, _ = self.state
+            try:
+                self._json(200, store.load_task_workflow(task_id))
+            except Exception as exc:
+                self._json(400 if isinstance(exc, RhCliError) else 500, self._safe_error(exc))
+            return
         if path.startswith("/api/tasks/"):
             task_id = path.rsplit("/", 1)[-1]
             store, _ = self.state
@@ -100,27 +131,17 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = unquote(urlparse(self.path).path)
         try:
+            if path == "/api/preview-file":
+                body = self._body()
+                self._json(200, local_file_preview(str(body.get("path") or "")))
+                return
             if path == "/api/pick-file":
                 selected = pick_local_file_on_macos()
-                stat = selected.stat()
-                mime = mimetypes.guess_type(str(selected))[0] or "application/octet-stream"
-                preview_url = ""
-                if mime.startswith("image/") and stat.st_size <= 8 * 1024 * 1024:
-                    try:
-                        preview_url = f"data:{mime};base64,{base64.b64encode(selected.read_bytes()).decode('ascii')}"
-                    except OSError:
-                        # The path is still usable for task submission even if its preview cannot be read.
-                        preview_url = ""
-                self._json(
-                    200,
-                    {
-                        "path": str(selected),
-                        "name": selected.name,
-                        "size": stat.st_size,
-                        "mime": mime,
-                        "preview_url": preview_url,
-                    },
-                )
+                self._json(200, local_file_preview(str(selected)))
+                return
+            if path == "/api/pick-directory":
+                selected = pick_local_directory_on_macos()
+                self._json(200, {"path": str(selected) if selected else ""})
                 return
             if path == "/api/workflows/analyze":
                 body = self._body()
@@ -129,7 +150,15 @@ class LocalHandler(BaseHTTPRequestHandler):
                     raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
                 store, _ = self.state
                 workflow_id, workflow_path, analysis = store.save_workflow(str(body.get("filename") or "workflow.json"), content)
-                self._json(200, {"workflow_id": workflow_id, "filename": workflow_path.name, "analysis": analysis})
+                self._json(
+                    200,
+                    {
+                        "workflow_id": workflow_id,
+                        "filename": workflow_path.name,
+                        "analysis": analysis,
+                        "remote_workflow_id": analysis.get("remote_workflow_id", ""),
+                    },
+                )
                 return
             if path == "/api/keys":
                 body = self._body()
@@ -142,6 +171,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 _, manager = self.state
                 self._json(200, {"key": manager.check_key(key_id)})
                 return
+            if path.startswith("/api/keys/") and path.endswith("/balance"):
+                key_id = path.split("/")[3]
+                _, manager = self.state
+                self._json(200, {"key": manager.refresh_balance(key_id)})
+                return
             if path == "/api/tasks":
                 body = self._body()
                 _, manager = self.state
@@ -151,6 +185,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                     body.get("prompts") if isinstance(body.get("prompts"), dict) else {},
                     str(body.get("key_id") or "") or None,
                     str(body.get("output_dir") or "") or None,
+                    remote_workflow_id=str(body.get("remote_workflow_id") or "") or None,
+                    random_noise=body.get("random_noise") if isinstance(body.get("random_noise"), dict) else {},
+                    workflow_data=body.get("workflow") if isinstance(body.get("workflow"), dict) else None,
+                    workflow_name=str(body.get("workflow_name") or "") or None,
                 )
                 self._json(202, {"task": task})
                 return
