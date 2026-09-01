@@ -219,6 +219,9 @@ input:focus, select:focus, textarea:focus { border-color: rgba(110, 231, 216, .7
 .task-card.failed { border-color: rgba(255, 126, 138, .28); }
 .task-top { display: flex; justify-content: space-between; gap: 10px; }
 .task-name { min-width: 0; overflow: hidden; color: var(--ink); font-size: 12px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.task-name-button { flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.task-name-button:hover { color: var(--accent); }
+.task-name-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
 .task-status { flex-shrink: 0; padding: 4px 6px; border-radius: 5px; color: var(--muted); background: #1b2943; font-size: 9px; font-weight: 700; }
 .task-status.completed { color: var(--accent); background: rgba(110, 231, 216, .09); }
 .task-status.failed, .task-status.cancelled { color: var(--danger); background: rgba(255, 126, 138, .09); }

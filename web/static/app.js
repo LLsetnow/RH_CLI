@@ -131,14 +131,15 @@
       var costLabel = formatTaskCost(task);
       var canCancel = ["queued", "submitting", "running"].indexOf(task.status) !== -1;
       var canDelete = ["completed", "failed", "cancelled", "interrupted"].indexOf(task.status) !== -1;
+      var queueLabel = task.status === "queued" && task.queue_position ? '<span>本地队列第 ' + esc(task.queue_position) + ' 位</span><span>·</span>' : "";
       var statusClass = esc(task.status);
       return '<article class="task-card ' + statusClass + '" data-task-id="' + esc(task.id) + '">' +
-        '<div class="task-top"><div class="task-name" title="' + esc(task.workflow_name) + '">' + esc(task.workflow_name) + '</div>' +
+        '<div class="task-top"><button class="task-name task-name-button" type="button" data-action="open-task" title="打开任务详情" aria-label="打开任务 ' + esc(task.workflow_name) + '">' + esc(task.workflow_name) + '</button>' +
         '<span class="task-status ' + statusClass + '">' + statusLabel(task.status) + '</span></div>' +
-        '<div class="task-meta"><span>' + esc(task.key_name || "自动调度") + '</span><span>·</span><span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
+        '<div class="task-meta"><span>' + esc(task.key_name || "自动调度") + '</span><span>·</span>' + queueLabel + '<span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
         '<div class="task-progress">' + esc(task.progress || "等待调度…") + (task.error ? '<br /><span style="color:var(--danger)">' + esc(task.error) + '</span>' : "") + '</div>' +
         '<div class="task-footer"><span class="task-footer-info"><span class="task-output-count">' + esc(outputLabel) + '</span>' + (costLabel ? '<span class="task-cost">' + esc(costLabel) + '</span>' : '') + '</span>' +
-        '<span class="task-actions"><button class="task-load-button" type="button" data-action="load-task">加载</button><button type="button" data-action="open-task">打开</button>' +
+        '<span class="task-actions"><button class="task-load-button" type="button" data-action="load-task">加载</button>' +
         (canCancel ? '<button type="button" data-action="cancel-task">取消</button>' : "") +
         (canDelete ? '<button type="button" data-action="delete-task">删除</button>' : "") + '</span></div></article>';
     }).join("");
