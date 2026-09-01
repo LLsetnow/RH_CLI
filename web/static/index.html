@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" href="data:," />
+    <link rel="icon" type="image/png" href="/static/assets/rh-workflow-desk-icon.png" />
     <title>RH Workflow Desk</title>
     <link rel="stylesheet" href="/static/app.css" />
     <script>
@@ -21,7 +21,7 @@
     <div class="app-shell">
       <header class="topbar">
         <div class="brand-lockup">
-          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
           <div>
             <div class="brand-name">RH Workflow Desk</div>
             <div class="brand-subtitle">本地工作流提交台</div>
@@ -212,6 +212,7 @@
         <div id="modalOutputs" class="modal-outputs"></div>
       </div>
     </div>
+    <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/app.js"></script>
   </body>
 </html>

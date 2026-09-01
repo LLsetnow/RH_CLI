@@ -59,6 +59,57 @@ def test_inspect_workflow_finds_random_noise_inputs():
     assert analysis["random_noise_inputs"][0]["mode"] == "fixed"
 
 
+def test_inspect_workflow_finds_resolution_selector_inputs():
+    workflow = {
+        "16": {
+            "class_type": "ResolutionSelector",
+            "inputs": {
+                "aspect_ratio": "9:16 (Portrait Widescreen)",
+                "megapixels": 0.4,
+                "multiple": 32,
+            },
+            "_meta": {"title": "一采分辨率"},
+        }
+    }
+
+    analysis = web_app.inspect_workflow(workflow)
+
+    assert analysis["resolution_count"] == 1
+    assert analysis["resolution_inputs"][0]["id"] == "16"
+    assert analysis["resolution_inputs"][0]["title"] == "一采分辨率"
+    assert analysis["resolution_inputs"][0]["aspect_ratio"] == "9:16 (Portrait Widescreen)"
+    assert analysis["resolution_inputs"][0]["megapixels"] == "0.4"
+    assert len(analysis["resolution_inputs"][0]["aspect_ratio_options"]) == 8
+
+
+def test_normalize_resolution_inputs_validates_range_and_forces_multiple():
+    workflow = {
+        "16": {
+            "class_type": "ResolutionSelector",
+            "inputs": {"aspect_ratio": "1:1 (Square)", "megapixels": 0.4, "multiple": 64},
+        }
+    }
+
+    values = web_app.normalize_resolution_inputs(
+        workflow,
+        {"16": {"aspect_ratio": "16:9 (Widescreen)", "megapixels": "2.5"}},
+    )
+    web_app.apply_resolution_inputs(workflow, values)
+
+    assert values == {"16": {"aspect_ratio": "16:9 (Widescreen)", "megapixels": 2.5, "multiple": 32}}
+    assert workflow["16"]["inputs"] == {
+        "aspect_ratio": "16:9 (Widescreen)",
+        "megapixels": 2.5,
+        "multiple": 32,
+    }
+    with pytest.raises(RhCliError) as excinfo:
+        web_app.normalize_resolution_inputs(
+            workflow,
+            {"16": {"aspect_ratio": "16:9 (Widescreen)", "megapixels": "4.1"}},
+        )
+    assert excinfo.value.code == "INVALID_RESOLUTION"
+
+
 def test_normalize_random_noise_inputs_rejects_unknown_mode():
     workflow = {"7": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0, "mode": "randomize"}}}
 
@@ -475,6 +526,43 @@ def test_submit_task_saves_modified_workflow_with_random_noise(tmp_path, monkeyp
         snapshot = Path(task["output_dir"]) / task["id"] / "workflow_api.json"
         assert snapshot.is_file()
         assert loaded["task"]["workflow_snapshot_path"] == str(snapshot.resolve())
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_submit_task_saves_modified_resolution_selector(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        task = manager.submit_task(
+            "unused",
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="123456",
+            workflow_data={
+                "16": {
+                    "class_type": "ResolutionSelector",
+                    "inputs": {"aspect_ratio": "1:1 (Square)", "megapixels": 0.4, "multiple": 64},
+                }
+            },
+            workflow_name="resolution_api.json",
+            resolution={"16": {"aspect_ratio": "21:9 (Ultrawide)", "megapixels": "3.2"}},
+        )
+
+        loaded = store.load_task_workflow(task["id"])
+
+        assert loaded["task"]["resolution"] == {
+            "16": {"aspect_ratio": "21:9 (Ultrawide)", "megapixels": 3.2, "multiple": 32}
+        }
+        assert loaded["workflow"]["16"]["inputs"] == {
+            "aspect_ratio": "21:9 (Ultrawide)",
+            "megapixels": 3.2,
+            "multiple": 32,
+        }
     finally:
         manager.close()
         store._db.close()

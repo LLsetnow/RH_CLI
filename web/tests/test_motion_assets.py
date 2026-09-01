@@ -14,8 +14,10 @@ def test_shuffle_runtime_covers_page_navigation_and_dialogs():
     motion = (STATIC_ROOT / "motion.js").read_text(encoding="utf-8")
     assert "prepareShuffleIn" in motion
     assert "prepareShuffleOut" in motion
+    assert 'surface.style.opacity = ".2"' in motion
+    assert 'opacity 220ms var(--ease-out)' in motion
     assert 'surface.style.animation = "none"' in motion
-    assert "SHUFFLE_STAGGER" in motion
+    assert "SHUFFLE_MS = 300" in motion
     assert "window.RHMotion" in motion
     assert "prefers-reduced-motion" in motion
 

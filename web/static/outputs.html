@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" href="data:," />
+    <link rel="icon" type="image/png" href="/static/assets/rh-workflow-desk-icon.png" />
     <title>成片 · RH Workflow Desk</title>
     <link rel="stylesheet" href="/static/app.css" />
     <link rel="stylesheet" href="/static/outputs.css" />
@@ -22,7 +22,7 @@
     <div class="app-shell outputs-shell">
       <header class="topbar">
         <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
-          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
           <span>
             <span class="brand-name">RH Workflow Desk</span>
             <span class="brand-subtitle">本地工作流提交台</span>
@@ -98,6 +98,7 @@
     </div>
 
     <div id="outputToast" class="toast" role="status" aria-live="polite"></div>
+    <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/outputs.js"></script>
   </body>
 </html>

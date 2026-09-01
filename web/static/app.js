@@ -525,6 +525,49 @@
     return workflow;
   }
 
+  function resolutionRatioValue(aspect) {
+    var match = String(aspect || "").match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)/);
+    if (!match) return 16 / 9;
+    var width = Number(match[1]);
+    var height = Number(match[2]);
+    return width > 0 && height > 0 ? width / height : 16 / 9;
+  }
+
+  function resolutionRatioLabel(aspect) {
+    var value = String(aspect || "").match(/^\d+(?:\.\d+)?:\d+(?:\.\d+)?/);
+    return value ? value[0] : "16:9";
+  }
+
+  function resolutionReferenceMarkup(aspect) {
+    var ratio = resolutionRatioValue(aspect);
+    var presets = [
+      { label: "480p", megapixels: "0.4", width: 864, height: 480 },
+      { label: "720p", megapixels: "0.9", width: 1280, height: 736 },
+      { label: "1080p", megapixels: "2.0", width: 1920, height: 1088 },
+      { label: "2K", megapixels: "2.4", width: 2048, height: 1152 },
+      { label: "4K", megapixels: ">4", width: 3840, height: 2176 }
+    ];
+    var rows = presets.map(function (preset) {
+      var area = preset.width * preset.height;
+      var width = preset.width;
+      var height = preset.height;
+      if (Math.abs(ratio - (16 / 9)) > 0.001) {
+        width = Math.max(32, Math.ceil(Math.sqrt(area * ratio) / 32) * 32);
+        height = Math.max(32, Math.ceil(Math.sqrt(area / ratio) / 32) * 32);
+      }
+      return '<tr><th scope="row">' + preset.label + '</th><td>' + preset.megapixels + '</td><td>' + width + ' × ' + height + '</td></tr>';
+    }).join("");
+    return '<div class="resolution-reference-heading"><strong>分辨率参考</strong><span>' + esc(resolutionRatioLabel(aspect)) + '</span></div>' +
+      '<table class="resolution-reference-table"><thead><tr><th scope="col">档位</th><th scope="col">MP</th><th scope="col">输出尺寸</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<div class="resolution-reference-note">4K 参考值超过当前 megapixels 上限 4。</div>';
+  }
+
+  function updateResolutionReference(card, aspect) {
+    if (!card) return;
+    var reference = card.querySelector(".resolution-reference-popover");
+    if (reference) reference.innerHTML = resolutionReferenceMarkup(aspect);
+  }
+
   function applyBypassedNodes(workflow, bypassedNodes) {
     var bypassed = {};
     (bypassedNodes || []).forEach(function (nodeId) { bypassed[String(nodeId)] = true; });
@@ -630,7 +673,7 @@
       '<div class="summary-item"><strong>' + randomNoise.length + '</strong> 个 RandomNoise</div>' +
       '<div class="summary-item bypass-summary"><strong>' + bypassedNodeList().length + '</strong> 个旁路节点</div>' +
       '<div class="summary-item">已完成节点扫描</div>';
-    var html = '<div class="input-node-toolbar"><div><span class="input-node-toolbar-title">可添加输入节点</span><small>节点会写入当前 API 工作流</small></div><button class="secondary-button" type="button" data-action="add-random-noise">＋ RandomNoise</button></div>';
+    var html = "";
     var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(resolutions.map(function (item) { return { item: item, kind: "resolution" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; }));
     if (inputNodes.length) {
       html += '<div class="input-jump-bar"><div class="input-jump-heading"><span>输入节点</span><small>点击标签快速定位</small></div><div class="input-jump-list">';
@@ -677,8 +720,8 @@
         html += '<div class="input-card resolution-card' + (isNodeBypassed(item.node_id || item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title || "尺寸") + '</div><div class="input-type">' + esc(item.class_type || "ResolutionSelector") + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id || item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           '<div class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</div>' +
           '<div class="resolution-grid"><label class="field-group"><span class="field-label">宽高比例</span><select class="resolution-aspect" data-node-id="' + esc(item.node_id || item.id) + '">' + options + '</select></label>' +
-          '<label class="field-group"><span class="field-label">megapixels</span><input class="resolution-megapixels" data-node-id="' + esc(item.node_id || item.id) + '" type="number" min="0.1" max="4" step="0.1" inputmode="decimal" value="' + esc(megapixels) + '" /></label></div>' +
-          '<div class="file-meta">范围 0.1–4；multiple 固定为 32</div></div>';
+          '<div class="field-group resolution-megapixels-group"><div class="resolution-field-label"><span class="field-label">megapixels</span><button class="resolution-help" type="button" aria-label="查看 megapixels 分辨率参考" aria-expanded="false">?</button></div><input class="resolution-megapixels" data-node-id="' + esc(item.node_id || item.id) + '" type="number" min="0.1" max="4" step="0.1" inputmode="decimal" aria-label="megapixels" value="' + esc(megapixels) + '" /><div class="resolution-reference-popover" role="tooltip">' + resolutionReferenceMarkup(aspect) + '</div></div></div>' +
+          '<div class="file-meta">megapixels 范围 0.1–4</div></div>';
       });
     }
     if (randomNoise.length) {
@@ -693,7 +736,7 @@
           '<div class="file-meta">导出或提交时写入 ' + esc(item.seed_field || "noise_seed") + ' 和 mode</div></div>';
       });
     }
-    if (!files.length && !prompts.length && !resolutions.length && !randomNoise.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>可以点击上方“＋ RandomNoise”添加随机噪声节点。</span></div>';
+    if (!files.length && !prompts.length && !resolutions.length && !randomNoise.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>当前工作流没有需要在这里配置的输入节点。</span></div>';
     inputs.innerHTML = html;
     inputs.hidden = false;
     $("submitStrip").hidden = false;
@@ -1376,7 +1419,14 @@
     });
     $("workflowInputs").addEventListener("change", function (event) {
       if (event.target.classList.contains("random-noise-mode") || event.target.classList.contains("resolution-aspect") || event.target.classList.contains("resolution-megapixels")) appState.workflowDirty = true;
+      if (event.target.classList.contains("resolution-aspect")) updateResolutionReference(event.target.closest(".resolution-card"), event.target.value);
       scheduleDraftSave();
+    });
+    $("workflowInputs").addEventListener("focusin", function (event) {
+      if (event.target.classList.contains("resolution-help")) event.target.setAttribute("aria-expanded", "true");
+    });
+    $("workflowInputs").addEventListener("focusout", function (event) {
+      if (event.target.classList.contains("resolution-help")) event.target.setAttribute("aria-expanded", "false");
     });
     $("workflowInputs").addEventListener("keydown", function (event) {
       var zone = event.target.closest(".file-dropzone");

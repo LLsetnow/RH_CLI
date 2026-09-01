@@ -34,6 +34,7 @@
     "artifactName": "RH-Workflow-Desk-${version}-${arch}.${ext}",
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "static/assets/rh-workflow-desk.icns",
       "identity": null,
       "target": [
         {

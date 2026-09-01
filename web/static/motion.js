@@ -2,13 +2,17 @@
   "use strict";
 
   var MODAL_MS = 220;
-  var SHUFFLE_MS = 360;
-  var SHUFFLE_LEAVE_MS = 430;
-  var SHUFFLE_STAGGER = 10;
-  var SHUFFLE_MAX_STAGGER = 50;
+  var SHUFFLE_MS = 300;
+  // Start the next document while the outgoing panels are still finishing their
+  // last few pixels. This avoids a visible hold on the centered state.
+  var SHUFFLE_LEAVE_MS = 180;
+  var SHUFFLE_STAGGER = 4;
+  var SHUFFLE_MAX_STAGGER = 16;
   var modalTimers = {};
   var modalReturnFocus = {};
   var activeShuffle = null;
+  var pageEnterStarted = false;
+  var warmedPages = {};
   var shuffleSelectors = [
     ".app-shell > .topbar .top-nav",
     ".app-shell > .intro-block",
@@ -41,6 +45,18 @@
     }
   }
 
+  function warmPage(link) {
+    if (!link) return;
+    try {
+      var url = new URL(link.href, window.location.href);
+      if (url.origin !== window.location.origin || url.pathname === window.location.pathname || warmedPages[url.href]) return;
+      warmedPages[url.href] = true;
+      window.fetch(url.href, { credentials: "same-origin", cache: "no-store" }).catch(function () {
+        delete warmedPages[url.href];
+      });
+    } catch (error) {}
+  }
+
   function shuffleSurfaces() {
     var surfaces = [];
     shuffleSelectors.forEach(function (selector) {
@@ -53,22 +69,26 @@
     return surfaces;
   }
 
-  function layoutRect(surface) {
-    var transform = surface.style.transform;
-    var transition = surface.style.transition;
-    surface.style.transition = "none";
-    surface.style.transform = "none";
-    var rect = surface.getBoundingClientRect();
-    surface.style.transform = transform;
-    surface.style.transition = transition;
-    return rect;
+  function layoutRects(surfaces) {
+    var styles = surfaces.map(function (surface) {
+      return { transform: surface.style.transform, transition: surface.style.transition };
+    });
+    surfaces.forEach(function (surface) {
+      surface.style.transition = "none";
+      surface.style.transform = "none";
+    });
+    var rects = surfaces.map(function (surface) { return surface.getBoundingClientRect(); });
+    surfaces.forEach(function (surface, index) {
+      surface.style.transform = styles[index].transform;
+      surface.style.transition = styles[index].transition;
+    });
+    return rects;
   }
 
-  function centerTransform(rect, index, scale) {
+  function centerTransform(rect, index) {
     var x = window.innerWidth / 2 - (rect.left + rect.width / 2);
     var y = window.innerHeight / 2 - (rect.top + rect.height / 2);
-    var direction = index % 2 === 0 ? 1 : -1;
-    return "translate3d(" + Math.round(x) + "px, " + Math.round(y) + "px, 0) scale(" + scale + ") rotate(" + (direction * (1.6 + index * .25)).toFixed(2) + "deg)";
+    return "translate3d(" + Math.round(x) + "px, " + Math.round(y) + "px, 0)";
   }
 
   function restoreSurface(surface, original) {
@@ -92,6 +112,7 @@
   }
 
   function prepareShuffleIn(surfaces) {
+    var rects = layoutRects(surfaces);
     var originals = surfaces.map(function (surface, index) {
       var original = {
         opacity: surface.style.opacity,
@@ -111,18 +132,18 @@
       surface.style.animationPlayState = "paused";
       surface.style.transition = "none";
       surface.style.transitionDelay = "0ms";
-      surface.style.opacity = ".86";
-      surface.style.transform = centerTransform(layoutRect(surface), index, ".9");
+      surface.style.opacity = ".2";
+      surface.style.transform = centerTransform(rects[index], index);
       return original;
     });
     activeShuffle = { frame: 0, timer: 0, cancelled: false, surfaces: surfaces, originals: originals };
     activeShuffle.frame = window.requestAnimationFrame(function () {
       if (!activeShuffle || activeShuffle.cancelled) return;
       surfaces.forEach(function (surface, index) {
-        surface.style.transition = "transform " + SHUFFLE_MS + "ms var(--ease-in-out), opacity 260ms var(--ease-out)";
+        surface.style.transition = "transform " + SHUFFLE_MS + "ms var(--ease-out), opacity 260ms var(--ease-out)";
         surface.style.transitionDelay = Math.min(index * SHUFFLE_STAGGER, SHUFFLE_MAX_STAGGER) + "ms";
         surface.style.opacity = "1";
-        surface.style.transform = "none";
+        surface.style.transform = originals[index].transform || "none";
       });
     });
     activeShuffle.timer = window.setTimeout(function () {
@@ -133,22 +154,24 @@
   }
 
   function prepareShuffleOut(surfaces) {
+    var rects = layoutRects(surfaces);
     surfaces.forEach(function (surface, index) {
       surface.style.transformOrigin = "center center";
       surface.style.willChange = "transform, opacity";
       surface.style.animation = "none";
       surface.style.animationDelay = "0ms";
       surface.style.animationPlayState = "paused";
-      surface.style.transition = "transform " + SHUFFLE_MS + "ms var(--ease-in-out), opacity 280ms var(--ease-out)";
+      surface.style.transition = "transform " + SHUFFLE_MS + "ms var(--ease-out), opacity 220ms var(--ease-out)";
       surface.style.transitionDelay = Math.min(index * SHUFFLE_STAGGER, SHUFFLE_MAX_STAGGER) + "ms";
-      surface.style.opacity = ".78";
-      surface.style.transform = centerTransform(layoutRect(surface), index, ".9");
+      surface.style.opacity = ".2";
+      surface.style.transform = centerTransform(rects[index], index);
     });
   }
 
   function startPageEnter() {
     var root = document.documentElement;
-    if (prefersReducedMotion()) return;
+    if (pageEnterStarted || prefersReducedMotion()) return;
+    pageEnterStarted = true;
     cancelActiveShuffle();
     var surfaces = shuffleSurfaces();
     if (surfaces.length) prepareShuffleIn(surfaces);
@@ -166,6 +189,7 @@
     var root = document.documentElement;
     if (root.classList.contains("motion-page-leave")) return true;
     event.preventDefault();
+    warmPage(link);
     cancelActiveShuffle();
     root.classList.remove("motion-page-enter", "motion-page-enter-active");
     root.classList.add("motion-page-leave", "motion-shuffle-active");
@@ -226,11 +250,15 @@
       var link = event.target.closest && event.target.closest("a");
       if (link) startPageLeave(link, event);
     });
+    document.querySelectorAll(".top-nav a, .brand-home-link").forEach(function (link) {
+      link.addEventListener("pointerenter", function () { warmPage(link); }, { once: true, passive: true });
+    });
   });
 
   window.RHMotion = {
     closeModal: closeModal,
     openModal: openModal,
+    startPageEnter: startPageEnter,
     prefersReducedMotion: prefersReducedMotion
   };
 }());
