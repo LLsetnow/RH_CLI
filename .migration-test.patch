@@ -1,0 +1,56 @@
+diff --git a/web/app.py b/web/app.py
+--- a/web/app.py
++++ b/web/app.py
+@@ -413,8 +413,52 @@
+         if "error_detail" not in columns:
+             self._db.execute("ALTER TABLE tasks ADD COLUMN error_detail TEXT NOT NULL DEFAULT '{}'")
+         if "stage_logs_json" not in columns:
+             self._db.execute("ALTER TABLE tasks ADD COLUMN stage_logs_json TEXT NOT NULL DEFAULT '[]'")
+         if "random_noise_json" not in columns:
+             self._db.execute("ALTER TABLE tasks ADD COLUMN random_noise_json TEXT NOT NULL DEFAULT '{}'")
++        if "dispatch_key_name" not in columns:
++            self._db.execute("ALTER TABLE tasks ADD COLUMN dispatch_key_name TEXT NOT NULL DEFAULT ''")
++        if "dispatch_key_site" not in columns:
++            self._db.execute("ALTER TABLE tasks ADD COLUMN dispatch_key_site TEXT NOT NULL DEFAULT ''")
++        if "dispatch_key_api_type" not in columns:
++            self._db.execute("ALTER TABLE tasks ADD COLUMN dispatch_key_api_type TEXT NOT NULL DEFAULT ''")
++        self._backfill_dispatch_credential_snapshots()
++
++    def _backfill_dispatch_credential_snapshots(self) -> None:
++        """Fill immutable credential labels for older tasks when the Key still exists."""
++        data = self._read_json_file()
++        raw_keys = data.get("keys", [])
++        if not isinstance(raw_keys, list):
++            return
++        keys = {
++            str(item.get("id")): item
++            for item in raw_keys
++            if isinstance(item, dict) and str(item.get("id") or "").strip()
++        }
++        if not keys:
++            return
++        rows = self._db.execute(
++            "SELECT id,key_id FROM tasks "
++            "WHERE status != 'queued' AND key_id IS NOT NULL AND key_id != '' "
++            "AND COALESCE(dispatch_key_name, '') = ''"
++        ).fetchall()
++        updates = []
++        for row in rows:
++            key = keys.get(str(row[1]))
++            if not key:
++                continue
++            updates.append(
++                (
++                    str(key.get("name") or ""),
++                    "cn" if key.get("site") == "cn" else "ai",
++                    str(key.get("api_type") or ""),
++                    row[0],
++                )
++            )
++        if updates:
++            self._db.executemany(
++                "UPDATE tasks SET dispatch_key_name=?, dispatch_key_site=?, dispatch_key_api_type=? WHERE id=?",
++                updates,
++            )
+ 
+     def _interrupt_incomplete(self) -> None:

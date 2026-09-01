@@ -12,7 +12,9 @@ from urllib.parse import unquote, urlparse
 
 from rh_cli.errors import RhCliError
 
-from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_key, public_state
+from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_key, public_outputs, public_state
+from .action_store import ActionStore
+from .prompt_store import PromptStore
 
 
 STATIC_ROOT = WEB_ROOT / "static"
@@ -88,7 +90,7 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self._headers(length=0)
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
@@ -102,6 +104,19 @@ class LocalHandler(BaseHTTPRequestHandler):
         if path == "/api/state":
             store, manager = self.state
             self._json(200, public_state(store, manager))
+            return
+        if path == "/api/outputs":
+            store, manager = self.state
+            self._json(200, public_outputs(store, manager))
+            return
+        if path == "/api/prompt/state":
+            self._json(200, self.server.prompt_store.snapshot())  # type: ignore[attr-defined]
+            return
+        if path == "/api/prompt/actions":
+            self._json(200, {"actions": self.server.action_store.public_actions()})  # type: ignore[attr-defined]
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/image"):
+            self._serve_action_image(path)
             return
         if path.startswith("/api/tasks/") and "/output/" in path:
             self._serve_output(path)
@@ -160,11 +175,35 @@ class LocalHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if path == "/api/prompt/migrate":
+                body = self._body()
+                snapshot = self.server.prompt_store.migrate(  # type: ignore[attr-defined]
+                    body.get("customBlocks"), body.get("stage")
+                )
+                self._json(200, snapshot)
+                return
+            if path == "/api/prompt/library":
+                block = self.server.prompt_store.add_block(self._body())  # type: ignore[attr-defined]
+                self._json(201, {"block": block})
+                return
+            if path == "/api/prompt/groups":
+                body = self._body()
+                group = self.server.prompt_store.save_group(  # type: ignore[attr-defined]
+                    str(body.get("name") or ""), body.get("items"), str(body.get("id") or "") or None
+                )
+                self._json(200, {"group": group})
+                return
             if path == "/api/keys":
                 body = self._body()
                 _, manager = self.state
                 record = manager.add_key(str(body.get("name") or ""), str(body.get("site") or "ai"), str(body.get("api_key") or ""))
                 self._json(200, {"key": record})
+                return
+            if path == "/api/accounts":
+                body = self._body()
+                store, _ = self.state
+                account = store.add_account(str(body.get("name") or ""), str(body.get("site") or "ai"))
+                self._json(201, {"account": public_account(account)})
                 return
             if path.startswith("/api/keys/") and path.endswith("/check"):
                 key_id = path.split("/")[3]
@@ -187,6 +226,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     str(body.get("output_dir") or "") or None,
                     remote_workflow_id=str(body.get("remote_workflow_id") or "") or None,
                     random_noise=body.get("random_noise") if isinstance(body.get("random_noise"), dict) else {},
+                    bypassed_inputs=body.get("bypassed_inputs") if isinstance(body.get("bypassed_inputs"), (list, dict)) else None,
                     workflow_data=body.get("workflow") if isinstance(body.get("workflow"), dict) else None,
                     workflow_name=str(body.get("workflow_name") or "") or None,
                 )
@@ -206,9 +246,39 @@ class LocalHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/settings":
                 body = self._body()
+                store, manager = self.state
+                result = {
+                    "output_dir": store.output_dir(),
+                    "personal_capacity": store.personal_capacity(),
+                }
+                if "output_dir" in body:
+                    result["output_dir"] = store.set_output_dir(str(body.get("output_dir") or ""))
+                if "personal_capacity" in body:
+                    result["personal_capacity"] = store.set_personal_capacity(body.get("personal_capacity"))
+                    manager._wake.set()
+                self._json(200, result)
+                return
+            if path.startswith("/api/accounts/"):
+                account_id = path.rsplit("/", 1)[-1]
                 store, _ = self.state
-                output_dir = store.set_output_dir(str(body.get("output_dir") or ""))
-                self._json(200, {"output_dir": output_dir})
+                self._json(200, {"account": public_account(store.update_account(account_id, self._body()))})
+                return
+            self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
+        except Exception as exc:
+            self._json(400 if isinstance(exc, RhCliError) else 500, self._safe_error(exc))
+
+    def do_PUT(self) -> None:
+        path = unquote(urlparse(self.path).path)
+        try:
+            if path.startswith("/api/prompt/library/"):
+                block_id = path.rsplit("/", 1)[-1]
+                block = self.server.prompt_store.update_block(block_id, self._body())  # type: ignore[attr-defined]
+                self._json(200, {"block": block})
+                return
+            if path == "/api/prompt/state":
+                body = self._body()
+                document = self.server.prompt_store.save_state(body.get("items"))  # type: ignore[attr-defined]
+                self._json(200, {"state": document})
                 return
             self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
         except Exception as exc:
@@ -217,10 +287,26 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         path = unquote(urlparse(self.path).path)
         try:
+            if path.startswith("/api/prompt/library/"):
+                block_id = path.rsplit("/", 1)[-1]
+                self.server.prompt_store.delete_block(block_id)  # type: ignore[attr-defined]
+                self._json(200, {"ok": True})
+                return
+            if path.startswith("/api/prompt/groups/"):
+                group_id = path.rsplit("/", 1)[-1]
+                self.server.prompt_store.delete_group(group_id)  # type: ignore[attr-defined]
+                self._json(200, {"ok": True})
+                return
             if path.startswith("/api/keys/"):
                 key_id = path.rsplit("/", 1)[-1]
                 _, manager = self.state
                 manager.remove_key(key_id)
+                self._json(200, {"ok": True})
+                return
+            if path.startswith("/api/accounts/"):
+                account_id = path.rsplit("/", 1)[-1]
+                store, _ = self.state
+                store.remove_account(account_id)
                 self._json(200, {"ok": True})
                 return
             if path.startswith("/api/tasks/"):
@@ -248,11 +334,81 @@ class LocalHandler(BaseHTTPRequestHandler):
             allowed = Path(task["output_dir"]).resolve()
             if allowed not in file_path.parents or not file_path.is_file():
                 raise FileNotFoundError
-            data = file_path.read_bytes()
+            file_size = file_path.stat().st_size
+            content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         except (ValueError, IndexError, KeyError, OSError):
             self._json(404, {"code": "OUTPUT_NOT_FOUND", "message": "产物不存在"})
             return
-        self.send_response(200)
+
+        start = 0
+        end = file_size - 1
+        length = file_size
+        status = HTTPStatus.OK
+        range_header = str(self.headers.get("Range") or "").strip()
+        if range_header:
+            try:
+                if not range_header.startswith("bytes=") or "," in range_header:
+                    raise ValueError
+                range_start, range_end = range_header[6:].split("-", 1)
+                if file_size <= 0:
+                    raise ValueError
+                if not range_start:
+                    suffix_length = int(range_end)
+                    if suffix_length <= 0:
+                        raise ValueError
+                    start = max(0, file_size - suffix_length)
+                    end = file_size - 1
+                else:
+                    start = int(range_start)
+                    if start < 0 or start >= file_size:
+                        raise ValueError
+                    end = int(range_end) if range_end else file_size - 1
+                    if end < start:
+                        raise ValueError
+                    end = min(end, file_size - 1)
+                length = end - start + 1
+            except (TypeError, ValueError):
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self._headers(content_type, 0)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes */{file_size}")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+
+        self.send_response(status)
+        self._headers(content_type, length)
+        self.send_header("Accept-Ranges", "bytes")
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self.end_headers()
+        try:
+            with file_path.open("rb") as stream:
+                stream.seek(start)
+                remaining = length
+                while remaining:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Browsers commonly cancel an old range request when the user seeks.
+            return
+
+    def _serve_action_image(self, path: str) -> None:
+        parts = path.split("/")
+        action_id = parts[4] if len(parts) == 6 else ""
+        file_path = self.server.action_store.image_path(action_id)  # type: ignore[attr-defined]
+        if file_path is None:
+            self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": "动作图片不存在"})
+            return
+        try:
+            data = file_path.read_bytes()
+        except OSError:
+            self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": "动作图片不存在"})
+            return
+        self.send_response(HTTPStatus.OK)
         self._headers(mimetypes.guess_type(str(file_path))[0] or "application/octet-stream", len(data))
         self.end_headers()
         self.wfile.write(data)
@@ -261,6 +417,8 @@ class LocalHandler(BaseHTTPRequestHandler):
         relative = "index.html" if path in {"", "/"} else path.lstrip("/")
         if relative in {"prompt", "prompt/"}:
             relative = "prompt.html"
+        if relative in {"outputs", "outputs/"}:
+            relative = "outputs.html"
         if relative.startswith("static/"):
             relative = relative[len("static/"):]
         file_path = (STATIC_ROOT / relative).resolve()
@@ -283,6 +441,8 @@ class AppServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int]) -> None:
         self.store = LocalStore()
         self.manager = TaskManager(self.store)
+        self.prompt_store = PromptStore(DATA_ROOT)
+        self.action_store = ActionStore(DATA_ROOT)
         super().__init__(address, LocalHandler)
 
     def server_close(self) -> None:

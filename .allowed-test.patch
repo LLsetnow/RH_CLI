@@ -1,0 +1,9 @@
+diff --git a/web/app.py b/web/app.py
+--- a/web/app.py
++++ b/web/app.py
+@@ -656,4 +656,4 @@
+         allowed = {
+-            "status", "progress", "updated_at", "started_at", "completed_at", "key_id", "remote_task_id", "remote_workflow_id",
++            "status", "progress", "updated_at", "started_at", "completed_at", "key_id", "dispatch_key_name", "dispatch_key_site", "dispatch_key_api_type", "remote_task_id", "remote_workflow_id",
+             "outputs_json", "error", "error_detail", "stage_logs_json", "cost_type", "cost", "duration", "output_dir",
+         }

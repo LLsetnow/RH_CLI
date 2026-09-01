@@ -1,0 +1,12 @@
+diff --git a/web/app.py b/web/app.py
+--- a/web/app.py
++++ b/web/app.py
+@@ -383,5 +383,8 @@
+               progress TEXT NOT NULL DEFAULT '',
+               workflow_path TEXT NOT NULL,
+               workflow_name TEXT NOT NULL,
+               key_id TEXT,
++              dispatch_key_name TEXT NOT NULL DEFAULT '',
++              dispatch_key_site TEXT NOT NULL DEFAULT '',
++              dispatch_key_api_type TEXT NOT NULL DEFAULT '',
+               remote_task_id TEXT,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -30,13 +31,14 @@ def test_inspect_workflow_finds_direct_files_and_prompts():
 
 def test_inspect_workflow_reads_remote_id_without_treating_metadata_as_node():
     workflow = {
-        "__rh_meta__": {"workflowId": "123456"},
+        "__rh_meta__": {"workflowId": "123456", "bypassedInputs": ["1:image"]},
         "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
     }
 
     analysis = web_app.inspect_workflow(workflow)
 
     assert analysis["remote_workflow_id"] == "123456"
+    assert analysis["bypassed_inputs"] == ["1:image"]
     assert [item["id"] for item in analysis["file_inputs"]] == ["1:image"]
 
 
@@ -66,10 +68,51 @@ def test_normalize_random_noise_inputs_rejects_unknown_mode():
     assert excinfo.value.code == "INVALID_RANDOM_NOISE"
 
 
+def test_normalize_bypassed_inputs_rejects_unknown_input():
+    workflow = {"1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}}}
+
+    with pytest.raises(RhCliError) as excinfo:
+        web_app.normalize_bypassed_inputs(workflow, ["9:image"])
+
+    assert excinfo.value.code == "INVALID_BYPASS"
+
+
+def test_bypassed_local_file_args_use_original_absolute_file(tmp_path):
+    original = tmp_path / "original.png"
+    original.write_bytes(b"original")
+    workflow = {"1": {"class_type": "LoadImage", "inputs": {"image": str(original)}}}
+
+    assert web_app.bypassed_local_file_args(workflow, {"1:image"}) == [f"1:image={original}"]
+
+    workflow["1"]["inputs"]["image"] = str(tmp_path / "missing.png")
+    with pytest.raises(RhCliError) as excinfo:
+        web_app.bypassed_local_file_args(workflow, {"1:image"})
+    assert excinfo.value.code == "BYPASS_FILE_NOT_FOUND"
+
+
 def test_key_capacity_matches_requested_tiers():
     assert web_app.key_capacity("PERSONAL") == 3
     assert web_app.key_capacity("SHARED") == 100
     assert web_app.key_capacity("ENTERPRISE_PRO") == 100
+    assert web_app.key_capacity("WALLET") == 100
+
+
+def test_personal_capacity_setting_changes_personal_keys_but_not_shared_keys(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        assert store.personal_capacity() == 3
+        assert store.set_personal_capacity(2) == 2
+        store.save_keys([_saved_key()])
+
+        assert store.personal_capacity() == 2
+        assert store.keys()[0]["capacity"] == 2
+        assert web_app.key_capacity("SHARED", 2) == 100
+        with pytest.raises(RhCliError) as excinfo:
+            store.set_personal_capacity(4)
+        assert excinfo.value.code == "INVALID_PERSONAL_CAPACITY"
+    finally:
+        store._db.close()
 
 
 def test_public_key_masks_secret():
@@ -79,11 +122,39 @@ def test_public_key_masks_secret():
     assert result["balance_checked_at"] == 0
 
 
+def test_managed_accounts_persist_site_and_never_store_credentials(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account = store.add_account("我的 AI 账号", "ai")
+        assert account["site"] == "ai"
+        assert store.get_account(account["id"])["status"] == "login_required"
+
+        updated = store.update_account(
+            account["id"],
+            {
+                "status": "checked_in",
+                "status_message": "网站已返回今日登录奖励：100 RH 币",
+                "daily_coin": 100,
+                "last_checkin_at": 123,
+                "token": "must-not-be-written",
+            },
+        )
+        assert web_app.public_account(updated)["daily_coin"] == "100"
+        raw = (tmp_path / "data" / "accounts.json").read_text(encoding="utf-8")
+        assert "must-not-be-written" not in raw
+        assert "password" not in raw.lower()
+        assert "token" not in raw.lower()
+    finally:
+        store._db.close()
+
+
 def _configure_web_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "DATA_ROOT", tmp_path / "data")
     monkeypatch.setattr(web_app, "WORKFLOW_ROOT", tmp_path / "data" / "workflows")
     monkeypatch.setattr(web_app, "OUTPUT_ROOT", tmp_path / "data" / "outputs")
     monkeypatch.setattr(web_app, "KEYS_PATH", tmp_path / "data" / "keys.json")
+    monkeypatch.setattr(web_app, "ACCOUNTS_PATH", tmp_path / "data" / "accounts.json")
     monkeypatch.setattr(web_app, "DB_PATH", tmp_path / "data" / "tasks.sqlite3")
 
 
@@ -300,8 +371,82 @@ def test_load_task_workflow_returns_saved_workflow_and_task_inputs(tmp_path, mon
         assert loaded["workflow"]["2"]["class_type"] == "RandomNoise"
         assert loaded["analysis"]["random_noise_count"] == 1
         assert loaded["task"]["random_noise"]["2"]["mode"] == "fixed"
+        snapshot = Path(tmp_path / "out" / "task_load" / "workflow_api.json")
+        assert snapshot.is_file()
+        assert loaded["task"]["workflow_snapshot_path"] == str(snapshot.resolve())
     finally:
         store._db.close()
+
+
+def test_startup_recovery_marks_existing_local_outputs_completed(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    output_dir = tmp_path / "out"
+    task_id = "task_recover"
+    store = web_app.LocalStore()
+    store.create_task(
+        {
+            "id": task_id,
+            "created_at": 1,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": "recover.json",
+            "files": {},
+            "prompts": {},
+            "key_id": None,
+            "remote_workflow_id": "123456",
+            "output_dir": str(output_dir),
+        }
+    )
+    store.update_task(task_id, status="running", remote_task_id="remote-1")
+    task_folder = output_dir / task_id
+    task_folder.mkdir(parents=True)
+    (task_folder / "workflow_api.json").write_text("{}", encoding="utf-8")
+    (task_folder / "output_1.png").write_bytes(b"png")
+    (task_folder / ".output_2.mp4.part").write_bytes(b"partial")
+    store._db.close()
+
+    recovered_store = web_app.LocalStore()
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = recovered_store
+    try:
+        manager._recover_tasks_on_startup()
+        recovered = recovered_store.task(task_id)
+        assert recovered["status"] == "completed"
+        assert recovered["outputs"][0]["name"] == "output_1.png"
+        assert len(recovered["outputs"]) == 1
+        assert "本地产物恢复" in recovered["progress"]
+    finally:
+        recovered_store._db.close()
+
+
+def test_startup_recovery_queues_remote_poll_when_no_local_output(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    store.create_task(
+        {
+            "id": "task_remote_recover",
+            "created_at": 1,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": "recover.json",
+            "files": {},
+            "prompts": {},
+            "key_id": None,
+            "remote_workflow_id": "123456",
+            "output_dir": str(tmp_path / "out"),
+        }
+    )
+    store.update_task("task_remote_recover", status="running", remote_task_id="remote-2")
+    store._db.close()
+
+    recovered_store = web_app.LocalStore()
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = recovered_store
+    try:
+        manager._recover_tasks_on_startup()
+        recovered = recovered_store.task("task_remote_recover")
+        assert recovered["status"] == "recovering"
+        assert "恢复远程轮询" in recovered["progress"]
+    finally:
+        recovered_store._db.close()
 
 
 def test_submit_task_saves_modified_workflow_with_random_noise(tmp_path, monkeypatch):
@@ -324,7 +469,46 @@ def test_submit_task_saves_modified_workflow_with_random_noise(tmp_path, monkeyp
         loaded = store.load_task_workflow(task["id"])
 
         assert loaded["task"]["random_noise"] == {"2": {"seed": 789, "mode": "fixed"}}
-        assert loaded["workflow"]["2"]["inputs"] == {"noise_seed": 0, "mode": "randomize"}
+        assert loaded["workflow"]["2"]["inputs"] == {"noise_seed": 789, "mode": "fixed"}
+        snapshot = Path(task["output_dir"]) / task["id"] / "workflow_api.json"
+        assert snapshot.is_file()
+        assert loaded["task"]["workflow_snapshot_path"] == str(snapshot.resolve())
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_submit_task_bypasses_current_input_values_in_snapshot(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        workflow = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "original.png"}},
+            "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "original prompt"}},
+            "3": {"class_type": "RandomNoise", "inputs": {"noise_seed": 1, "mode": "randomize"}},
+        }
+        task = manager.submit_task(
+            "unused",
+            {"1:image": str(tmp_path / "missing-current.png")},
+            {"2:text": "current prompt"},
+            None,
+            None,
+            remote_workflow_id="123456",
+            random_noise={"3": {"seed": "99", "mode": "fixed"}},
+            bypassed_inputs=["1:image", "3"],
+            workflow_data=workflow,
+            workflow_name="bypass_api.json",
+        )
+
+        loaded = store.load_task_workflow(task["id"])
+        snapshot = loaded["workflow"]
+
+        assert loaded["task"]["bypassed_inputs"] == ["1:image", "3"]
+        assert snapshot["1"]["inputs"]["image"] == "original.png"
+        assert snapshot["2"]["inputs"]["text"] == "current prompt"
+        assert snapshot["3"]["inputs"] == {"noise_seed": 1, "mode": "randomize"}
+        assert loaded["task"]["files"]["1:image"].endswith("missing-current.png")
     finally:
         manager.close()
         store._db.close()
@@ -375,6 +559,54 @@ def test_local_file_preview_reads_image_without_copying(tmp_path):
     assert not (web_app.WEB_ROOT / "data" / "inputs" / source.name).exists()
 
 
+def test_public_outputs_lists_available_files_and_text(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        task_id = "task_outputs"
+        output_dir = tmp_path / "out"
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": 1,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "demo_api.json",
+                "files": {},
+                "prompts": {},
+                "key_id": None,
+                "output_dir": str(output_dir),
+            }
+        )
+        task_folder = output_dir / task_id
+        task_folder.mkdir(parents=True)
+        image = task_folder / "preview.png"
+        image.write_bytes(b"png")
+        store.update_task(
+            task_id,
+            status="completed",
+            completed_at=2,
+            outputs_json=json.dumps(
+                [
+                    {"kind": "file", "path": str(image), "name": image.name, "mime": "image/png"},
+                    {"kind": "text", "node_id": "3", "text": "result text"},
+                    {"kind": "file", "path": str(tmp_path / "missing.mp4"), "name": "missing.mp4", "mime": "video/mp4"},
+                ],
+                ensure_ascii=False,
+            ),
+        )
+
+        manager = SimpleNamespace(public_tasks=lambda: [store.task(task_id)])
+        result = web_app.public_outputs(store, manager)
+
+        assert result["summary"]["total"] == 2
+        assert result["summary"]["image"] == 1
+        assert result["summary"]["text"] == 1
+        assert [item["name"] for item in result["outputs"]] == ["preview.png", "文本输出 · 3"]
+        assert result["outputs"][0]["file_index"] == 0
+    finally:
+        store._db.close()
+
+
 def test_submit_task_requires_all_detected_files(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "DATA_ROOT", tmp_path / "data")
     monkeypatch.setattr(web_app, "WORKFLOW_ROOT", tmp_path / "data" / "workflows")
@@ -393,6 +625,32 @@ def test_submit_task_requires_all_detected_files(tmp_path, monkeypatch):
         with pytest.raises(RhCliError) as excinfo:
             manager.submit_task(workflow_id, {}, {}, None, None, "123456")
         assert excinfo.value.code == "MISSING_INPUT"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_submit_task_allows_bypassed_required_file_without_local_path(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        workflow_id, _, _ = store.save_workflow(
+            "demo_api.json",
+            json.dumps({"1": {"class_type": "LoadImage", "inputs": {"image": "original.png"}}}),
+        )
+
+        task = manager.submit_task(
+            workflow_id,
+            {},
+            {},
+            None,
+            None,
+            "123456",
+            bypassed_inputs=["1:image"],
+        )
+
+        assert task["bypassed_inputs"] == ["1:image"]
     finally:
         manager.close()
         store._db.close()
@@ -454,6 +712,70 @@ def test_run_task_uses_remote_id_and_strips_web_metadata(tmp_path, monkeypatch):
 
         assert submitted["workflow_id"] == "987654"
         assert "__rh_meta__" not in submitted["workflow"]
+        assert store.task(task["id"])["status"] == "completed"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_run_task_ignores_current_values_for_bypassed_inputs(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        original_file = tmp_path / "original.png"
+        original_file.write_bytes(b"original")
+        workflow = {
+            "__rh_meta__": {"workflowId": "987654"},
+            "1": {"class_type": "LoadImage", "inputs": {"image": str(original_file)}},
+            "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "original prompt"}},
+        }
+        task = manager.submit_task(
+            "unused",
+            {"1:image": str(tmp_path / "not-uploaded.png")},
+            {"2:text": "not-applied prompt"},
+            None,
+            None,
+            bypassed_inputs=["1:image", "2:text"],
+            workflow_data=workflow,
+            workflow_name="bypass_run_api.json",
+        )
+        submitted = {}
+        uploaded = {}
+
+        def apply_files(client, workflow, args, upload_url):
+            uploaded["args"] = list(args)
+            workflow["1"]["inputs"]["image"] = "uploaded-original.png"
+            return ["uploaded original"]
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(web_app, "RhHttpClient", lambda *args, **kwargs: FakeClient())
+        monkeypatch.setattr(web_app, "_site_urls", lambda site: ("upload", "create", "outputs"))
+        monkeypatch.setattr(
+            web_app,
+            "_apply_file_args",
+            apply_files,
+        )
+        monkeypatch.setattr(
+            web_app,
+            "_submit",
+            lambda client, api_key, workflow_id, workflow_json, **kwargs: submitted.update(
+                {"workflow_id": workflow_id, "workflow": json.loads(workflow_json)}
+            ) or "remote-task-bypass",
+        )
+        monkeypatch.setattr(web_app, "_poll_outputs", lambda *args, **kwargs: [])
+
+        manager._run_task(task["id"], _saved_key(), threading.Event())
+
+        assert uploaded["args"] == [f"1:image={original_file}"]
+        assert submitted["workflow"]["1"]["inputs"]["image"] == "uploaded-original.png"
+        assert submitted["workflow"]["2"]["inputs"]["text"] == "original prompt"
         assert store.task(task["id"])["status"] == "completed"
     finally:
         manager.close()

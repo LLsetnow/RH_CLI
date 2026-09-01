@@ -1,0 +1,11 @@
+diff --git a/web/app.py b/web/app.py
+--- a/web/app.py
++++ b/web/app.py
+@@ -646,5 +646,5 @@
+             self._db.execute(
+-                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,remote_task_id,remote_workflow_id,"
++                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,remote_task_id,remote_workflow_id,"
+                 "input_json,prompt_json,random_noise_json,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
+-                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:remote_task_id,:remote_workflow_id,"
++                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:remote_task_id,:remote_workflow_id,"
+                 ":input_json,:prompt_json,:random_noise_json,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",

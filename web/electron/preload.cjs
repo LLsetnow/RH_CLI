@@ -7,5 +7,11 @@ contextBridge.exposeInMainWorld("rhElectron", {
   },
   selectDirectory() {
     return ipcRenderer.invoke("select-directory");
+  },
+  openAccountLogin(account) {
+    return ipcRenderer.invoke("account-login", account);
+  },
+  accountCheckin(account) {
+    return ipcRenderer.invoke("account-checkin", account);
   }
 });

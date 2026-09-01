@@ -1,0 +1,19 @@
+diff --git a/web/app.py b/web/app.py
+--- a/web/app.py
++++ b/web/app.py
+@@ -772,8 +772,13 @@
+     def public_tasks(self) -> list[dict[str, Any]]:
+         result = []
+         keys = {item["id"]: item for item in self.store.keys()}
+         for task in self.store.tasks():
+             key = keys.get(task.get("key_id"))
+-            task["key_name"] = key.get("name") if key else ("自动调度" if not task.get("key_id") else "已删除 Key")
+-            task["key_site"] = key.get("site") if key else ""
++            snapshot_name = str(task.get("dispatch_key_name") or "").strip()
++            snapshot_site = str(task.get("dispatch_key_site") or "").strip()
++            snapshot_api_type = str(task.get("dispatch_key_api_type") or "").strip()
++            task["key_name"] = snapshot_name or (key.get("name") if key else ("自动调度" if not task.get("key_id") else "已删除 Key"))
++            task["key_site"] = snapshot_site or (key.get("site") if key else "")
++            task["key_api_type"] = snapshot_api_type or (key.get("api_type") if key else "")
++            task["dispatch_credential_recorded"] = bool(snapshot_name)
+             task["remote_task_id"] = task.get("remote_task_id") or ""
