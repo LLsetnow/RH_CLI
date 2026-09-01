@@ -14,7 +14,6 @@
   var pageEnterStarted = false;
   var warmedPages = {};
   var shuffleSelectors = [
-    ".app-shell > .topbar .top-nav",
     ".app-shell > .intro-block",
     ".app-shell > .process-nav",
     ".app-shell > .workspace .queue-column > .process-nav",

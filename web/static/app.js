@@ -545,7 +545,7 @@
       { label: "720p", megapixels: "0.9", width: 1280, height: 736 },
       { label: "1080p", megapixels: "2.0", width: 1920, height: 1088 },
       { label: "2K", megapixels: "2.4", width: 2048, height: 1152 },
-      { label: "4K", megapixels: ">4", width: 3840, height: 2176 }
+      { label: "4K", megapixels: "4.0", width: 3840, height: 2176 }
     ];
     var rows = presets.map(function (preset) {
       var area = preset.width * preset.height;
@@ -555,17 +555,28 @@
         width = Math.max(32, Math.ceil(Math.sqrt(area * ratio) / 32) * 32);
         height = Math.max(32, Math.ceil(Math.sqrt(area / ratio) / 32) * 32);
       }
-      return '<tr><th scope="row">' + preset.label + '</th><td>' + preset.megapixels + '</td><td>' + width + ' × ' + height + '</td></tr>';
+      return '<tr data-resolution-megapixels="' + esc(preset.megapixels) + '" tabindex="0" role="button" title="点击填写 ' + esc(preset.megapixels) + '"><th scope="row">' + preset.label + '</th><td>' + preset.megapixels + '</td><td>' + width + ' × ' + height + '</td></tr>';
     }).join("");
     return '<div class="resolution-reference-heading"><strong>分辨率参考</strong><span>' + esc(resolutionRatioLabel(aspect)) + '</span></div>' +
       '<table class="resolution-reference-table"><thead><tr><th scope="col">档位</th><th scope="col">MP</th><th scope="col">输出尺寸</th></tr></thead><tbody>' + rows + '</tbody></table>' +
-      '<div class="resolution-reference-note">4K 参考值超过当前 megapixels 上限 4。</div>';
+      '<div class="resolution-reference-note">点击任一档位即可填写；4K 按当前上限 4.0 处理。</div>';
   }
 
   function updateResolutionReference(card, aspect) {
     if (!card) return;
     var reference = card.querySelector(".resolution-reference-popover");
     if (reference) reference.innerHTML = resolutionReferenceMarkup(aspect);
+  }
+
+  function applyResolutionPreset(row) {
+    if (!row) return;
+    var card = row.closest(".resolution-card");
+    var input = card && card.querySelector(".resolution-megapixels");
+    if (!input) return;
+    input.value = row.dataset.resolutionMegapixels || "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    showToast("已将 megapixels 设置为 " + input.value);
   }
 
   function applyBypassedNodes(workflow, bypassedNodes) {
@@ -1397,6 +1408,11 @@
     ["dragleave", "drop"].forEach(function (name) { dropzone.addEventListener(name, function (event) { event.preventDefault(); dropzone.classList.remove("dragging"); }); });
     dropzone.addEventListener("drop", function (event) { analyzeFile(event.dataTransfer.files[0]); });
     $("workflowInputs").addEventListener("click", function (event) {
+      var resolutionPreset = event.target.closest("tr[data-resolution-megapixels]");
+      if (resolutionPreset && $("workflowInputs").contains(resolutionPreset)) {
+        applyResolutionPreset(resolutionPreset);
+        return;
+      }
       var trigger = event.target.closest("[data-action]");
       if (!trigger || !$("workflowInputs").contains(trigger)) return;
       var action = trigger.dataset.action;
@@ -1429,6 +1445,12 @@
       if (event.target.classList.contains("resolution-help")) event.target.setAttribute("aria-expanded", "false");
     });
     $("workflowInputs").addEventListener("keydown", function (event) {
+      var resolutionPreset = event.target.closest("tr[data-resolution-megapixels]");
+      if (resolutionPreset && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        applyResolutionPreset(resolutionPreset);
+        return;
+      }
       var zone = event.target.closest(".file-dropzone");
       if (!zone || (event.key !== "Enter" && event.key !== " ")) return;
       var card = zone.closest(".file-input-card");
