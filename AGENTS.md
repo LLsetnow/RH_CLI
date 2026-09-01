@@ -13,10 +13,11 @@
 官方 `rh` 只能跑标准模型（`model run`）和已发布 AI 应用（`app run`，走 `/task/openapi/ai-app/run`，只能传 webappId + 节点参数）。本 fork 补上了**提交完整 ComfyUI 工作流图**这条路：
 
 ```bash
-rh workflow run <工作流.json> -w <workflowId> -i <输入图> [--set nodeId:field=value] [--encrypt --password <pw>] [-o 输出目录]
+rh workflow run <工作流.json> [-w <workflowId>] -i <输入图> [--file nodeId:field=路径] [--set nodeId:field=value] [--encrypt --password <pw>] [-o 输出目录]
 ```
 
 - 自动上传输入图并注入 `LoadImage` 节点；提交 `/task/openapi/create`；轮询 `/task/openapi/outputs`；下载结果。
+- `--file nodeId:field=path`（可重复）上传图片、音频、视频等本地输入，并把返回的文件名注入对应节点字段；`--input` 仍是单图片快捷方式。
 - **`--set nodeId:field=value`**（可重复）覆盖任意节点参数，带类型自动转换。例：`--set 9:denoise=0.4`。
 - **`--encrypt [--password <pw>]`**：在每个 SaveImage 前自动插入鸭鸭图加密节点（`DuckHideNode`），下载到鸭子图后用本地 `SS_tools/macOS-duck-decoder` 自动解回真图（真图用干净文件名，鸭子图另存为 `*.duck.*`）。前提：服务器已装 SS_tools 加密节点，且本机为 macOS。
 - 代码位置：`src/rh_cli/workflow/{client.py,commands.py}`，在 `src/rh_cli/main.py` 注册。轮询走经典 outputs 端点（**不是**上游的 `/openapi/v2/query`，那个只适用于 AI 应用）。
@@ -33,7 +34,7 @@ rh check                                                  # 验证 key / 查余�
 
 - **`--with socksio` 是必需的**：本机有本地 SOCKS 代理（`127.0.0.1:12334`），否则 httpx 建客户端就崩。
 - **代理陷阱**：`NO_PROXY` 含 `.cn`，所以 `runninghub.cn` 直连、绕过代理；国际接口才走代理。
-- **workflowId** 由 `-w` 传入（工作流页面 URL 末尾的数字）。此前测试用的是 `2075188854994329602`。
+- `workflowId` 可由 `-w` 传入（工作流页面 URL 末尾的数字），也可省略；省略时直接提交完整的 ComfyUI API 工作流 JSON。
 
 ## 附带资源
 

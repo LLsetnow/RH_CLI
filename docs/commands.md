@@ -44,3 +44,17 @@ rh app list --sort HOTTEST --days 7
 rh app info WEBAPP_ID_OR_URL
 rh app run WEBAPP_ID_OR_URL --node "52:prompt=..." --file "39:image=./input.png"
 ```
+
+## Raw ComfyUI workflow
+
+The workflow must be a ComfyUI API-format node dictionary:
+
+```bash
+rh workflow run ./workflow_api.json \
+  --file "37:image=./reference.png" \
+  --file "52:audio=./source.wav" \
+  --set "9:denoise=0.4" \
+  -o ./output/
+```
+
+`--workflow-id` is optional for a complete workflow JSON. Repeat `--file` with the format `nodeId:fieldName=local-path`; each file is uploaded and the returned RunningHub filename is written into the raw workflow. For a single-image workflow, `--input` injects the first `LoadImage` node automatically. Advanced request options include `--access-password`, `--webhook-url`, `--retain-seconds`, `--personal-queue`, and `--no-add-metadata`.

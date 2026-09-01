@@ -130,6 +130,21 @@ rh app run 1877265245566922800 \
 
 ---
 
+## 🧩 Raw ComfyUI workflows
+
+This fork can submit a ComfyUI **API-format** workflow JSON directly. Use `--input` as a shortcut for one image, or repeat `--file` to upload and inject audio, video, or multiple reference files by node:
+
+```bash
+rh workflow run ./workflow_api.json \
+  --file "37:image=./reference.png" \
+  --file "52:audio=./source.wav" \
+  -o ./output/
+```
+
+`--workflow-id` is optional when the complete API-format workflow JSON is supplied. `--file "nodeId:fieldName=/path/to/file"` uploads a local file and writes the returned RunningHub filename into that node field. Use the actual node IDs and field names from the workflow JSON.
+
+---
+
 ## 🤖 JSON Mode
 
 ```bash

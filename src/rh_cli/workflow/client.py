@@ -11,6 +11,7 @@ from typing import Any
 from rh_cli.config import require_api_key
 from rh_cli.errors import RhCliError
 from rh_cli.http import BASE_URL_CN, BASE_URL_AI, API_HOST_CN, API_HOST_AI, RhHttpClient, get_site_config
+from rh_cli.media import upload_app_file
 from rh_cli.output import RunResult, resolve_output_path
 
 
@@ -193,32 +194,137 @@ def _decode_duck(decoder: Path, duck_path: Path, out_path: Path, password: str) 
         raise RhCliError("DECODE_FAILED", f"解密未生成输出文件：{out_path}")
 
 
-def _upload_image(client: RhHttpClient, api_key: str, image_path: Path, upload_url: str = "") -> str:
+def _upload_file(client: RhHttpClient, api_key: str, file_path: Path, upload_url: str = "") -> str:
     url = upload_url or UPLOAD_URL
     response = client.upload_form(
         url,
-        str(image_path),
+        str(file_path),
         data={},
         headers={"Authorization": f"Bearer {api_key}"},
     )
     if response.get("code") != 0:
-        raise RhCliError("UPLOAD_FAILED", f"图片上传失败：{response.get('msg', response)}", detail=response)
+        raise RhCliError("UPLOAD_FAILED", f"文件上传失败：{response.get('msg', response)}", detail=response)
     file_name = response.get("data", {}).get("fileName")
     if not file_name:
         raise RhCliError("UPLOAD_FAILED", "上传成功但响应中没有 fileName。", detail=response)
     return str(file_name)
 
 
-def _submit(client: RhHttpClient, api_key: str, workflow_id: str, workflow_json: str, instance_type: str = "", create_url: str = "") -> str:
+def _parse_file_arg(spec: str) -> tuple[str, str, Path]:
+    """解析 nodeId:fieldName=path，并返回节点、字段和本地路径。"""
+    if ":" not in spec or "=" not in spec.split(":", 1)[1]:
+        raise RhCliError("INVALID_FILE_ARG", f"--file 格式应为 nodeId:fieldName=路径，收到：{spec}")
+    node_id, rest = spec.split(":", 1)
+    field_name, file_path = rest.split("=", 1)
+    node_id, field_name, file_path = node_id.strip(), field_name.strip(), file_path.strip()
+    if not node_id or not field_name or not file_path:
+        raise RhCliError("INVALID_FILE_ARG", f"--file 格式应为 nodeId:fieldName=路径，收到：{spec}")
+    return node_id, field_name, Path(file_path).expanduser()
+
+
+def _apply_file_args(
+    client: RhHttpClient,
+    workflow: dict[str, Any],
+    file_args: list[str],
+    upload_url: str = "",
+) -> list[str]:
+    """上传并注入任意工作流输入文件，返回可读的变更记录。"""
+    parsed: list[tuple[str, str, Path, dict[str, Any]]] = []
+    for spec in file_args:
+        node_id, field_name, file_path = _parse_file_arg(spec)
+        node = workflow.get(node_id)
+        if not isinstance(node, dict):
+            raise RhCliError("INVALID_FILE_ARG", f"节点 {node_id} 不存在于工作流中。")
+        if not file_path.exists() or not file_path.is_file():
+            raise RhCliError("FILE_NOT_FOUND", f"输入文件不存在：{file_path}")
+        parsed.append((node_id, field_name, file_path, node))
+
+    changes: list[str] = []
+    for node_id, field_name, file_path, node in parsed:
+        uploaded = upload_app_file(client, file_path, upload_url=upload_url)
+        inputs = node.setdefault("inputs", {})
+        old = inputs.get(field_name)
+        inputs[field_name] = uploaded
+        changes.append(f"{node_id}.{field_name}: {old!r} → {uploaded!r}（{file_path.name}）")
+    return changes
+
+
+def _validate_api_workflow(workflow: dict[str, Any]) -> None:
+    """校验 ComfyUI API 工作流的最小结构，不限制具体节点类型。"""
+    if not workflow:
+        raise RhCliError("INVALID_WORKFLOW", "工作流 JSON 不能为空。")
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            raise RhCliError("INVALID_WORKFLOW", f"节点 {node_id} 必须是对象。")
+        class_type = node.get("class_type")
+        if not isinstance(class_type, str) or not class_type.strip():
+            raise RhCliError("INVALID_WORKFLOW", f"节点 {node_id} 缺少有效的 class_type。")
+        if not isinstance(node.get("inputs"), dict):
+            raise RhCliError("INVALID_WORKFLOW", f"节点 {node_id} 缺少有效的 inputs 对象。")
+
+
+def _check_prompt_tips(response: dict[str, Any]) -> None:
+    """将 RunningHub 提交时返回的节点校验错误提前转换成 CLI 错误。"""
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return
+    prompt_tips = data.get("promptTips")
+    if isinstance(prompt_tips, str):
+        try:
+            prompt_tips = json.loads(prompt_tips)
+        except ValueError:
+            return
+    if not isinstance(prompt_tips, dict):
+        return
+    node_errors = prompt_tips.get("node_errors")
+    if prompt_tips.get("result") is False or node_errors:
+        task_id = data.get("taskId")
+        suffix = f"，taskId={task_id}" if task_id else ""
+        raise RhCliError(
+            "NODE_ERRORS",
+            f"工作流节点校验失败{suffix}。",
+            detail=prompt_tips,
+        )
+
+
+def _submit(
+    client: RhHttpClient,
+    api_key: str,
+    workflow_id: str | None,
+    workflow_json: str,
+    instance_type: str = "",
+    create_url: str = "",
+    *,
+    access_password: str | None = None,
+    webhook_url: str | None = None,
+    retain_seconds: int | None = None,
+    use_personal_queue: bool = False,
+    add_metadata: bool | None = None,
+) -> str:
     url = create_url or CREATE_URL
-    payload = {"apiKey": api_key, "workflowId": workflow_id, "workflow": workflow_json}
+    payload: dict[str, Any] = {"apiKey": api_key, "workflow": workflow_json}
+    if workflow_id:
+        payload["workflowId"] = workflow_id
     if instance_type:
         payload["instanceType"] = instance_type
+    if access_password:
+        payload["accessPassword"] = access_password
+    if webhook_url:
+        payload["webhookUrl"] = webhook_url
+    if retain_seconds is not None:
+        if not 10 <= retain_seconds <= 180:
+            raise RhCliError("INVALID_RETAIN_SECONDS", "--retain-seconds 必须在 10 到 180 秒之间。")
+        payload["retainSeconds"] = retain_seconds
+    if use_personal_queue:
+        payload["usePersonalQueue"] = True
+    if add_metadata is not None:
+        payload["addMetadata"] = add_metadata
     delay = 10
     for attempt in range(5):
         response = client.post_json(url, payload)
         code = response.get("code")
         if code == 0:
+            _check_prompt_tips(response)
             task_id = response.get("data", {}).get("taskId")
             if not task_id:
                 raise RhCliError("SUBMIT_FAILED", "提交成功但响应中没有 taskId。", detail=response)
@@ -313,9 +419,10 @@ def run_workflow(
     api_key_arg: str | None,
     key_name: str | None = None,
     workflow_file: str,
-    workflow_id: str,
+    workflow_id: str | None,
     input_image: str | None,
     load_image_node: str | None,
+    file_args: list[str] | None = None,
     output: str | None,
     output_dir: Path | None,
     set_args: list[str] | None = None,
@@ -324,8 +431,14 @@ def run_workflow(
     title: str = "",
     decoder: str | None = None,
     instance_type: str = "",
+    access_password: str | None = None,
+    webhook_url: str | None = None,
+    retain_seconds: int | None = None,
+    use_personal_queue: bool = False,
+    add_metadata: bool | None = None,
     site: str = "cn",
     on_override: Callable[[list[str]], None] | None = None,
+    on_file: Callable[[list[str]], None] | None = None,
     on_encrypt: Callable[[list[str]], None] | None = None,
     on_decode: Callable[[str, str], None] | None = None,
     on_tick: Callable[[int, str], None] | None = None,
@@ -346,6 +459,7 @@ def run_workflow(
         raise RhCliError("INVALID_WORKFLOW", f"无法解析工作流 JSON：{wf_path}") from exc
     if not isinstance(workflow, dict):
         raise RhCliError("INVALID_WORKFLOW", "工作流 JSON 顶层必须是节点字典（API 格式导出）。")
+    _validate_api_workflow(workflow)
 
     if set_args:
         changes = _apply_overrides(workflow, set_args)
@@ -368,7 +482,7 @@ def run_workflow(
             img_path = Path(input_image).expanduser()
             if not img_path.exists():
                 raise RhCliError("FILE_NOT_FOUND", f"输入图片不存在：{img_path}")
-            uploaded = _upload_image(client, api_key, img_path, s_upload)
+            uploaded = _upload_file(client, api_key, img_path, s_upload)
             node_id = load_image_node or find_load_image_node(workflow)
             if node_id and node_id in workflow:
                 workflow[node_id].setdefault("inputs", {})["image"] = uploaded
@@ -378,7 +492,25 @@ def run_workflow(
                     "提供了输入图片，但工作流里找不到 LoadImage 节点；可用 --load-image-node 手动指定。",
                 )
 
-        task_id = _submit(client, api_key, workflow_id, json.dumps(workflow), instance_type, s_create)
+        if file_args:
+            workflow_upload_url = f"{get_site_config(site)['api_host']}/task/openapi/upload"
+            changes = _apply_file_args(client, workflow, file_args, workflow_upload_url)
+            if on_file:
+                on_file(changes)
+
+        task_id = _submit(
+            client,
+            api_key,
+            workflow_id,
+            json.dumps(workflow, ensure_ascii=False),
+            instance_type,
+            s_create,
+            access_password=access_password,
+            webhook_url=webhook_url,
+            retain_seconds=retain_seconds,
+            use_personal_queue=use_personal_queue,
+            add_metadata=add_metadata,
+        )
         s_cancel = _site_cancel_url(site)
         outputs = _poll_outputs(
             client, api_key, task_id, max_seconds=max_seconds, interval=interval,
@@ -387,11 +519,16 @@ def run_workflow(
         )
         cost_type, cost, duration = _extract_task_cost(outputs)
 
-        file_items = [item for item in outputs if item.get("fileUrl")]
+        file_items = [item for item in outputs if _output_file_url(item)]
+        texts: list[str] = []
+        for item in outputs:
+            text = _output_text(item)
+            if text is not None:
+                texts.append(text)
         files: list[str] = []
         for index, item in enumerate(file_items, start=1):
-            url = str(item["fileUrl"])
-            ext = str(item.get("fileType") or "png")
+            url = str(_output_file_url(item))
+            ext = _normalise_output_ext(item.get("fileType"))
             final_path = resolve_output_path(
                 output,
                 output_dir=output_dir,
@@ -413,9 +550,56 @@ def run_workflow(
                 files.append(str(final_path.resolve()))
     return RunResult(
         files=files,
-        texts=[],
+        texts=texts,
         cost=cost,
         cost_type=cost_type,
         duration=duration,
         task_id=task_id,
     )
+
+
+def _output_file_url(item: dict[str, Any]) -> str | None:
+    """兼容工作流结果和其他 RunningHub 结果对象的文件 URL 字段。"""
+    for key in ("fileUrl", "url", "outputUrl"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _output_text(item: dict[str, Any]) -> str | None:
+    """提取文本结果；文件结果不重复作为文本输出。"""
+    if _output_file_url(item):
+        return None
+    for key in ("text", "content"):
+        value = item.get(key)
+        if value is not None:
+            return _stringify_output_value(value)
+    value = item.get("output")
+    if value is not None:
+        return _stringify_output_value(value)
+    if item:
+        # 保留没有标准 fileUrl/text 字段的合法工作流输出，避免 CLI 静默丢弃结果。
+        return json.dumps(item, ensure_ascii=False, default=str)
+    return None
+
+
+def _stringify_output_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _normalise_output_ext(file_type: Any) -> str:
+    """把 fileType/mime type 统一为 resolve_output_path 可用的扩展名。"""
+    value = str(file_type or "png").strip().lower().lstrip(".")
+    if "/" in value:
+        value = value.rsplit("/", 1)[-1]
+    return {
+        "audio": "mp3",
+        "image": "png",
+        "jpeg": "jpg",
+        "quicktime": "mov",
+        "string": "txt",
+        "video": "mp4",
+    }.get(value, value or "bin")
