@@ -1371,11 +1371,11 @@
       if (action === "pick-prompt") document.querySelector('.prompt-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
     });
     $("workflowInputs").addEventListener("input", function (event) {
-      if (event.target.classList.contains("random-noise-seed")) appState.workflowDirty = true;
+      if (event.target.classList.contains("random-noise-seed") || event.target.classList.contains("resolution-megapixels")) appState.workflowDirty = true;
       scheduleDraftSave();
     });
     $("workflowInputs").addEventListener("change", function (event) {
-      if (event.target.classList.contains("random-noise-mode")) appState.workflowDirty = true;
+      if (event.target.classList.contains("random-noise-mode") || event.target.classList.contains("resolution-aspect") || event.target.classList.contains("resolution-megapixels")) appState.workflowDirty = true;
       scheduleDraftSave();
     });
     $("workflowInputs").addEventListener("keydown", function (event) {
