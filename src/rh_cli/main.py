@@ -98,6 +98,23 @@ def check(ctx: typer.Context) -> None:
         state.out.print(f"[red]API Key 校验失败：[/red]{result.get('message')}")
 
 
+@app.command("pricing")
+def pricing(
+    ctx: typer.Context,
+    seconds: float | None = typer.Option(
+        None, "--seconds", "-s", help="按任务耗时（秒）预估各机型花费，例：-s 120。"
+    ),
+) -> None:
+    """查看 RunningHub 计费费率（RH币/秒），并可按耗时预估任务花费。"""
+    from rh_cli.pricing import pricing_dict, render_pricing
+
+    state = ctx.obj if isinstance(ctx.obj, CliState) else CliState(console=console)
+    if state.json_output:
+        state.out.print(json.dumps(pricing_dict(seconds), ensure_ascii=False, indent=2))
+        return
+    render_pricing(state.out, seconds)
+
+
 @auth_app.command("set-key")
 def set_key(
     api_key: str = typer.Argument(..., help="RunningHub API Key。"),
