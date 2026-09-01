@@ -84,6 +84,7 @@ def run_model(
             output=output,
             output_dir=state.output_dir,
             console=state.out if state.verbose else None,
+            site=state.site,
         )
     print_result(state.out, result, json_output=state.json_output)
 
@@ -145,6 +146,7 @@ def run_shortcut(
             run_input=ModelRunInput(prompt=prompt, images=images, params=param),
             output=output,
             output_dir=state.output_dir,
+            site=state.site,
         )
     print_result(state.out, result, json_output=state.json_output)
 

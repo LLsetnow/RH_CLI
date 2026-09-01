@@ -1,0 +1,11 @@
+diff --git a/web/app.py b/web/app.py
+--- a/web/app.py
++++ b/web/app.py
+@@ -568,4 +568,7 @@
+             "workflow_path": task["workflow_path"],
+             "workflow_name": task["workflow_name"],
+             "key_id": task.get("key_id"),
++            "dispatch_key_name": str(task.get("dispatch_key_name") or "").strip(),
++            "dispatch_key_site": str(task.get("dispatch_key_site") or "").strip(),
++            "dispatch_key_api_type": str(task.get("dispatch_key_api_type") or "").strip(),
+             "remote_task_id": None,

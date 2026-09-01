@@ -1,0 +1,105 @@
+{
+  "1": {
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "audio": [
+        "15",
+        0
+      ]
+    },
+    "class_type": "MelBandRoFormerSampler",
+    "_meta": {
+      "title": "Mel-Band RoFormer Sampler"
+    }
+  },
+  "2": {
+    "inputs": {
+      "anything": [
+        "1",
+        1
+      ]
+    },
+    "class_type": "Bjornulf_FreeVRAM",
+    "_meta": {
+      "title": "🧹 Free VRAM hack"
+    }
+  },
+  "5": {
+    "inputs": {
+      "model_name": "MelBandRoFormer_comfy/MelBandRoformer_fp16.safetensors"
+    },
+    "class_type": "MelBandRoFormerModelLoader",
+    "_meta": {
+      "title": "Mel-Band RoFormer Model Loader"
+    }
+  },
+  "6": {
+    "inputs": {
+      "audio": "e0ecbeb332f9c54f0e7f1403bc89ee670968ef3b59358e978e182674529d3f33.mp3",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Load Audio"
+    }
+  },
+  "7": {
+    "inputs": {
+      "anything": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "Bjornulf_FreeVRAM",
+    "_meta": {
+      "title": "🧹 Free VRAM hack"
+    }
+  },
+  "15": {
+    "inputs": {
+      "start_time": "0:10",
+      "end_time": "0:30",
+      "audio": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "AudioCrop",
+    "_meta": {
+      "title": "AudioCrop"
+    }
+  },
+  "26": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "quality": "V0",
+      "audioUI": "",
+      "audio": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "Save Audio (MP3) (DEPRECATED)"
+    }
+  },
+  "27": {
+    "inputs": {
+      "filename_prefix": "audio/ComfyUI",
+      "quality": "V0",
+      "audioUI": "",
+      "audio": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SaveAudioMP3",
+    "_meta": {
+      "title": "Save Audio (MP3) (DEPRECATED)"
+    }
+  }
+}

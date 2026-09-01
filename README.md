@@ -44,6 +44,18 @@ python -m pip install -e ".[test]"
 
 ---
 
+## 🖥️ macOS 桌面版
+
+本项目同时提供 RH Workflow Desk macOS 桌面安装包，适用于 Apple Silicon（arm64）Mac。它把本地工作流提交台、提示词积木和文件预览整合在一个窗口中；应用数据保存在 macOS 的用户数据目录，不会写入安装包。
+
+- [下载最新 macOS 安装包](https://github.com/LLsetnow/RH_CLI/releases/latest)
+- [直接下载 RH Workflow Desk 0.1.0（Apple Silicon `.dmg`）](https://github.com/LLsetnow/RH_CLI/releases/download/v0.1.0/RH-Workflow-Desk-0.1.0-arm64.dmg)
+- [查看 SHA-256 校验值](https://github.com/LLsetnow/RH_CLI/releases/download/v0.1.0/SHA256SUMS.txt)
+
+当前发布包未使用 Apple Developer ID 签名。首次打开时如果 macOS 提示无法验证开发者，请在 Finder 中右键应用选择“打开”，或到“系统设置 → 隐私与安全性”允许打开。需要从源码开发或重新打包时，见 [`web/README.md`](web/README.md)。
+
+---
+
 ## 🚀 快速开始
 
 ```bash
@@ -111,6 +123,7 @@ rh --output-dir ./out image -p "a cat"   # 单次覆盖
 | `rh image` | 快捷文生图 / 图生图（5 个精选模型） |
 | `rh video` | 快捷文生视频 / 图生视频（8 个精选模型） |
 | `rh app list / info / run` | AI 应用：浏览 / 查看节点 / 运行 |
+| `rh workflow run` | 提交原始 ComfyUI API 工作流并下载结果 |
 
 ---
 
@@ -215,6 +228,29 @@ rh app run 1877265245566922800 \
 `rh app run` 会自动：拉取节点信息 → 应用你的修改 → 上传文件 → 提交任务 → 轮询直到完成 → 下载所有结果文件。
 
 > 用 `rh app info <id>` 先看清楚每个节点的 `Node ID` 和 `Field`，再决定 `--node` / `--file` 怎么填。
+
+---
+
+## 🧩 原始 ComfyUI 工作流
+
+本 fork 支持直接提交 ComfyUI **API 格式**工作流 JSON。`--input` 兼容单图片快捷注入；需要音频、视频或多个参考文件时，用可重复的 `--file` 按节点上传并注入：
+
+```bash
+rh workflow run ./workflow_api.json \
+  --file "37:image=./reference.png" \
+  --file "52:audio=./source.wav" \
+  -o ./output/
+```
+
+参数格式：
+
+- `--workflow-id WORKFLOW_ID` —— 可选；完整 workflow JSON 可以不依赖已发布的 workflowId，仍可用它兼容已有的 ID 映射和模板环境。
+- `--file "nodeId:fieldName=/path/to/file"` —— 上传本地文件，并把返回的 RunningHub 文件名写入对应节点字段，可重复。
+- `--input /path/to/image` —— 保留的快捷方式，自动注入第一个 `LoadImage` 节点；多图片工作流请使用多个 `--file`。
+- `--set "nodeId:fieldName=value"` —— 覆盖普通节点参数，可与 `--file` 混用。
+- `--access-password`、`--webhook-url`、`--retain-seconds`、`--personal-queue`、`--no-add-metadata` —— 对应 RunningHub 工作流接口的可选请求参数。
+
+工作流必须是 ComfyUI API 格式导出，节点 ID 和字段名应以当前 JSON 为准，不要凭示例猜测。RunningHub 仍必须具备该工作流需要的模型和自定义节点。
 
 ---
 

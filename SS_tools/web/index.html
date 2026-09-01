@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111614" />
+    <title>鸭鸭图 · 本地解码器</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="鸭鸭图本地解码器首页">
+          <span class="brand-mark" aria-hidden="true"><span></span><i></i></span>
+          <span>
+            <strong>鸭鸭图</strong>
+            <small>LOCAL DECODER</small>
+          </span>
+        </a>
+        <div class="local-badge"><span class="pulse-dot"></span><span>仅本机运行</span></div>
+      </header>
+
+      <main>
+        <section class="intro">
+          <div class="eyebrow"><span class="eyebrow-line"></span>SS_TOOLS / MEDIA PROTECTION</div>
+          <h1>把藏在鸭子图里的内容，<em>带回本地。</em></h1>
+          <p>选择加密图片，输入密码（如果有），将原始媒体直接解码到你指定的位置。</p>
+        </section>
+
+        <section class="workspace-grid" aria-label="解码工作区">
+          <form class="panel control-panel" id="decodeForm">
+            <div class="panel-heading">
+              <div>
+                <span class="section-kicker">01 / INPUT</span>
+                <h2>选择鸭子图</h2>
+              </div>
+              <span class="step-number">01</span>
+            </div>
+
+            <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="选择或拖入鸭子图">
+              <input id="imageInput" name="image" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,image/*" hidden />
+              <div class="drop-icon" aria-hidden="true">
+                <svg viewBox="0 0 48 48" fill="none"><path d="M12 31.5V35a3 3 0 0 0 3 3h18a3 3 0 0 0 3-3v-3.5M24 8v22m0-22-7 7m7-7 7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <strong>拖入图片，或点击上传</strong>
+              <span>PNG · JPG · WEBP · BMP</span>
+              <button class="text-button" type="button" id="nativePickButton">从本机路径选择 ↗</button>
+            </div>
+
+            <div class="selected-file" id="selectedFile" hidden>
+              <div class="file-icon" aria-hidden="true">IMG</div>
+              <div class="file-copy">
+                <strong id="selectedName">尚未选择图片</strong>
+                <span id="selectedPath">等待输入</span>
+              </div>
+              <button class="icon-button" type="button" id="clearFileButton" aria-label="清除已选图片">×</button>
+            </div>
+
+            <label class="field-label" for="inputPath">本地图片路径 <span>可手动粘贴</span></label>
+            <div class="input-with-icon">
+              <span class="field-icon">⌁</span>
+              <input id="inputPath" name="input_path" type="text" placeholder="/Users/you/Desktop/duck.png" autocomplete="off" />
+            </div>
+            <p class="helper-text">网页上传会在本机临时暂存；路径选择则直接读取原文件。</p>
+
+            <div class="divider"></div>
+
+            <div class="panel-heading compact">
+              <div>
+                <span class="section-kicker">02 / ACCESS</span>
+                <h2>解码设置</h2>
+              </div>
+              <span class="step-number">02</span>
+            </div>
+
+            <label class="field-label" for="password">密码 <span>没有密码可留空</span></label>
+            <div class="input-with-icon password-field">
+              <span class="field-icon">✦</span>
+              <input id="password" name="password" type="password" placeholder="输入加密时使用的密码" autocomplete="off" />
+              <button class="reveal-button" type="button" id="revealButton">显示</button>
+            </div>
+
+            <label class="field-label" for="outputPath">导出路径 <span>目录或文件均可</span></label>
+            <div class="input-with-icon">
+              <span class="field-icon">↳</span>
+              <input id="outputPath" name="output_path" type="text" placeholder="/Users/you/Desktop/duck-decoded" autocomplete="off" required />
+            </div>
+            <p class="helper-text">输入目录时，会自动生成 <code>原文件名.decoded</code>；输入带后缀的路径则按指定文件名导出。</p>
+
+            <button class="primary-button" id="decodeButton" type="submit">
+              <span class="button-label">开始解码</span>
+              <span class="button-arrow">→</span>
+            </button>
+          </form>
+
+          <aside class="panel result-panel" aria-live="polite">
+            <div class="result-topline">
+              <span class="section-kicker">OUTPUT / MONITOR</span>
+              <span class="status-chip idle" id="statusChip"><span></span>READY</span>
+            </div>
+
+            <div class="result-hero" id="resultHero">
+              <div class="preview-stage" id="previewStage" hidden>
+                <div class="preview-label"><span>LIVE PREVIEW</span><span id="previewType">MEDIA</span></div>
+                <div class="preview-frame">
+                  <img id="previewImage" alt="解码后的图片预览" hidden />
+                  <video id="previewVideo" controls playsinline preload="metadata" hidden></video>
+                </div>
+              </div>
+              <div class="radar" aria-hidden="true"><span></span><i></i><b></b></div>
+              <p class="result-state" id="resultState">准备好接收一张鸭子图</p>
+              <p class="result-detail" id="resultDetail">解码完成后，结果会出现在右侧。</p>
+            </div>
+
+            <div class="result-data" id="resultData" hidden>
+              <div class="data-row">
+                <span>输入</span>
+                <strong id="resultInput">—</strong>
+              </div>
+              <div class="data-row output-row">
+                <span>已导出至</span>
+                <strong id="resultOutput">—</strong>
+                <button class="copy-button" type="button" id="copyButton">复制</button>
+              </div>
+              <div class="data-row">
+                <span>文件大小</span>
+                <strong id="resultSize">—</strong>
+              </div>
+              <div class="data-row">
+                <span>耗时</span>
+                <strong id="resultElapsed">—</strong>
+              </div>
+            </div>
+
+            <div class="notice-box">
+              <span class="notice-icon">i</span>
+              <p>不要用图片编辑器重新保存鸭子图，否则尾部隐藏数据可能会丢失。</p>
+            </div>
+
+            <div class="service-line"><span class="service-dot"></span><span id="serviceStatus">正在检查本地解码器…</span></div>
+          </aside>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>SS_tools / Duck payload media protection</span>
+        <span>LOCAL • PRIVATE • NO UPLOAD</span>
+      </footer>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/web/app.js"></script>
+  </body>
+</html>

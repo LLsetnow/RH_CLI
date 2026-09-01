@@ -72,5 +72,15 @@ def print_result(console: Console, result: RunResult, *, json_output: bool = Fal
     if result.cost is not None:
         label = "RH币" if result.cost_type == "coins" else "¥"
         console.print(f"[cyan]花费：{label}{result.cost}[/cyan]")
+    elif result.duration not in (None, "", "0", 0):
+        # API 未回传实际花费时，按标准机 0.2 RH币/秒估算，方便心里有数。
+        from .pricing import estimate_coins
+
+        est = estimate_coins(result.duration)
+        if est is not None:
+            console.print(
+                f"[cyan]预计花费：≈{est:g} RH币[/cyan]"
+                "[dim]（按标准机 0.2 RH币/秒估算，实际以账单为准）[/dim]"
+            )
     if result.duration not in (None, "", "0", 0):
         console.print(f"[cyan]耗时：{result.duration}s[/cyan]")

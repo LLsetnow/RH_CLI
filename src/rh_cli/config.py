@@ -142,6 +142,25 @@ def save_keys(keys: dict[str, str], default: str = "") -> Path:
     return write_config(cfg)
 
 
+def read_default_site() -> str:
+    """读取配置中的默认站点，返回 'ai' 或 'cn'。"""
+    cfg = read_config()
+    value = cfg.get("default_site")
+    if isinstance(value, str) and value.strip().lower() in ("ai", "cn"):
+        return value.strip().lower()
+    return "cn"
+
+
+def save_default_site(site: str) -> Path:
+    """保存默认站点到配置。"""
+    site = site.strip().lower()
+    if site not in ("ai", "cn"):
+        raise RhCliError("INVALID_SITE", f"无效站点：{site}，只能是 ai 或 cn。")
+    cfg = read_config()
+    cfg["default_site"] = site
+    return write_config(cfg)
+
+
 def read_key_from_openclaw_config() -> str | None:
     path = Path.home() / ".openclaw" / "openclaw.json"
     if not path.exists():

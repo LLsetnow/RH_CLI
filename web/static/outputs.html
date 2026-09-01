@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:," />
+    <title>成片 · RH Workflow Desk</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/outputs.css" />
+    <script>
+      (function () {
+        try {
+          var storedTheme = localStorage.getItem("rh-workflow-theme");
+          document.documentElement.dataset.theme = storedTheme === "dark" ? "dark" : "light";
+        } catch (error) {}
+      }());
+    </script>
+  </head>
+  <body>
+    <div class="app-shell outputs-shell">
+      <header class="topbar">
+        <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span>
+            <span class="brand-name">RH Workflow Desk</span>
+            <span class="brand-subtitle">本地工作流提交台</span>
+          </span>
+        </a>
+        <nav class="top-nav" aria-label="主导航">
+          <a class="top-nav-link" href="/">任务提交</a>
+          <a class="top-nav-link" href="/prompt">提示词工坊</a>
+          <a class="top-nav-link active" href="/outputs" aria-current="page">成片</a>
+        </nav>
+        <div class="topbar-actions">
+          <div class="local-badge"><span class="status-dot"></span>仅本机运行</div>
+          <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
+            <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="outputs-main">
+        <section class="outputs-hero">
+          <div>
+            <div class="eyebrow">OUTPUT LIBRARY / LOCAL FILES</div>
+            <h1>把所有产物，<br /><em>放在一处回看。</em></h1>
+            <p>这里聚合本地任务已经生成的图片、视频、音频和文本。产物不会被复制，浏览时直接读取你设置的本地输出目录。</p>
+          </div>
+          <div class="outputs-hero-stat">
+            <span class="outputs-stat-kicker">AVAILABLE NOW</span>
+            <strong id="heroTotal">0</strong>
+            <span>个本地文件</span>
+            <small id="heroUpdated">等待读取任务历史</small>
+          </div>
+        </section>
+
+        <section class="panel outputs-toolbar" aria-label="产物筛选">
+          <div class="outputs-toolbar-top">
+            <div>
+              <div class="section-kicker">ALL OUTPUTS</div>
+              <h2>成片库 <span id="outputCount" class="outputs-count">0</span></h2>
+            </div>
+            <button id="refreshOutputs" class="secondary-button" type="button"><span aria-hidden="true">↻</span> 刷新</button>
+          </div>
+          <div class="outputs-toolbar-controls">
+            <label class="outputs-search">
+              <span class="sr-only">搜索产物</span>
+              <input id="outputSearch" type="search" placeholder="搜索文件名或任务名称" autocomplete="off" />
+              <span class="search-glyph" aria-hidden="true">⌕</span>
+            </label>
+            <label class="outputs-sort">
+              <span>排序</span>
+              <select id="outputSort">
+                <option value="newest">最新生成</option>
+                <option value="oldest">最早生成</option>
+                <option value="name">文件名</option>
+              </select>
+            </label>
+          </div>
+          <div id="outputFilters" class="output-filter-tabs" role="tablist" aria-label="产物类型">
+            <button class="output-filter active" type="button" data-output-type="all" role="tab" aria-selected="true">全部 <span>0</span></button>
+            <button class="output-filter" type="button" data-output-type="image" role="tab" aria-selected="false">图片 <span>0</span></button>
+            <button class="output-filter" type="button" data-output-type="video" role="tab" aria-selected="false">视频 <span>0</span></button>
+            <button class="output-filter" type="button" data-output-type="audio" role="tab" aria-selected="false">音频 <span>0</span></button>
+            <button class="output-filter" type="button" data-output-type="text" role="tab" aria-selected="false">文本 <span>0</span></button>
+            <button class="output-filter" type="button" data-output-type="other" role="tab" aria-selected="false">其他 <span>0</span></button>
+          </div>
+        </section>
+
+        <section id="outputGrid" class="output-grid" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <div id="outputToast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/outputs.js"></script>
+  </body>
+</html>

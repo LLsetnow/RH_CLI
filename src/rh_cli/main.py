@@ -9,7 +9,7 @@ from rich.console import Console
 from . import __version__
 from .account import check_account
 from .app.commands import app as app_commands
-from .config import config_path, read_config, resolve_api_key, write_config
+from .config import config_path, read_config, read_default_site, resolve_api_key, write_config
 from .errors import RhCliError
 from .model.commands import image_command, model_app, video_command
 from .state import CliState
@@ -35,16 +35,21 @@ def main_callback(
     output_dir: Path | None = typer.Option(None, "--output-dir", help="默认输出目录。"),
     json_output: bool = typer.Option(False, "--json", help="输出机器可读 JSON。"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="打印更多调试信息。"),
-    site: str = typer.Option("cn", "--site", help="目标站点：cn (runninghub.cn) 或 ai (runninghub.ai)。默认 cn。"),
+    site: str | None = typer.Option(None, "--site", help="目标站点：cn (runninghub.cn) 或 ai (runninghub.ai)。缺省从配置读取（default_site），未配置则为 cn。"),
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True, help="显示版本。"),
 ) -> None:
-    # 根据 key 名称自动推断站点
+    # 站点解析优先级：显式 --site > -k 前缀推断 > 配置 default_site > cn
     effective_site = site
-    if key_name and site == "cn":  # site 是默认值才自动推断
-        if key_name.startswith("ai-"):
-            effective_site = "ai"
-        elif key_name.startswith("cn-"):
-            effective_site = "cn"
+    if effective_site is None:
+        if key_name:
+            prefix = key_name.split("-", 1)[0].lower()
+            if prefix in ("ai", "cn"):
+                effective_site = prefix
+        if effective_site is None:
+            effective_site = read_default_site()
+    elif effective_site.strip().lower() not in ("ai", "cn"):
+        raise typer.BadParameter(f"站点只能是 ai 或 cn，收到：{effective_site}")
+    effective_site = effective_site.strip().lower()
 
     ctx.obj = CliState(
         api_key=api_key,
@@ -55,6 +60,17 @@ def main_callback(
         site=effective_site,
         console=console,
     )
+
+
+@app.command("gui")
+def gui_command(ctx: typer.Context) -> None:
+    """打开配置图形界面（站点 / Key / 余额）。"""
+    try:
+        from rh_cli.gui import run_gui
+    except ImportError as exc:
+        console.print("[red]tkinter 不可用，无法启动 GUI。[/red]")
+        raise typer.Exit(1)
+    run_gui()
 
 
 @app.command("check")
@@ -80,6 +96,23 @@ def check(ctx: typer.Context) -> None:
         state.out.print("[red]还没有配置 API Key。[/red]运行 `rh auth set-key` 或设置 RUNNINGHUB_API_KEY。")
     else:
         state.out.print(f"[red]API Key 校验失败：[/red]{result.get('message')}")
+
+
+@app.command("pricing")
+def pricing(
+    ctx: typer.Context,
+    seconds: float | None = typer.Option(
+        None, "--seconds", "-s", help="按任务耗时（秒）预估各机型花费，例：-s 120。"
+    ),
+) -> None:
+    """查看 RunningHub 计费费率（RH币/秒），并可按耗时预估任务花费。"""
+    from rh_cli.pricing import pricing_dict, render_pricing
+
+    state = ctx.obj if isinstance(ctx.obj, CliState) else CliState(console=console)
+    if state.json_output:
+        state.out.print(json.dumps(pricing_dict(seconds), ensure_ascii=False, indent=2))
+        return
+    render_pricing(state.out, seconds)
 
 
 @auth_app.command("set-key")
@@ -142,7 +175,22 @@ def show_auth() -> None:
         console.print(f"API Key 来源：{resolved.source}，当前 Key：{resolved.value[:4]}****")
     else:
         console.print("尚未配置 API Key。")
+    console.print(f"默认站点：{read_default_site()}")
     console.print(f"配置文件：{cfg_path}")
+
+
+@auth_app.command("set-site")
+def set_site(
+    site: str = typer.Argument(..., help="站点：ai 或 cn。"),
+) -> None:
+    """设置默认站点（保存到配置）。"""
+    from rh_cli.config import save_default_site
+    try:
+        path = save_default_site(site)
+    except RhCliError as exc:
+        console.print(f"[red]{exc.message}[/red]")
+        raise typer.Exit(exc.exit_code)
+    console.print(f"[green]已设置默认站点[/green] {site.strip().lower()} 到 {path}")
 
 
 @auth_app.command("set-output-dir")

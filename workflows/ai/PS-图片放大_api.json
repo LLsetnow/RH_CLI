@@ -1,0 +1,171 @@
+{
+  "72": {
+    "inputs": {
+      "model": "seedvr2_ema_3b_fp8_e4m3fn.safetensors",
+      "device": "cuda:0",
+      "blocks_to_swap": 32,
+      "swap_io_components": true,
+      "offload_device": "cpu",
+      "attention_mode": "sdpa"
+    },
+    "class_type": "SeedVR2LoadDiTModel",
+    "_meta": {
+      "title": "SeedVR2 (Down)Load DiT Model"
+    }
+  },
+  "73": {
+    "inputs": {
+      "model": "ema_vae_fp16.safetensors",
+      "device": "cuda:0",
+      "encode_tiled": true,
+      "encode_tile_size": 512,
+      "encode_tile_overlap": 64,
+      "decode_tiled": true,
+      "decode_tile_size": 512,
+      "decode_tile_overlap": 64,
+      "tile_debug": "false",
+      "offload_device": "cpu"
+    },
+    "class_type": "SeedVR2LoadVAEModel",
+    "_meta": {
+      "title": "SeedVR2 (Down)Load VAE Model"
+    }
+  },
+  "79": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "90",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "Scale Image to Total Pixels"
+    }
+  },
+  "80": {
+    "inputs": {
+      "seed": 1688711180,
+      "resolution": [
+        "99",
+        0
+      ],
+      "max_resolution": 4500,
+      "batch_size": 1,
+      "uniform_batch_size": false,
+      "color_correction": "lab",
+      "temporal_overlap": 0,
+      "prepend_frames": 0,
+      "input_noise_scale": 0,
+      "latent_noise_scale": 0,
+      "offload_device": "cpu",
+      "enable_debug": false,
+      "image": [
+        "79",
+        0
+      ],
+      "dit": [
+        "72",
+        0
+      ],
+      "vae": [
+        "73",
+        0
+      ]
+    },
+    "class_type": "SeedVR2VideoUpscaler",
+    "_meta": {
+      "title": "SeedVR2 Video Upscaler (v2.5.24)"
+    }
+  },
+  "90": {
+    "inputs": {
+      "image": "86638db33fe154d9e9c091324723e52e4a5f7f0b1483105f15d32111ebf6c7be.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "93": {
+    "inputs": {
+      "input1": [
+        "94",
+        0
+      ],
+      "input2": [
+        "94",
+        1
+      ]
+    },
+    "class_type": "MinNode",
+    "_meta": {
+      "title": "Min"
+    }
+  },
+  "94": {
+    "inputs": {
+      "image": [
+        "90",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "GetImageSize"
+    }
+  },
+  "95": {
+    "inputs": {
+      "value": 2.0000000000000004
+    },
+    "class_type": "Float",
+    "_meta": {
+      "title": "比例"
+    }
+  },
+  "96": {
+    "inputs": {
+      "input1": [
+        "93",
+        0
+      ],
+      "input2": [
+        "95",
+        0
+      ]
+    },
+    "class_type": "MultiplyNode",
+    "_meta": {
+      "title": "Multiply"
+    }
+  },
+  "99": {
+    "inputs": {
+      "a": [
+        "96",
+        0
+      ]
+    },
+    "class_type": "CM_FloatToInt",
+    "_meta": {
+      "title": "FloatToInt"
+    }
+  },
+  "100": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "80",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

@@ -52,18 +52,23 @@ def resolve_media(client: RhHttpClient, media_path: str, *, force_upload: bool =
     return image_to_data_uri(path)
 
 
-def upload_app_file(client: RhHttpClient, file_path: str | Path) -> str:
+def upload_app_file(
+    client: RhHttpClient,
+    file_path: str | Path,
+    *,
+    upload_url: str | None = None,
+) -> str:
     path = Path(file_path).expanduser()
     if not path.exists():
         raise RhCliError("FILE_NOT_FOUND", f"文件不存在：{path}")
     response = client.upload_form(
-        APP_UPLOAD_URL,
+        upload_url or APP_UPLOAD_URL,
         str(path),
         data={"apiKey": client.api_key, "fileType": "input"},
     )
     if response.get("code") != 0 or response.get("msg") != "success":
-        raise RhCliError("UPLOAD_FAILED", f"上传失败：{response.get('msg', response)}")
+        raise RhCliError("UPLOAD_FAILED", f"上传失败：{response.get('msg', response)}", detail=response)
     file_name = response.get("data", {}).get("fileName")
     if not file_name:
-        raise RhCliError("UPLOAD_FAILED", "上传成功但响应中没有 fileName。")
+        raise RhCliError("UPLOAD_FAILED", "上传成功但响应中没有 fileName。", detail=response)
     return str(file_name)
