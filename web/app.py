@@ -66,6 +66,16 @@ PROMPT_FIELDS = {"text", "prompt", "positive", "negative", "caption", "instructi
 PROMPT_CLASS_HINTS = ("textencode", "cliptext", "prompt", "t5", "llama")
 FILE_CLASS_HINTS = ("loadimage", "loadaudio", "loadvideo", "loadfile", "load3d", "vhs_load")
 RANDOM_NOISE_MODES = {"fixed", "randomize"}
+RESOLUTION_ASPECT_RATIOS = (
+    "1:1 (Square)",
+    "2:3 (Portrait Photo)",
+    "3:2 (Photo)",
+    "3:4 (Portrait Standard)",
+    "4:3 (Standard)",
+    "9:16 (Portrait Widescreen)",
+    "16:9 (Widescreen)",
+    "21:9 (Ultrawide)",
+)
 DEFAULT_PERSONAL_CAPACITY = 3
 MIN_PERSONAL_CAPACITY = 1
 MAX_PERSONAL_CAPACITY = 3
@@ -243,12 +253,17 @@ def workflow_nodes(workflow: dict[str, Any]) -> dict[str, Any]:
     return {node_id: node for node_id, node in workflow.items() if node_id != WORKFLOW_META_KEY}
 
 
-def metadata_bypassed_inputs(workflow: dict[str, Any]) -> list[str]:
-    """Read Web-app input bypass state from local workflow metadata."""
+def metadata_bypassed_nodes(workflow: dict[str, Any]) -> list[str]:
+    """Read Web-app node bypass state from local workflow metadata."""
     metadata = workflow.get(WORKFLOW_META_KEY)
     if not isinstance(metadata, dict):
         return []
-    raw = metadata.get("bypassedInputs")
+    raw = metadata.get("bypassedNodes")
+    if raw is None:
+        raw = metadata.get("bypassed_nodes")
+    if raw is None:
+        # Accept the pre-node-bypass metadata written by older Web builds.
+        raw = metadata.get("bypassedInputs")
     if raw is None:
         raw = metadata.get("bypassed_inputs")
     if isinstance(raw, dict):
@@ -282,12 +297,28 @@ def random_noise_spec(node_id: str, node: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def resolution_spec(node_id: str, node: dict[str, Any]) -> dict[str, Any] | None:
+    if str(node.get("class_type", "")).lower() != "resolutionselector":
+        return None
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    return {
+        "id": str(node_id),
+        "node_id": str(node_id),
+        "title": str(node.get("_meta", {}).get("title") or "ResolutionSelector"),
+        "class_type": str(node.get("class_type") or "ResolutionSelector"),
+        "aspect_ratio": str(inputs.get("aspect_ratio") or RESOLUTION_ASPECT_RATIOS[0]),
+        "megapixels": display_value(inputs.get("megapixels", 0.4)),
+        "aspect_ratio_options": list(RESOLUTION_ASPECT_RATIOS),
+    }
+
+
 def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
     nodes = workflow_nodes(workflow)
     _validate_api_workflow(nodes)
     files: list[dict[str, Any]] = []
     prompts: list[dict[str, Any]] = []
     random_noise: list[dict[str, Any]] = []
+    resolutions: list[dict[str, Any]] = []
     for node_id, node in nodes.items():
         class_type = str(node.get("class_type", ""))
         lower_class = class_type.lower()
@@ -296,6 +327,9 @@ def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
         noise = random_noise_spec(str(node_id), node)
         if noise:
             random_noise.append(noise)
+        resolution = resolution_spec(str(node_id), node)
+        if resolution:
+            resolutions.append(resolution)
         for field, value in inputs.items():
             lower_field = str(field).lower()
             if is_link(value):
@@ -336,17 +370,19 @@ def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
         "prompt_count": len(prompts),
         "random_noise_inputs": random_noise,
         "random_noise_count": len(random_noise),
-        "bypassed_inputs": metadata_bypassed_inputs(workflow),
+        "resolution_inputs": resolutions,
+        "resolution_count": len(resolutions),
+        "bypassed_nodes": metadata_bypassed_nodes(workflow),
         "remote_workflow_id": remote_workflow_id(workflow),
     }
 
 
-def normalize_bypassed_inputs(
+def normalize_bypassed_nodes(
     workflow: dict[str, Any], values: list[str] | dict[str, Any] | None,
 ) -> list[str]:
-    """Validate input-card IDs whose Web overrides should be ignored."""
+    """Validate node IDs whose execution should be bypassed."""
     if values is None:
-        raw_values: Any = metadata_bypassed_inputs(workflow)
+        raw_values: Any = metadata_bypassed_nodes(workflow)
     elif isinstance(values, dict):
         raw_values = [key for key, enabled in values.items() if enabled]
     elif isinstance(values, (list, tuple, set)):
@@ -354,53 +390,42 @@ def normalize_bypassed_inputs(
     else:
         raise RhCliError("INVALID_BYPASS", "输入旁路配置必须是列表或对象。")
 
-    analysis = inspect_workflow(workflow)
-    known = {
-        item["id"]
-        for group in (analysis["file_inputs"], analysis["prompt_inputs"])
-        for item in group
-    }
-    known.update(item["id"] for item in analysis["random_noise_inputs"])
+    known = {str(node_id) for node_id in workflow_nodes(workflow)}
     result: list[str] = []
     seen: set[str] = set()
     for raw_value in raw_values:
-        input_id = str(raw_value or "").strip()
-        if not input_id or input_id in seen:
+        node_id = str(raw_value or "").strip()
+        if not node_id:
             continue
-        if input_id not in known:
-            raise RhCliError("INVALID_BYPASS", f"找不到可旁路的输入节点：{input_id}")
-        result.append(input_id)
-        seen.add(input_id)
+        # Convert IDs saved by the previous input-override implementation.
+        if node_id not in known and ":" in node_id:
+            node_id = node_id.split(":", 1)[0]
+        if node_id not in known:
+            raise RhCliError("INVALID_BYPASS", f"找不到可旁路的工作流节点：{node_id}")
+        if node_id in seen:
+            continue
+        result.append(node_id)
+        seen.add(node_id)
     return result
 
 
-def bypassed_local_file_args(workflow: dict[str, Any], bypassed_inputs: set[str]) -> list[str]:
-    """Upload original local file values needed by bypassed Load* inputs."""
-    if not bypassed_inputs:
+def apply_bypassed_nodes(workflow: dict[str, Any], bypassed_nodes: set[str]) -> list[str]:
+    """Remove bypassed nodes and direct links to their outputs from an API graph."""
+    if not bypassed_nodes:
         return []
-    file_ids = {item["id"] for item in inspect_workflow(workflow)["file_inputs"]}
-    file_args: list[str] = []
-    for input_id in sorted(bypassed_inputs & file_ids):
-        separator = input_id.find(":")
-        if separator <= 0:
-            continue
-        node = workflow.get(input_id[:separator])
+    nodes = workflow_nodes(workflow)
+    removed = sorted(node_id for node_id in bypassed_nodes if node_id in nodes)
+    for node_id in removed:
+        workflow.pop(node_id, None)
+    removed_set = set(removed)
+    for node in workflow_nodes(workflow).values():
         inputs = node.get("inputs") if isinstance(node, dict) else None
         if not isinstance(inputs, dict):
             continue
-        original_value = inputs.get(input_id[separator + 1 :])
-        if not isinstance(original_value, str) or not original_value.strip():
-            continue
-        original_path = Path(original_value).expanduser()
-        if not original_path.is_absolute():
-            continue
-        if not original_path.is_file():
-            raise RhCliError(
-                "BYPASS_FILE_NOT_FOUND",
-                f"旁路输入 {input_id} 的原始本机文件不存在：{original_path}。请关闭旁路并选择新文件，或恢复原始文件。",
-            )
-        file_args.append(f"{input_id}={original_path}")
-    return file_args
+        for field, value in list(inputs.items()):
+            if is_link(value) and str(value[0]) in removed_set:
+                inputs.pop(field, None)
+    return removed
 
 
 def normalize_random_noise_inputs(
@@ -441,6 +466,48 @@ def apply_random_noise_inputs(workflow: dict[str, Any], values: dict[str, Any] |
         inputs["mode"] = config["mode"]
         changes.append(f"{node_id}.{seed_field}={config['seed']}")
         changes.append(f"{node_id}.mode={config['mode']}")
+    return changes
+
+
+def normalize_resolution_inputs(
+    workflow: dict[str, Any], values: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise RhCliError("INVALID_RESOLUTION", "尺寸节点配置必须是对象。")
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_node_id, raw_config in values.items():
+        node_id = str(raw_node_id).strip()
+        node = workflow.get(node_id)
+        if not isinstance(node, dict) or str(node.get("class_type", "")).lower() != "resolutionselector":
+            raise RhCliError("INVALID_RESOLUTION", f"节点 {node_id} 不是有效的 ResolutionSelector 节点。")
+        if not isinstance(raw_config, dict):
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 配置无效。")
+        aspect_ratio = str(raw_config.get("aspect_ratio") or "").strip()
+        if aspect_ratio not in RESOLUTION_ASPECT_RATIOS:
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 的比例选项无效。")
+        try:
+            megapixels = float(str(raw_config.get("megapixels")).strip())
+        except (TypeError, ValueError) as exc:
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 的 megapixels 必须是数字。") from exc
+        if not 0.1 <= megapixels <= 4:
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 的 megapixels 范围必须是 0.1 到 4。")
+        normalized[node_id] = {"aspect_ratio": aspect_ratio, "megapixels": megapixels, "multiple": 32}
+    return normalized
+
+
+def apply_resolution_inputs(workflow: dict[str, Any], values: dict[str, Any] | None) -> list[str]:
+    normalized = normalize_resolution_inputs(workflow, values)
+    changes: list[str] = []
+    for node_id, config in normalized.items():
+        node = workflow[node_id]
+        inputs = node.setdefault("inputs", {})
+        inputs["aspect_ratio"] = config["aspect_ratio"]
+        inputs["megapixels"] = config["megapixels"]
+        inputs["multiple"] = 32
+        changes.append(f"{node_id}.aspect_ratio={config['aspect_ratio']}")
+        changes.append(f"{node_id}.megapixels={config['megapixels']}")
     return changes
 
 
@@ -512,6 +579,7 @@ class LocalStore:
               prompt_json TEXT NOT NULL,
               bypass_json TEXT NOT NULL DEFAULT '[]',
               random_noise_json TEXT NOT NULL DEFAULT '{}',
+              resolution_json TEXT NOT NULL DEFAULT '{}',
               workflow_snapshot_path TEXT NOT NULL DEFAULT '',
               output_dir TEXT NOT NULL,
               outputs_json TEXT NOT NULL DEFAULT '[]',
@@ -539,6 +607,8 @@ class LocalStore:
             self._db.execute("ALTER TABLE tasks ADD COLUMN stage_logs_json TEXT NOT NULL DEFAULT '[]'")
         if "random_noise_json" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN random_noise_json TEXT NOT NULL DEFAULT '{}'")
+        if "resolution_json" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN resolution_json TEXT NOT NULL DEFAULT '{}'")
         if "bypass_json" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN bypass_json TEXT NOT NULL DEFAULT '[]'")
         if "workflow_snapshot_path" not in columns:
@@ -987,8 +1057,9 @@ class LocalStore:
             "remote_workflow_id": str(task.get("remote_workflow_id") or "").strip(),
             "input_json": json.dumps(task["files"], ensure_ascii=False),
             "prompt_json": json.dumps(task["prompts"], ensure_ascii=False),
-            "bypass_json": json.dumps(task.get("bypassed_inputs") or [], ensure_ascii=False),
+            "bypass_json": json.dumps(task.get("bypassed_nodes") or [], ensure_ascii=False),
             "random_noise_json": json.dumps(task.get("random_noise") or {}, ensure_ascii=False),
+            "resolution_json": json.dumps(task.get("resolution") or {}, ensure_ascii=False),
             "workflow_snapshot_path": str(task.get("workflow_snapshot_path") or ""),
             "output_dir": task["output_dir"],
             "outputs_json": "[]",
@@ -1012,9 +1083,9 @@ class LocalStore:
         with self._lock:
             self._db.execute(
                 "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,remote_task_id,remote_workflow_id,"
-                "input_json,prompt_json,bypass_json,random_noise_json,workflow_snapshot_path,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
+                "input_json,prompt_json,bypass_json,random_noise_json,resolution_json,workflow_snapshot_path,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
                 "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:remote_task_id,:remote_workflow_id,"
-                ":input_json,:prompt_json,:bypass_json,:random_noise_json,:workflow_snapshot_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
+                ":input_json,:prompt_json,:bypass_json,:random_noise_json,:resolution_json,:workflow_snapshot_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
                 fields,
             )
             self._db.commit()
@@ -1078,8 +1149,9 @@ class LocalStore:
         names = {
             "input_json": "files",
             "prompt_json": "prompts",
-            "bypass_json": "bypassed_inputs",
+            "bypass_json": "bypassed_nodes",
             "random_noise_json": "random_noise",
+            "resolution_json": "resolution",
             "outputs_json": "outputs",
             "stage_logs_json": "stage_logs",
             "error_detail": "error_detail",
@@ -1314,7 +1386,8 @@ class TaskManager:
         output_dir: str | None,
         remote_workflow_id: str | None = None,
         random_noise: dict[str, Any] | None = None,
-        bypassed_inputs: list[str] | dict[str, Any] | None = None,
+        resolution: dict[str, Any] | None = None,
+        bypassed_nodes: list[str] | dict[str, Any] | None = None,
         workflow_data: dict[str, Any] | None = None,
         workflow_name: str | None = None,
     ) -> dict[str, Any]:
@@ -1329,12 +1402,18 @@ class TaskManager:
         remote_id = str(remote_workflow_id or "").strip() or analysis.get("remote_workflow_id", "")
         if not remote_id:
             raise RhCliError("MISSING_WORKFLOW_ID", "请填写 RunningHub workflowId 后再提交。")
-        normalized_bypassed_inputs = normalize_bypassed_inputs(workflow, bypassed_inputs)
-        bypassed_set = set(normalized_bypassed_inputs)
+        normalized_bypassed_nodes = normalize_bypassed_nodes(workflow, bypassed_nodes)
+        bypassed_set = set(normalized_bypassed_nodes)
         normalized_random_noise = normalize_random_noise_inputs(workflow, random_noise)
         active_random_noise = {
             node_id: config
             for node_id, config in normalized_random_noise.items()
+            if node_id not in bypassed_set
+        }
+        normalized_resolution = normalize_resolution_inputs(workflow, resolution)
+        active_resolution = {
+            node_id: config
+            for node_id, config in normalized_resolution.items()
             if node_id not in bypassed_set
         }
         if workflow_data is not None:
@@ -1346,7 +1425,7 @@ class TaskManager:
         required = {
             item["id"]
             for item in analysis["file_inputs"]
-            if item["id"] not in bypassed_set
+            if item["node_id"] not in bypassed_set
         }
         missing = sorted(item for item in required if not str(files.get(item, "")).strip())
         if missing:
@@ -1368,15 +1447,16 @@ class TaskManager:
             "remote_workflow_id": remote_id,
             "files": files,
             "prompts": prompts,
-            "bypassed_inputs": normalized_bypassed_inputs,
+            "bypassed_nodes": normalized_bypassed_nodes,
             "random_noise": normalized_random_noise,
+            "resolution": normalized_resolution,
             "key_id": key_id or None,
             "output_dir": str(root),
         }
         snapshot_workflow = json.loads(json.dumps(workflow, ensure_ascii=False))
         for values in (files, prompts):
             for input_id, value in values.items():
-                if input_id in bypassed_set:
+                if str(input_id).split(":", 1)[0] in bypassed_set:
                     continue
                 separator = str(input_id).find(":")
                 if separator <= 0:
@@ -1388,6 +1468,7 @@ class TaskManager:
                 if isinstance(inputs, dict):
                     inputs[str(input_id)[separator + 1 :]] = value
         apply_random_noise_inputs(snapshot_workflow, active_random_noise)
+        apply_resolution_inputs(snapshot_workflow, active_resolution)
         snapshot_path = self.store.save_task_workflow_snapshot(task, snapshot_workflow)
         task["workflow_snapshot_path"] = str(snapshot_path)
         self.store.create_task(task)
@@ -1568,17 +1649,7 @@ class TaskManager:
             if recovery:
                 self._recover_task(task, key, cancel_event)
                 return
-            bypassed_inputs = {str(item) for item in task.get("bypassed_inputs") or []}
-            file_args = [
-                f"{item_id}={path}"
-                for item_id, path in task["files"].items()
-                if item_id not in bypassed_inputs
-            ]
-            set_args = [
-                f"{item_id}={value}"
-                for item_id, value in task["prompts"].items()
-                if item_id not in bypassed_inputs
-            ]
+            bypassed_values = task.get("bypassed_nodes") or task.get("bypassed_inputs") or []
             task_output_dir = Path(task["output_dir"]) / task_id
             task_output_dir.mkdir(parents=True, exist_ok=True)
             site_upload, site_create, site_outputs = _site_urls(key["site"])
@@ -1588,7 +1659,20 @@ class TaskManager:
                 workflow_path = self.store.task_workflow_path(task)
                 workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
                 workflow = workflow_nodes(workflow)
-                file_args.extend(bypassed_local_file_args(workflow, bypassed_inputs))
+                bypassed_nodes = set(normalize_bypassed_nodes(workflow, bypassed_values))
+                file_args = [
+                    f"{item_id}={path}"
+                    for item_id, path in task["files"].items()
+                    if str(item_id).split(":", 1)[0] not in bypassed_nodes
+                ]
+                set_args = [
+                    f"{item_id}={value}"
+                    for item_id, value in task["prompts"].items()
+                    if str(item_id).split(":", 1)[0] not in bypassed_nodes
+                ]
+                removed_nodes = apply_bypassed_nodes(workflow, bypassed_nodes)
+                if removed_nodes:
+                    self._log_stage(task_id, "prepare", f"已旁路 {len(removed_nodes)} 个节点")
                 remote_id_value = str(task.get("remote_workflow_id") or "").strip()
                 if not remote_id_value:
                     raise RhCliError("MISSING_WORKFLOW_ID", "任务缺少 RunningHub workflowId，请重新提交。")
@@ -1598,13 +1682,21 @@ class TaskManager:
                 random_noise_values = {
                     node_id: config
                     for node_id, config in (task.get("random_noise") or {}).items()
-                    if node_id not in bypassed_inputs
+                    if node_id not in bypassed_nodes
                 }
                 random_noise_changes = apply_random_noise_inputs(workflow, random_noise_values)
                 if random_noise_changes:
                     self._log_stage(task_id, "prepare", f"已应用 {len(random_noise_changes) // 2} 个 RandomNoise 配置")
-                if bypassed_inputs:
-                    self._log_stage(task_id, "prepare", f"已忽略 {len(bypassed_inputs)} 个输入覆盖")
+                resolution_values = {
+                    node_id: config
+                    for node_id, config in (task.get("resolution") or {}).items()
+                    if node_id not in bypassed_nodes
+                }
+                resolution_changes = apply_resolution_inputs(workflow, resolution_values)
+                if resolution_changes:
+                    self._log_stage(task_id, "prepare", f"已应用 {len(resolution_changes) // 2} 个尺寸节点配置")
+                if bypassed_nodes and not removed_nodes:
+                    self._log_stage(task_id, "prepare", f"已请求旁路 {len(bypassed_nodes)} 个节点")
                 self._log_stage(task_id, "upload", f"开始上传 {len(file_args)} 个输入文件")
                 changes = _apply_file_args(client, workflow, file_args, f"{get_site_config(key['site'])['api_host']}/task/openapi/upload")
                 self._log_stage(task_id, "upload", f"输入文件上传完成：{len(changes)} 个")

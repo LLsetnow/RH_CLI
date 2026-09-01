@@ -2,6 +2,7 @@
   "use strict";
 
   var STORAGE_KEY = "rh-workflow-desk-prompt-builder-v1";
+  var TASK_PROMPT_IMPORT_KEY = "rh-workflow-desk-pending-prompt-v1";
   var idCounter = 0;
   var promptApiReady = false;
   var stateSaveTimer = 0;
@@ -171,6 +172,8 @@
       actionsButton.classList.toggle("active", isActions);
       actionsButton.setAttribute("aria-selected", String(isActions));
     }
+    var modeTabs = document.querySelector(".library-mode-tabs");
+    if (modeTabs) modeTabs.classList.toggle("is-actions", isActions);
     var actionCount = $("actionModeCount");
     if (actionCount) actionCount.textContent = String(state.actions.length);
   }
@@ -183,7 +186,7 @@
     }
     $("libraryList").innerHTML = actions.map(function (action, index) {
       var image = action.image_available && action.image_url
-        ? '<img src="' + esc(action.image_url) + '" alt="' + esc(action.title) + '" loading="lazy" />'
+        ? '<button class="image-preview-trigger" type="button" data-image-preview="' + esc(action.image_url) + '" data-image-title="' + esc(action.title) + '" aria-label="放大查看「' + esc(action.title) + '」图片"><img src="' + esc(action.image_url) + '" alt="' + esc(action.title) + '" loading="lazy" /></button>'
         : '<span class="action-image-missing">无图</span>';
       return '<article class="action-library-card" draggable="true" data-action-id="' + esc(action.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
         '<div class="action-card-media">' + image + '</div>' +
@@ -222,7 +225,9 @@
     var isText = item.kind === "text";
     var isAction = item.kind === "action";
     var tags = item.tags || [];
-    var actionThumb = isAction && item.imageUrl && !item.missing ? '<img class="stage-action-thumb" src="' + esc(item.imageUrl) + '" alt="" loading="lazy" />' : "";
+    var actionThumb = isAction && item.imageUrl && !item.missing
+      ? '<button class="image-preview-trigger stage-action-thumb" type="button" data-image-preview="' + esc(item.imageUrl) + '" data-image-title="' + esc(item.title || "动作图片") + '" aria-label="放大查看「' + esc(item.title || "动作图片") + '」图片"><img src="' + esc(item.imageUrl) + '" alt="' + esc(item.title || "动作图片") + '" loading="lazy" /></button>'
+      : "";
     var typeLabel = isText ? "自由文本" : (isAction ? (item.missing ? "动作 · 已不可用" : "动作库") : (item.missing ? "固定积木 · 已删除" : "固定积木"));
     return '<article class="stage-block ' + (isText ? "text" : (isAction ? "action" : "fixed")) + (item.missing ? " missing" : "") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + '">' +
       '<div class="stage-block-grip" data-drag-handle title="拖动排序" aria-label="拖动排序">⋮⋮</div>' +
@@ -295,6 +300,8 @@
       groupsButton.classList.toggle("active", isGroups);
       groupsButton.setAttribute("aria-selected", String(isGroups));
     }
+    var viewTabs = document.querySelector(".assembly-view-tabs");
+    if (viewTabs) viewTabs.classList.toggle("is-groups", isGroups);
     if (stageView) stageView.hidden = isGroups;
     if (groupsView) groupsView.hidden = !isGroups;
   }
@@ -625,11 +632,10 @@
       $("customBlockText").value = block.text || "";
       $("customBlockTags").value = (block.tags || []).join("，");
     }
-    $("customBlockModal").hidden = false;
-    window.setTimeout(function () { $("customBlockName").focus(); }, 0);
+    window.RHMotion.openModal("customBlockModal", "customBlockName");
   }
   function closeCustomModal() {
-    $("customBlockModal").hidden = true;
+    window.RHMotion.closeModal("customBlockModal");
     editingBlockId = "";
     $("customBlockTitle").textContent = "添加固定积木";
     $("customBlockModal").querySelector(".section-kicker").textContent = "CUSTOM BLOCK";
@@ -673,6 +679,28 @@
     link.remove();
     window.setTimeout(function () { URL.revokeObjectURL(url); }, 0);
     showToast("TXT 文件已开始下载");
+  }
+  function openImagePreview(src, title) {
+    if (!src) return;
+    var image = $("imagePreviewImage");
+    image.src = src;
+    image.alt = title || "动作图片";
+    $("imagePreviewTitle").textContent = title || "动作图片";
+    $("imagePreviewCaption").textContent = "点击图片外区域、右上角或按 Esc 关闭";
+    window.RHMotion.openModal("imagePreviewModal", "closeImagePreview");
+  }
+  function closeImagePreview() {
+    window.RHMotion.closeModal("imagePreviewModal");
+  }
+  function importPromptToTask() {
+    var output = getPromptText();
+    if (!output) return showToast("组装台还没有可导入的文本", true);
+    try {
+      localStorage.setItem(TASK_PROMPT_IMPORT_KEY, JSON.stringify({ version: 1, text: output, createdAt: Date.now() }));
+      window.location.href = "/";
+    } catch (error) {
+      showToast("导入失败：无法保存本机跳转数据", true);
+    }
   }
   function bindEvents() {
     updateThemeToggle();
@@ -720,6 +748,8 @@
       if (deleteButton) deleteGroup(deleteButton.dataset.deleteGroup);
     });
     $("libraryList").addEventListener("click", function (event) {
+      var previewButton = event.target.closest("[data-image-preview]");
+      if (previewButton) return openImagePreview(previewButton.dataset.imagePreview, previewButton.dataset.imageTitle);
       var actionButton = event.target.closest("[data-add-action]");
       if (actionButton) return addAction(actionButton.dataset.addAction);
       var addButton = event.target.closest("[data-add-block]");
@@ -769,6 +799,8 @@
       renderOutput();
     });
     $("stageList").addEventListener("click", function (event) {
+      var previewButton = event.target.closest("[data-image-preview]");
+      if (previewButton) return openImagePreview(previewButton.dataset.imagePreview, previewButton.dataset.imageTitle);
       var moveButton = event.target.closest("[data-move-stage]");
       if (moveButton) return moveStage(Number(moveButton.dataset.stageIndex), moveButton.dataset.moveStage === "up" ? -1 : 1);
       var removeButton = event.target.closest("[data-remove-stage]");
@@ -867,6 +899,7 @@
       showToast("组装台已清空");
     });
     $("copyPrompt").addEventListener("click", copyPrompt);
+    $("importPrompt").addEventListener("click", importPromptToTask);
     $("downloadPrompt").addEventListener("click", downloadPrompt);
     $("addTextStage").addEventListener("click", addTextBlock);
     $("newGroup").addEventListener("click", startNewGroup);
@@ -875,6 +908,8 @@
     $("closeCustomBlock").addEventListener("click", closeCustomModal);
     $("cancelCustomBlock").addEventListener("click", closeCustomModal);
     $("customBlockModal").addEventListener("click", function (event) { if (event.target === $("customBlockModal")) closeCustomModal(); });
+    $("closeImagePreview").addEventListener("click", closeImagePreview);
+    $("imagePreviewModal").addEventListener("click", function (event) { if (event.target === $("imagePreviewModal")) closeImagePreview(); });
     $("customBlockForm").addEventListener("submit", function (event) {
       event.preventDefault();
       var name = $("customBlockName").value.trim();
@@ -910,7 +945,11 @@
         submitButton.disabled = false;
       });
     });
-    document.addEventListener("keydown", function (event) { if (event.key === "Escape") closeCustomModal(); });
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape") return;
+      closeCustomModal();
+      closeImagePreview();
+    });
   }
 
   bindEvents();

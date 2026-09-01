@@ -16,6 +16,7 @@
         } catch (error) {}
       }());
     </script>
+    <script src="/static/motion.js"></script>
   </head>
   <body>
     <div class="app-shell prompt-shell">
@@ -37,6 +38,9 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button settings-access settings-link" href="/?openSettings=1" aria-label="打开本地设置" title="打开本地设置">
+            <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
+          </a>
         </div>
       </header>
 
@@ -47,13 +51,13 @@
             <h1>把提示词，<br /><em>拼成一条可复用的思路。</em></h1>
             <p>把常用表达做成固定积木，把姿势参考放进动作库，把每次变化留给自由文本。按顺序加入、调整，右侧会实时生成一份可以直接复制的提示词。</p>
           </div>
-          <div class="prompt-intro-note" aria-label="使用方式">
-            <span class="note-index">01—03</span>
-            <span>挑选积木</span>
-            <span class="note-arrow">→</span>
-            <span>组装顺序</span>
-            <span class="note-arrow">→</span>
-            <span>复制交付</span>
+          <div class="prompt-intro-note process-nav" aria-label="使用方式">
+            <span class="process-index">01—03</span>
+            <span class="process-step active">挑选积木</span>
+            <span class="process-arrow" aria-hidden="true">→</span>
+            <span class="process-step">组装顺序</span>
+            <span class="process-arrow" aria-hidden="true">→</span>
+            <span class="process-step">复制交付</span>
           </div>
         </section>
 
@@ -135,7 +139,8 @@
               </div>
               <div class="output-actions">
                 <button id="copyPrompt" class="secondary-button" type="button">复制文本</button>
-                <button id="downloadPrompt" class="primary-button" type="button"><span class="button-glyph">↓</span><span>导出 TXT</span></button>
+                <button id="importPrompt" class="secondary-button import-prompt-button" type="button">导入任务提交</button>
+                <button id="downloadPrompt" class="primary-button" type="button">导出 TXT</button>
               </div>
               <div class="output-preview-wrap">
                 <textarea id="promptOutput" readonly spellcheck="false" placeholder="加入积木后，组合文本会在这里出现"></textarea>
@@ -176,6 +181,19 @@
             <button class="primary-button" type="submit">保存积木</button>
           </div>
         </form>
+      </section>
+    </div>
+    <div id="imagePreviewModal" class="modal-backdrop" hidden>
+      <section class="image-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">IMAGE PREVIEW</div>
+            <h2 id="imagePreviewTitle">动作图片</h2>
+          </div>
+          <button id="closeImagePreview" class="close-button" type="button" aria-label="关闭图片预览">×</button>
+        </div>
+        <div class="image-preview-frame"><img id="imagePreviewImage" src="data:," alt="" /></div>
+        <p id="imagePreviewCaption" class="image-preview-caption">点击图片外区域、右上角或按 Esc 关闭</p>
       </section>
     </div>
     <div id="promptToast" class="toast" role="status" aria-live="polite"></div>

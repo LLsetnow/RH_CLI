@@ -31,14 +31,14 @@ def test_inspect_workflow_finds_direct_files_and_prompts():
 
 def test_inspect_workflow_reads_remote_id_without_treating_metadata_as_node():
     workflow = {
-        "__rh_meta__": {"workflowId": "123456", "bypassedInputs": ["1:image"]},
+        "__rh_meta__": {"workflowId": "123456", "bypassedNodes": ["1"]},
         "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
     }
 
     analysis = web_app.inspect_workflow(workflow)
 
     assert analysis["remote_workflow_id"] == "123456"
-    assert analysis["bypassed_inputs"] == ["1:image"]
+    assert analysis["bypassed_nodes"] == ["1"]
     assert [item["id"] for item in analysis["file_inputs"]] == ["1:image"]
 
 
@@ -68,26 +68,28 @@ def test_normalize_random_noise_inputs_rejects_unknown_mode():
     assert excinfo.value.code == "INVALID_RANDOM_NOISE"
 
 
-def test_normalize_bypassed_inputs_rejects_unknown_input():
+def test_normalize_bypassed_nodes_rejects_unknown_node():
     workflow = {"1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}}}
 
     with pytest.raises(RhCliError) as excinfo:
-        web_app.normalize_bypassed_inputs(workflow, ["9:image"])
+        web_app.normalize_bypassed_nodes(workflow, ["9"])
 
     assert excinfo.value.code == "INVALID_BYPASS"
 
 
-def test_bypassed_local_file_args_use_original_absolute_file(tmp_path):
-    original = tmp_path / "original.png"
-    original.write_bytes(b"original")
-    workflow = {"1": {"class_type": "LoadImage", "inputs": {"image": str(original)}}}
+def test_apply_bypassed_nodes_removes_nodes_and_direct_output_links():
+    workflow = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
+        "2": {"class_type": "ImageScale", "inputs": {"image": ["1", 0], "width": 512}},
+        "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
+    }
 
-    assert web_app.bypassed_local_file_args(workflow, {"1:image"}) == [f"1:image={original}"]
+    removed = web_app.apply_bypassed_nodes(workflow, {"1"})
 
-    workflow["1"]["inputs"]["image"] = str(tmp_path / "missing.png")
-    with pytest.raises(RhCliError) as excinfo:
-        web_app.bypassed_local_file_args(workflow, {"1:image"})
-    assert excinfo.value.code == "BYPASS_FILE_NOT_FOUND"
+    assert removed == ["1"]
+    assert "1" not in workflow
+    assert "image" not in workflow["2"]["inputs"]
+    assert workflow["3"]["inputs"]["images"] == ["2", 0]
 
 
 def test_key_capacity_matches_requested_tiers():
@@ -496,7 +498,7 @@ def test_submit_task_bypasses_current_input_values_in_snapshot(tmp_path, monkeyp
             None,
             remote_workflow_id="123456",
             random_noise={"3": {"seed": "99", "mode": "fixed"}},
-            bypassed_inputs=["1:image", "3"],
+            bypassed_nodes=["1", "3"],
             workflow_data=workflow,
             workflow_name="bypass_api.json",
         )
@@ -504,7 +506,7 @@ def test_submit_task_bypasses_current_input_values_in_snapshot(tmp_path, monkeyp
         loaded = store.load_task_workflow(task["id"])
         snapshot = loaded["workflow"]
 
-        assert loaded["task"]["bypassed_inputs"] == ["1:image", "3"]
+        assert loaded["task"]["bypassed_nodes"] == ["1", "3"]
         assert snapshot["1"]["inputs"]["image"] == "original.png"
         assert snapshot["2"]["inputs"]["text"] == "current prompt"
         assert snapshot["3"]["inputs"] == {"noise_seed": 1, "mode": "randomize"}
@@ -647,10 +649,10 @@ def test_submit_task_allows_bypassed_required_file_without_local_path(tmp_path, 
             None,
             None,
             "123456",
-            bypassed_inputs=["1:image"],
+            bypassed_nodes=["1"],
         )
 
-        assert task["bypassed_inputs"] == ["1:image"]
+        assert task["bypassed_nodes"] == ["1"]
     finally:
         manager.close()
         store._db.close()
@@ -718,17 +720,16 @@ def test_run_task_uses_remote_id_and_strips_web_metadata(tmp_path, monkeypatch):
         store._db.close()
 
 
-def test_run_task_ignores_current_values_for_bypassed_inputs(tmp_path, monkeypatch):
+def test_run_task_removes_bypassed_nodes_from_submitted_workflow(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
     manager = web_app.TaskManager(store)
     try:
-        original_file = tmp_path / "original.png"
-        original_file.write_bytes(b"original")
         workflow = {
             "__rh_meta__": {"workflowId": "987654"},
-            "1": {"class_type": "LoadImage", "inputs": {"image": str(original_file)}},
+            "1": {"class_type": "LoadImage", "inputs": {"image": "original.png"}},
             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "original prompt"}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
         }
         task = manager.submit_task(
             "unused",
@@ -736,17 +737,12 @@ def test_run_task_ignores_current_values_for_bypassed_inputs(tmp_path, monkeypat
             {"2:text": "not-applied prompt"},
             None,
             None,
-            bypassed_inputs=["1:image", "2:text"],
+            bypassed_nodes=["1", "2"],
             workflow_data=workflow,
             workflow_name="bypass_run_api.json",
         )
         submitted = {}
         uploaded = {}
-
-        def apply_files(client, workflow, args, upload_url):
-            uploaded["args"] = list(args)
-            workflow["1"]["inputs"]["image"] = "uploaded-original.png"
-            return ["uploaded original"]
 
         class FakeClient:
             def __enter__(self):
@@ -760,7 +756,7 @@ def test_run_task_ignores_current_values_for_bypassed_inputs(tmp_path, monkeypat
         monkeypatch.setattr(
             web_app,
             "_apply_file_args",
-            apply_files,
+            lambda client, workflow, args, upload_url: uploaded.update({"args": list(args)}) or [],
         )
         monkeypatch.setattr(
             web_app,
@@ -773,9 +769,10 @@ def test_run_task_ignores_current_values_for_bypassed_inputs(tmp_path, monkeypat
 
         manager._run_task(task["id"], _saved_key(), threading.Event())
 
-        assert uploaded["args"] == [f"1:image={original_file}"]
-        assert submitted["workflow"]["1"]["inputs"]["image"] == "uploaded-original.png"
-        assert submitted["workflow"]["2"]["inputs"]["text"] == "original prompt"
+        assert uploaded["args"] == []
+        assert "1" not in submitted["workflow"]
+        assert "2" not in submitted["workflow"]
+        assert "images" not in submitted["workflow"]["3"]["inputs"]
         assert store.task(task["id"])["status"] == "completed"
     finally:
         manager.close()

@@ -45,6 +45,16 @@
     if (!item.cost) return "";
     return item.cost_type === "money" ? "$" + item.cost : "消耗 " + item.cost + " RH 币";
   }
+  function updateFilterSlider() {
+    var container = $("outputFilters");
+    var slider = container && container.querySelector(".output-filter-slider");
+    var active = container && container.querySelector(".output-filter.active");
+    if (!slider || !active) return;
+    slider.style.width = active.offsetWidth + "px";
+    slider.style.height = active.offsetHeight + "px";
+    slider.style.transform = "translate3d(" + active.offsetLeft + "px, " + active.offsetTop + "px, 0)";
+    slider.classList.add("is-ready");
+  }
   function outputUrl(item) {
     return "/api/tasks/" + encodeURIComponent(item.task_id) + "/output/" + encodeURIComponent(item.file_index);
   }
@@ -75,6 +85,7 @@
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
     });
+    updateFilterSlider();
   }
   function mediaMarkup(item) {
     if (item.kind === "text") {
@@ -142,6 +153,7 @@
       state.type = button.dataset.outputType;
       render();
     });
+    window.addEventListener("resize", updateFilterSlider);
   }
   bindEvents();
   loadOutputs(false);

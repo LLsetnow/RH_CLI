@@ -1,14 +1,17 @@
 (function () {
   "use strict";
 
-  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", analysis: null, workflowDirty: false, bypassedInputs: {}, keys: [], accounts: [], tasks: [], settings: null, loading: false };
+  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", analysis: null, workflowDirty: false, bypassedNodes: {}, keys: [], accounts: [], tasks: [], settings: null, loading: false };
   var previewUrls = {};
   var credentialBusy = {};
   var accountBusy = {};
   var toastTimer = 0;
   var draftSaveTimer = 0;
+  var submitButtonLabel = "";
+  var submitButtonGlyph = "";
   var draftStorageWarningShown = false;
   var draftStorageKey = "rh-workflow-desk-draft-v1";
+  var pendingPromptStorageKey = "rh-workflow-desk-pending-prompt-v1";
   var statusLabels = {
     queued: "排队中", submitting: "提交中", running: "执行中", completed: "已完成",
     failed: "失败", cancelled: "已取消", interrupted: "已中断", recovering: "恢复中", no_balance: "无余额",
@@ -114,6 +117,30 @@
     draftSaveTimer = window.setTimeout(saveDraftNow, 180);
   }
 
+  function applyPendingPrompt() {
+    var pending = null;
+    try {
+      var raw = localStorage.getItem(pendingPromptStorageKey);
+      if (raw) pending = JSON.parse(raw);
+    } catch (error) {
+      pending = null;
+    }
+    var text = pending && pending.version === 1 ? String(pending.text || "").trim() : "";
+    if (!text) return false;
+    var prompt = document.querySelector('.input-card:not(.is-bypassed) .prompt-value') || document.querySelector('.prompt-value');
+    if (!prompt) return false;
+    prompt.value = text;
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    var card = prompt.closest(".input-card");
+    var title = card && card.querySelector(".input-title") ? card.querySelector(".input-title").textContent : "提示词节点";
+    var meta = card && card.querySelector("[data-prompt-meta-id]");
+    if (meta) meta.textContent = "已从提示词工坊导入，可继续编辑";
+    try { localStorage.removeItem(pendingPromptStorageKey); } catch (error) {}
+    prompt.scrollIntoView({ behavior: "smooth", block: "center" });
+    showToast("已导入成品提示词到「" + title + "」");
+    return true;
+  }
+
   function restoreDraft() {
     var draft = readDraft();
     if (!draft) return;
@@ -142,7 +169,6 @@
     $("workflowFilename").textContent = "已恢复 " + appState.workflowName;
     $("workflowRemoteConfig").hidden = false;
     $("exportWorkflowButton").hidden = false;
-    setAnalysisStatus("已恢复上次工作流配置，可以继续编辑或提交。", false);
     showToast("已恢复上次工作流和输入配置");
   }
 
@@ -282,6 +308,16 @@
     }).join("");
   }
 
+  function animateTaskCard(taskId) {
+    if (!taskId) return;
+    var card = document.querySelector('.task-card[data-task-id="' + CSS.escape(String(taskId)) + '"]');
+    if (!card) return;
+    card.classList.remove("task-arrival");
+    void card.offsetWidth;
+    card.classList.add("task-arrival");
+    window.setTimeout(function () { card.classList.remove("task-arrival"); }, 420);
+  }
+
   function renderState(data) {
     appState.keys = data.keys || [];
     appState.accounts = data.accounts || [];
@@ -300,6 +336,15 @@
     return request("/api/state").then(renderState).catch(function (error) {
       if (!silent) showToast(error.message, true);
     }).finally(function () { appState.loading = false; });
+  }
+
+  function openSettingsFromQuery() {
+    var params = new URLSearchParams(window.location.search);
+    if (params.get("openSettings") !== "1" || !$('settingsModal')) return;
+    window.RHMotion.openModal("settingsModal", "outputDir");
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+    }
   }
 
   function setAnalysisStatus(message, isError) {
@@ -357,56 +402,56 @@
     window.setTimeout(function () { target.classList.remove("process-target"); }, 1350);
   }
 
-  function bypassedInputList() {
-    return Object.keys(appState.bypassedInputs || {}).filter(function (inputId) {
-      return appState.bypassedInputs[inputId];
+  function bypassedNodeList() {
+    return Object.keys(appState.bypassedNodes || {}).filter(function (nodeId) {
+      return appState.bypassedNodes[nodeId];
     });
   }
 
-  function setBypassedInputMap(values) {
-    appState.bypassedInputs = {};
+  function setBypassedNodeMap(values) {
+    appState.bypassedNodes = {};
     if (Array.isArray(values)) {
-      values.forEach(function (inputId) {
-        inputId = String(inputId || "").trim();
-        if (inputId) appState.bypassedInputs[inputId] = true;
+      values.forEach(function (value) {
+        var nodeId = String(value || "").trim().split(":", 1)[0];
+        if (nodeId) appState.bypassedNodes[nodeId] = true;
       });
       return;
     }
     if (values && typeof values === "object") {
-      Object.keys(values).forEach(function (inputId) {
-        if (values[inputId]) appState.bypassedInputs[inputId] = true;
+      Object.keys(values).forEach(function (value) {
+        var nodeId = String(value || "").trim().split(":", 1)[0];
+        if (values[value] && nodeId) appState.bypassedNodes[nodeId] = true;
       });
     }
   }
 
-  function isInputBypassed(inputId) {
-    return Boolean(appState.bypassedInputs && appState.bypassedInputs[inputId]);
+  function isNodeBypassed(nodeId) {
+    return Boolean(appState.bypassedNodes && appState.bypassedNodes[nodeId]);
   }
 
-  function bypassControlMarkup(inputId) {
-    var active = isInputBypassed(inputId);
-    return '<button class="input-bypass-toggle' + (active ? ' is-active' : '') + '" type="button" role="switch" aria-checked="' + (active ? 'true' : 'false') + '" aria-label="' + (active ? '恢复当前输入' : '忽略当前输入') + '" title="' + (active ? '恢复当前输入' : '忽略当前输入') + '" data-action="toggle-bypass" data-input-id="' + esc(inputId) + '"><span class="input-bypass-track" aria-hidden="true"><span class="input-bypass-thumb"></span></span><span class="input-bypass-label">' + (active ? '已旁路' : '旁路') + '</span></button>';
+  function bypassControlMarkup(inputId, nodeId) {
+    var active = isNodeBypassed(nodeId);
+    return '<button class="input-bypass-toggle' + (active ? ' is-active' : '') + '" type="button" role="switch" aria-checked="' + (active ? 'true' : 'false') + '" aria-label="' + (active ? '恢复节点' : '旁路节点') + '" title="' + (active ? '恢复节点' : '旁路节点') + '" data-action="toggle-bypass" data-input-id="' + esc(inputId) + '" data-node-id="' + esc(nodeId) + '"><span class="input-bypass-track" aria-hidden="true"><span class="input-bypass-thumb"></span></span><span class="input-bypass-label">' + (active ? '已旁路' : '旁路') + '</span></button>';
   }
 
   function updateBypassSummary() {
     var summary = document.querySelector(".bypass-summary");
     if (!summary) return;
-    summary.innerHTML = '<strong>' + bypassedInputList().length + '</strong> 个旁路输入';
+    summary.innerHTML = '<strong>' + bypassedNodeList().length + '</strong> 个旁路节点';
   }
 
-  function setInputBypassState(inputId, active, refreshSummary) {
+  function setNodeBypassState(nodeId, active, refreshSummary) {
     active = Boolean(active);
-    if (active) appState.bypassedInputs[inputId] = true;
-    else delete appState.bypassedInputs[inputId];
-    var card = document.querySelector('.input-card[data-input-id="' + CSS.escape(inputId) + '"]');
-    if (card) {
+    if (active) appState.bypassedNodes[nodeId] = true;
+    else delete appState.bypassedNodes[nodeId];
+    document.querySelectorAll('.input-card[data-node-id="' + CSS.escape(nodeId) + '"]').forEach(function (card) {
       card.classList.toggle("is-bypassed", active);
       var toggle = card.querySelector('[data-action="toggle-bypass"]');
       if (toggle) {
         toggle.classList.toggle("is-active", active);
         toggle.setAttribute("aria-checked", active ? "true" : "false");
-        toggle.setAttribute("aria-label", active ? "恢复当前输入" : "忽略当前输入");
-        toggle.title = active ? "恢复当前输入" : "忽略当前输入";
+        toggle.setAttribute("aria-label", active ? "恢复节点" : "旁路节点");
+        toggle.title = active ? "恢复节点" : "旁路节点";
         var label = toggle.querySelector(".input-bypass-label");
         if (label) label.textContent = active ? "已旁路" : "旁路";
       }
@@ -417,28 +462,28 @@
       if (dropzone) dropzone.setAttribute("aria-disabled", active ? "true" : "false");
       var note = card.querySelector(".input-bypass-note");
       if (note) note.hidden = !active;
-    }
+    });
     if (refreshSummary !== false) updateBypassSummary();
   }
 
-  function applyInputBypassStates() {
-    document.querySelectorAll(".input-card[data-input-id]").forEach(function (card) {
-      setInputBypassState(card.dataset.inputId, isInputBypassed(card.dataset.inputId), false);
+  function applyNodeBypassStates() {
+    document.querySelectorAll(".input-card[data-node-id]").forEach(function (card) {
+      setNodeBypassState(card.dataset.nodeId, isNodeBypassed(card.dataset.nodeId), false);
     });
     updateBypassSummary();
   }
 
-  function toggleInputBypass(inputId) {
-    if (!inputId) return;
-    var active = !isInputBypassed(inputId);
-    setInputBypassState(inputId, active, true);
+  function toggleNodeBypass(nodeId) {
+    if (!nodeId) return;
+    var active = !isNodeBypassed(nodeId);
+    setNodeBypassState(nodeId, active, true);
     appState.workflowDirty = true;
     scheduleDraftSave();
-    showToast(active ? "已旁路当前输入，本次提交会保留原始值" : "已恢复当前输入覆盖");
+    showToast(active ? "已旁路节点，本次提交会移除该节点" : "已恢复节点");
   }
 
-  function applyRandomNoiseValues(workflow, values, bypassedInputs) {
-    var bypassed = bypassedInputs || [];
+  function applyRandomNoiseValues(workflow, values, bypassedNodes) {
+    var bypassed = bypassedNodes || [];
     Object.keys(values || {}).forEach(function (nodeId) {
       if (bypassed.indexOf(nodeId) !== -1) return;
       var config = values[nodeId] || {};
@@ -453,9 +498,26 @@
     return workflow;
   }
 
+  function applyBypassedNodes(workflow, bypassedNodes) {
+    var bypassed = {};
+    (bypassedNodes || []).forEach(function (nodeId) { bypassed[String(nodeId)] = true; });
+    Object.keys(bypassed).forEach(function (nodeId) { delete workflow[nodeId]; });
+    Object.keys(workflow || {}).forEach(function (nodeId) {
+      if (nodeId === "__rh_meta__") return;
+      var node = workflow[nodeId];
+      var inputs = node && typeof node === "object" ? node.inputs : null;
+      if (!inputs || typeof inputs !== "object") return;
+      Object.keys(inputs).forEach(function (field) {
+        var value = inputs[field];
+        if (Array.isArray(value) && value.length >= 2 && bypassed[String(value[0])]) delete inputs[field];
+      });
+    });
+    return workflow;
+  }
+
   function restoreInputValues(values) {
     values = values || {};
-    setBypassedInputMap(values.bypassedInputs || values.bypassed_inputs || []);
+    setBypassedNodeMap(values.bypassedNodes || values.bypassed_nodes || values.bypassedInputs || values.bypassed_inputs || []);
     Object.keys(values.files || {}).forEach(function (inputId) {
       var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
       var value = String(values.files[inputId] || "").trim();
@@ -474,7 +536,7 @@
       if (seed && config.seed != null) seed.value = String(config.seed);
       if (mode && (config.mode === "fixed" || config.mode === "randomize")) mode.value = config.mode;
     });
-    applyInputBypassStates();
+    applyNodeBypassStates();
   }
 
   function nextWorkflowNodeId() {
@@ -530,7 +592,7 @@
     summary.innerHTML = '<div class="summary-item"><strong>' + files.length + '</strong> 个文件输入</div>' +
       '<div class="summary-item"><strong>' + prompts.length + '</strong> 个提示词节点</div>' +
       '<div class="summary-item"><strong>' + randomNoise.length + '</strong> 个 RandomNoise</div>' +
-      '<div class="summary-item bypass-summary"><strong>' + bypassedInputList().length + '</strong> 个旁路输入</div>' +
+      '<div class="summary-item bypass-summary"><strong>' + bypassedNodeList().length + '</strong> 个旁路节点</div>' +
       '<div class="summary-item">已完成节点扫描</div>';
     var html = '<div class="input-node-toolbar"><div><span class="input-node-toolbar-title">可添加输入节点</span><small>节点会写入当前 API 工作流</small></div><button class="secondary-button" type="button" data-action="add-random-noise">＋ RandomNoise</button></div>';
     var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; }));
@@ -548,8 +610,8 @@
       files.forEach(function (item) {
         var originalFileValue = String(item.default || "");
         var visibleFileValue = /^(\/|[A-Za-z]:[\\/])/.test(originalFileValue) ? originalFileValue : "";
-        html += '<div class="input-card file-input-card' + (isInputBypassed(item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
-          '<div class="input-bypass-note" hidden>本次提交会忽略当前填写内容，使用原始工作流值；原始值若是本机文件，会上传原始文件</div>' +
+        html += '<div class="input-card file-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+          '<div class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</div>' +
           '<div class="file-input-layout"><div class="file-input-controls">' +
           '<div class="file-dropzone" data-action="pick-file" data-input-id="' + esc(item.id) + '" tabindex="0" role="group" aria-label="文件拖放区域">' +
           '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">拖入或点击“预览”查看图片</small></span>' +
@@ -562,8 +624,8 @@
     if (prompts.length) {
       html += '<div class="section-kicker prompt-section-label">提示词节点 · 可选</div>';
       prompts.forEach(function (item) {
-        html += '<div class="input-card' + (isInputBypassed(item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
-          '<div class="input-bypass-note" hidden>本次提交会忽略当前填写内容，使用原始工作流值；原始值若是本机文件，会上传原始文件</div>' +
+        html += '<div class="input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title) + '</div><div class="input-type">' + esc(item.class_type) + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+          '<div class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</div>' +
           '<textarea class="prompt-value" data-input-id="' + esc(item.id) + '" placeholder="可以直接输入，也可以从下方加载 .txt">' + esc(item.default || "") + '</textarea>' +
           '<div class="prompt-tools"><input class="prompt-picker" data-input-id="' + esc(item.id) + '" type="file" accept=".txt,text/plain" hidden /><button class="file-button" data-action="pick-prompt" data-input-id="' + esc(item.id) + '" type="button">加载 TXT</button><span class="file-meta" data-prompt-meta-id="' + esc(item.id) + '">读取内容后仍可继续编辑</span></div></div>';
       });
@@ -573,8 +635,8 @@
       randomNoise.forEach(function (item) {
         var seed = item.seed == null || item.seed === "" ? 0 : item.seed;
         var mode = item.mode === "fixed" ? "fixed" : "randomize";
-        html += '<div class="input-card random-noise-card' + (isInputBypassed(item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title || "RandomNoise") + '</div><div class="input-type">' + esc(item.class_type || "RandomNoise") + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
-          '<div class="input-bypass-note" hidden>本次提交会忽略当前填写内容，使用原始工作流值；原始值若是本机文件，会上传原始文件</div>' +
+        html += '<div class="input-card random-noise-card' + (isNodeBypassed(item.node_id || item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div><div class="input-title">' + esc(item.title || "RandomNoise") + '</div><div class="input-type">' + esc(item.class_type || "RandomNoise") + '</div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id || item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+          '<div class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</div>' +
           '<div class="random-noise-grid"><label class="field-group"><span class="field-label">随机种子</span><input class="random-noise-seed" data-node-id="' + esc(item.node_id || item.id) + '" type="number" inputmode="numeric" step="1" value="' + esc(seed) + '" /></label>' +
           '<label class="field-group"><span class="field-label">模式</span><select class="random-noise-mode" data-node-id="' + esc(item.node_id || item.id) + '"><option value="fixed"' + (mode === "fixed" ? " selected" : "") + '>fixed</option><option value="randomize"' + (mode === "randomize" ? " selected" : "") + '>randomize</option></select></label></div>' +
           '<div class="file-meta">导出或提交时写入 ' + esc(item.seed_field || "noise_seed") + ' 和 mode</div></div>';
@@ -585,7 +647,7 @@
     inputs.hidden = false;
     $("submitStrip").hidden = false;
     setProcessStep("inputs");
-    applyInputBypassStates();
+    applyNodeBypassStates();
     files.forEach(function (item) {
       var value = String(item.default || "").trim();
       if (/^(\/|[A-Za-z]:[\\/])/.test(value) || appState.workflowSourceDir) previewLocalPath(item.id, value);
@@ -617,11 +679,12 @@
       appState.workflowName = file.name;
       appState.workflowDirty = false;
       appState.analysis = data.analysis;
-      setBypassedInputMap(data.analysis && data.analysis.bypassed_inputs);
+      setBypassedNodeMap(data.analysis && data.analysis.bypassed_nodes);
       renderAnalysis(data.analysis);
       $("workflowRemoteConfig").hidden = false;
       $("exportWorkflowButton").hidden = false;
       setAnalysisStatus("工作流已识别，可以准备输入并提交。", false);
+      applyPendingPrompt();
       saveDraftNow();
       showToast("工作流分析完成");
     }).catch(function (error) {
@@ -655,8 +718,9 @@
         files: savedTask.files || {},
         prompts: savedTask.prompts || {},
         randomNoise: savedTask.random_noise || {},
-        bypassedInputs: savedTask.bypassed_inputs || []
+        bypassedNodes: savedTask.bypassed_nodes || savedTask.bypassed_inputs || []
       });
+      applyPendingPrompt();
       if ($("keySelect") && savedTask.key_id && appState.keys.some(function (key) {
         return key.id === savedTask.key_id && key.status === "ready";
       })) {
@@ -701,7 +765,7 @@
   }
 
   function recordInputFileWithEvent(inputId, file, event) {
-    if (isInputBypassed(inputId)) return;
+    if (isNodeBypassed(String(inputId).split(":", 1)[0])) return;
     var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
     var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
     var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
@@ -733,7 +797,7 @@
   }
 
   function pickNativeInput(inputId, button) {
-    if (isInputBypassed(inputId)) return;
+    if (isNodeBypassed(String(inputId).split(":", 1)[0])) return;
     var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
     var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
     var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
@@ -867,7 +931,7 @@
       var mode = card.querySelector(".random-noise-mode");
       randomNoise[nodeId] = { seed: seed ? seed.value.trim() : "", mode: mode ? mode.value.trim() : "" };
     });
-    return { files: files, prompts: prompts, randomNoise: randomNoise, bypassedInputs: bypassedInputList() };
+    return { files: files, prompts: prompts, randomNoise: randomNoise, bypassedNodes: bypassedNodeList() };
   }
 
   function exportWorkflow() {
@@ -883,12 +947,11 @@
     var values = collectInputs();
     var metadata = {};
     if (currentRemoteWorkflowId) metadata.workflowId = currentRemoteWorkflowId;
-    if (values.bypassedInputs.length) metadata.bypassedInputs = values.bypassedInputs;
     if (Object.keys(metadata).length) workflow.__rh_meta__ = metadata;
     var changes = 0;
     [values.files, values.prompts].forEach(function (group) {
       Object.keys(group).forEach(function (inputId) {
-        if (values.bypassedInputs.indexOf(inputId) !== -1) return;
+        if (values.bypassedNodes.indexOf(inputId.split(":", 1)[0]) !== -1) return;
         var separator = inputId.indexOf(":");
         if (separator <= 0) return;
         var nodeId = inputId.slice(0, separator);
@@ -905,10 +968,11 @@
         changes += 1;
       });
     });
-    applyRandomNoiseValues(workflow, values.randomNoise, values.bypassedInputs);
+    applyRandomNoiseValues(workflow, values.randomNoise, values.bypassedNodes);
     changes += Object.keys(values.randomNoise).filter(function (nodeId) {
-      return values.bypassedInputs.indexOf(nodeId) === -1;
+      return values.bypassedNodes.indexOf(nodeId) === -1;
     }).length * 2;
+    applyBypassedNodes(workflow, values.bypassedNodes);
     var sourceName = appState.workflowName || "workflow_api.json";
     var stem = sourceName.replace(/\.json$/i, "") || "workflow";
     var blob = new Blob([JSON.stringify(workflow, null, 2) + "\n"], { type: "application/json;charset=utf-8" });
@@ -920,7 +984,7 @@
     link.click();
     link.remove();
     window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    showToast("已导出当前 API 工作流，保留了 " + changes + " 个输入配置" + (values.bypassedInputs.length ? "，旁路 " + values.bypassedInputs.length + " 个输入" : "") + (currentRemoteWorkflowId ? "和 workflowId" : ""));
+    showToast("已导出当前 API 工作流，保留了 " + changes + " 个输入配置" + (values.bypassedNodes.length ? "，已旁路 " + values.bypassedNodes.length + " 个节点" : "") + (currentRemoteWorkflowId ? "和 workflowId" : ""));
   }
 
   function submitTask() {
@@ -936,11 +1000,11 @@
     var values = collectInputs();
     var required = (appState.analysis && appState.analysis.file_inputs) || [];
     var missing = required.some(function (item) {
-      return values.bypassedInputs.indexOf(item.id) === -1 && !values.files[item.id];
+      return values.bypassedNodes.indexOf(item.node_id) === -1 && !values.files[item.id];
     });
     if (missing) return showToast("请先为所有文件输入选择本地文件", true);
     var invalidNoise = Object.keys(values.randomNoise).some(function (nodeId) {
-      if (values.bypassedInputs.indexOf(nodeId) !== -1) return false;
+      if (values.bypassedNodes.indexOf(nodeId) !== -1) return false;
       var config = values.randomNoise[nodeId];
       return !/^-?\d+$/.test(String(config.seed || "").trim()) || ["fixed", "randomize"].indexOf(config.mode) === -1;
     });
@@ -949,12 +1013,20 @@
     if (appState.workflowDirty && appState.workflow) {
       try {
         workflowPayload = JSON.parse(JSON.stringify(appState.workflow));
-        applyRandomNoiseValues(workflowPayload, values.randomNoise, values.bypassedInputs);
+        applyRandomNoiseValues(workflowPayload, values.randomNoise, values.bypassedNodes);
       } catch (error) {
         return showToast("当前工作流无法保存", true);
       }
     }
     button.disabled = true;
+    button.classList.add("is-submitting");
+    button.setAttribute("aria-busy", "true");
+    var label = button.querySelector(".button-label");
+    var glyph = button.querySelector(".button-glyph");
+    submitButtonLabel = label ? label.textContent : "加入任务队列";
+    submitButtonGlyph = glyph ? glyph.textContent : "→";
+    if (label) label.textContent = "加入中…";
+    if (glyph) glyph.textContent = "↻";
     jsonRequest("/api/tasks", "POST", {
       workflow_id: appState.workflowId,
       workflow: workflowPayload,
@@ -963,14 +1035,22 @@
       files: values.files,
       prompts: values.prompts,
       random_noise: values.randomNoise,
-      bypassed_inputs: values.bypassedInputs,
+      bypassed_nodes: values.bypassedNodes,
       key_id: $("keySelect").value || null,
       output_dir: $("outputDir").value.trim() || null
-    }).then(function () {
+    }).then(function (data) {
       showToast("任务已加入本地队列");
-      setProcessStep("queue");
-      refresh(true);
-    }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
+      return refresh(true).then(function () {
+        jumpToProcessStep("queue");
+        animateTaskCard(data && data.task && data.task.id);
+      });
+    }).catch(function (error) { showToast(error.message, true); }).finally(function () {
+      button.disabled = false;
+      button.classList.remove("is-submitting");
+      button.removeAttribute("aria-busy");
+      if (label) label.textContent = submitButtonLabel || "加入任务队列";
+      if (glyph) glyph.textContent = submitButtonGlyph || "→";
+    });
   }
 
   function stageLabel(stage) {
@@ -1026,7 +1106,7 @@
 
   function closeTaskModal() {
     stopTaskMedia();
-    $("taskModal").hidden = true;
+    window.RHMotion.closeModal("taskModal");
   }
 
   function openTask(task) {
@@ -1052,7 +1132,7 @@
         return '<div class="output-item"><div class="output-label">' + esc(item.name || "output") + '</div>' + content + '</div>';
       }).join("");
     }
-    $("taskModal").hidden = false;
+    window.RHMotion.openModal("taskModal", "closeModal");
   }
 
   function handleQueueClick(event) {
@@ -1207,7 +1287,7 @@
       var action = trigger.dataset.action;
       var inputId = trigger.dataset.inputId;
       if (action === "toggle-bypass") {
-        toggleInputBypass(inputId);
+        toggleNodeBypass(trigger.dataset.nodeId || String(inputId || "").split(":", 1)[0]);
         return;
       }
       var inputCard = trigger.closest(".input-card");
@@ -1275,13 +1355,13 @@
     $("workflowInputs").addEventListener("change", function (event) {
       var inputId = event.target.dataset.inputId;
       if (event.target.classList.contains("file-picker") && event.target.files[0]) {
-        if (isInputBypassed(inputId)) return;
+        if (isNodeBypassed(String(inputId || "").split(":", 1)[0])) return;
         var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
         if (zone) zone.classList.add("is-loading");
         recordInputFile(inputId, event.target.files[0]);
       }
       if (event.target.classList.contains("prompt-picker") && event.target.files[0]) {
-        if (isInputBypassed(inputId)) return;
+        if (isNodeBypassed(String(inputId || "").split(":", 1)[0])) return;
         var file = event.target.files[0];
         file.text().then(function (text) {
           var textarea = document.querySelector('.prompt-value[data-input-id="' + CSS.escape(inputId) + '"]');
@@ -1344,11 +1424,10 @@
     });
     $("chooseOutputDir").addEventListener("click", function () { pickOutputDirectory(this); });
     $("openSettings").addEventListener("click", function () {
-      $("settingsModal").hidden = false;
-      window.setTimeout(function () { $("outputDir").focus(); }, 0);
+      window.RHMotion.openModal("settingsModal", "outputDir");
     });
-    $("closeSettings").addEventListener("click", function () { $("settingsModal").hidden = true; });
-    $("settingsModal").addEventListener("click", function (event) { if (event.target === $("settingsModal")) $("settingsModal").hidden = true; });
+    $("closeSettings").addEventListener("click", function () { window.RHMotion.closeModal("settingsModal"); });
+    $("settingsModal").addEventListener("click", function (event) { if (event.target === $("settingsModal")) window.RHMotion.closeModal("settingsModal"); });
     $("credentialForm").addEventListener("submit", function (event) { event.preventDefault(); });
     $("closeModal").addEventListener("click", closeTaskModal);
     $("taskModal").addEventListener("click", function (event) { if (event.target === $("taskModal")) closeTaskModal(); });
@@ -1362,12 +1441,16 @@
       }
       if (event.key !== "Escape") return;
       closeTaskModal();
-      $("settingsModal").hidden = true;
+      window.RHMotion.closeModal("settingsModal");
     });
   }
 
   bindEvents();
-  refresh(false).then(restoreDraft);
+  refresh(false).then(function () {
+    restoreDraft();
+    applyPendingPrompt();
+    openSettingsFromQuery();
+  });
   window.addEventListener("beforeunload", function () {
     window.clearTimeout(draftSaveTimer);
     saveDraftNow();

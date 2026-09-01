@@ -15,6 +15,7 @@
         } catch (error) {}
       }());
     </script>
+    <script src="/static/motion.js"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -36,7 +37,7 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
-          <button id="openSettings" class="settings-button" type="button" aria-haspopup="dialog" aria-controls="settingsModal">
+          <button id="openSettings" class="settings-button settings-access" type="button" aria-haspopup="dialog" aria-controls="settingsModal">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </button>
         </div>
@@ -47,15 +48,6 @@
         <h1>把工作流交给队列，<br /><em>让本地输入保持在手边。</em></h1>
         <p>上传 API 格式工作流后，系统会识别文件输入和提示词节点。提交、轮询、下载都在本机完成。</p>
       </section>
-
-      <nav class="process-nav" aria-label="工作流流程">
-        <span class="process-index">01—03</span>
-        <button class="process-step active" type="button" data-process-step="workflow">导入工作流</button>
-        <span class="process-arrow" aria-hidden="true">→</span>
-        <button class="process-step" type="button" data-process-step="inputs">配置输入</button>
-        <span class="process-arrow" aria-hidden="true">→</span>
-        <button class="process-step" type="button" data-process-step="queue">任务队列</button>
-      </nav>
 
       <div class="workspace">
         <main class="main-column">
@@ -94,10 +86,10 @@
                 <select id="keySelect">
                   <option value="">自动选择可用 Key</option>
                 </select>
-                <span class="field-hint">Ctrl + Enter 快捷提交</span>
+                <span class="field-hint submit-shortcut">Ctrl + Enter 快捷提交</span>
               </div>
               <button id="submitButton" class="primary-button" type="button">
-                <span class="button-glyph">→</span><span>加入任务队列</span>
+                <span class="button-glyph">→</span><span class="button-label">加入任务队列</span>
               </button>
             </div>
           </section>
@@ -105,6 +97,14 @@
         </main>
 
         <aside class="queue-column">
+          <nav class="process-nav" aria-label="工作流流程">
+            <span class="process-index">01—03</span>
+            <button class="process-step active" type="button" data-process-step="workflow">导入工作流</button>
+            <span class="process-arrow" aria-hidden="true">→</span>
+            <button class="process-step" type="button" data-process-step="inputs">配置输入</button>
+            <span class="process-arrow" aria-hidden="true">→</span>
+            <button class="process-step" type="button" data-process-step="queue">任务队列</button>
+          </nav>
           <section class="panel queue-panel">
             <div class="queue-heading">
               <div>

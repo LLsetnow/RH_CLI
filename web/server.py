@@ -218,6 +218,9 @@ class LocalHandler(BaseHTTPRequestHandler):
             if path == "/api/tasks":
                 body = self._body()
                 _, manager = self.state
+                bypassed_nodes = body.get("bypassed_nodes")
+                if not isinstance(bypassed_nodes, (list, dict)):
+                    bypassed_nodes = body.get("bypassed_inputs") if isinstance(body.get("bypassed_inputs"), (list, dict)) else None
                 task = manager.submit_task(
                     str(body.get("workflow_id") or ""),
                     body.get("files") if isinstance(body.get("files"), dict) else {},
@@ -226,7 +229,8 @@ class LocalHandler(BaseHTTPRequestHandler):
                     str(body.get("output_dir") or "") or None,
                     remote_workflow_id=str(body.get("remote_workflow_id") or "") or None,
                     random_noise=body.get("random_noise") if isinstance(body.get("random_noise"), dict) else {},
-                    bypassed_inputs=body.get("bypassed_inputs") if isinstance(body.get("bypassed_inputs"), (list, dict)) else None,
+                    resolution=body.get("resolution") if isinstance(body.get("resolution"), dict) else {},
+                    bypassed_nodes=bypassed_nodes,
                     workflow_data=body.get("workflow") if isinstance(body.get("workflow"), dict) else None,
                     workflow_name=str(body.get("workflow_name") or "") or None,
                 )
