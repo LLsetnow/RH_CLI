@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import mimetypes
 import threading
+import uuid
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,13 +14,22 @@ from urllib.parse import unquote, urlparse
 
 from rh_cli.errors import RhCliError
 
-from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_key, public_outputs, public_state
+from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_key, public_outputs, public_state, safe_name
 from .action_store import ActionStore
 from .prompt_store import PromptStore
+from .reference_store import ReferenceStore
 
 
 STATIC_ROOT = WEB_ROOT / "static"
 LOCAL_PREVIEW_LIMIT = 8 * 1024 * 1024
+PASTED_IMAGE_EXTENSIONS = {
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 
 def local_file_preview(path_value: str) -> dict[str, object]:
@@ -41,6 +52,49 @@ def local_file_preview(path_value: str) -> dict[str, object]:
         "mime": mime,
         "preview_url": preview_url,
     }
+
+
+def save_pasted_image(body: dict[str, object]) -> dict[str, object]:
+    """Persist a clipboard image so the task runner can submit it by local path."""
+    mime = str(body.get("mime") or "").strip().lower().split(";", 1)[0]
+    encoded = str(body.get("data") or "").strip()
+    if encoded.startswith("data:"):
+        header, separator, encoded = encoded.partition(",")
+        if not separator or ";base64" not in header.lower():
+            raise RhCliError("INVALID_PASTED_IMAGE", "剪贴板内容不是有效的图片数据。")
+        data_mime = header[5:].split(";", 1)[0].strip().lower()
+        mime = mime or data_mime
+    if mime not in PASTED_IMAGE_EXTENSIONS:
+        raise RhCliError("INVALID_PASTED_IMAGE", "仅支持 PNG、JPEG、WebP、GIF、BMP 或 AVIF 图片。")
+    if not encoded:
+        raise RhCliError("INVALID_PASTED_IMAGE", "剪贴板中没有可保存的图片。")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise RhCliError("INVALID_PASTED_IMAGE", "剪贴板内容不是有效的图片数据。") from exc
+    if not raw:
+        raise RhCliError("INVALID_PASTED_IMAGE", "剪贴板中没有可保存的图片。")
+    if len(raw) > LOCAL_PREVIEW_LIMIT:
+        raise RhCliError("PASTED_IMAGE_TOO_LARGE", "剪贴板图片不能超过 8MB。")
+
+    name = safe_name(str(body.get("name") or ""), "clipboard-image")
+    stem = Path(name).stem or "clipboard-image"
+    filename = f"{uuid.uuid4().hex}_{safe_name(stem, 'clipboard-image')}{PASTED_IMAGE_EXTENSIONS[mime]}"
+    target_dir = DATA_ROOT / "pasted-inputs"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / filename
+    temporary = target_dir / f".{filename}.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_bytes(raw)
+        temporary.replace(target)
+    except OSError as exc:
+        raise RhCliError("PASTED_IMAGE_SAVE_FAILED", "无法保存剪贴板图片，请重试。") from exc
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return local_file_preview(str(target))
 
 
 class LocalHandler(BaseHTTPRequestHandler):
@@ -103,18 +157,34 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             store, manager = self.state
-            self._json(200, public_state(store, manager))
+            state = public_state(store, manager)
+            state["settings"]["prompt_library_path"] = str(self.server.prompt_store.library_path)  # type: ignore[attr-defined]
+            state["settings"]["action_resources_path"] = str(self.server.action_store.source_path)  # type: ignore[attr-defined]
+            state["settings"]["reference_resources_paths"] = self.server.reference_store.source_paths()  # type: ignore[attr-defined]
+            self._json(200, state)
             return
         if path == "/api/outputs":
             store, manager = self.state
             self._json(200, public_outputs(store, manager))
+            return
+        if path == "/api/workflows":
+            store, _ = self.state
+            self._json(200, {"workflows": store.workflows()})
+            return
+        if path.startswith("/api/workflows/") and path != "/api/workflows/analyze":
+            workflow_id = path.rsplit("/", 1)[-1]
+            store, _ = self.state
+            try:
+                self._json(200, store.workflow_detail(workflow_id))
+            except Exception as exc:
+                self._json(400 if isinstance(exc, RhCliError) else 500, self._safe_error(exc))
             return
         if path == "/api/prompt/state":
             self._json(200, self.server.prompt_store.snapshot())  # type: ignore[attr-defined]
             return
         if path == "/api/prompt/actions":
             action_store = self.server.action_store  # type: ignore[attr-defined]
-            # Resources.md is the source of truth. A hash check makes edits visible
+            # The configured pose Markdown file is the source of truth. A hash check makes edits visible
             # while the app is open without requiring a server restart.
             action_store.refresh()
             self._json(200, {"actions": action_store.public_actions(), "source_status": action_store.source_status()})
@@ -124,11 +194,40 @@ class LocalHandler(BaseHTTPRequestHandler):
             action_store.refresh()
             self._json(200, action_store.source_status())
             return
+        if path == "/api/prompt/references":
+            reference_store = self.server.reference_store  # type: ignore[attr-defined]
+            reference_store.refresh()
+            self._json(200, {
+                "references": reference_store.public_references(),
+                "source_status": reference_store.source_status(),
+                "kind_counts": reference_store.kind_counts(),
+            })
+            return
+        if path == "/api/prompt/references/status":
+            reference_store = self.server.reference_store  # type: ignore[attr-defined]
+            reference_store.refresh()
+            self._json(200, reference_store.source_status())
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/depth-path"):
+            self._serve_action_path(path, "depth")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/image-path"):
+            self._serve_action_path(path, "color")
+            return
         if path.startswith("/api/prompt/actions/") and path.endswith("/depth"):
             self._serve_action_image(path, "depth")
             return
         if path.startswith("/api/prompt/actions/") and path.endswith("/image"):
             self._serve_action_image(path, "color")
+            return
+        if path.startswith("/api/prompt/references/") and path.endswith("/image"):
+            self._serve_reference_media(path, "image")
+            return
+        if path.startswith("/api/prompt/references/") and path.endswith("/image-path"):
+            self._serve_reference_path(path, "image")
+            return
+        if path.startswith("/api/prompt/references/") and path.endswith("/audio"):
+            self._serve_reference_media(path, "audio")
             return
         if path.startswith("/api/tasks/") and "/output/" in path:
             self._serve_output(path)
@@ -166,9 +265,47 @@ class LocalHandler(BaseHTTPRequestHandler):
                 selected = pick_local_file_on_macos()
                 self._json(200, local_file_preview(str(selected)))
                 return
+            if path == "/api/paste-file":
+                self._json(200, save_pasted_image(self._body()))
+                return
+            if path == "/api/pick-action-resources":
+                selected = pick_local_file_on_macos("选择动作库 Markdown 文件")
+                self._json(200, {"path": str(selected), "name": selected.name})
+                return
+            if path == "/api/pick-prompt-resource":
+                body = self._body()
+                labels = {
+                    "library": "基础积木 Markdown 文件",
+                    "action": "动作库 Markdown 文件",
+                    "character": "人物库 Markdown 文件",
+                    "audio": "音频库 Markdown 文件",
+                    "background": "背景库 Markdown 文件",
+                    "clothes": "服装库 Markdown 文件",
+                }
+                kind = str(body.get("kind") or "").strip()
+                if kind not in labels:
+                    raise RhCliError("INVALID_PROMPT_RESOURCE_KIND", "未知的提示词资源类型。")
+                selected = pick_local_file_on_macos("选择" + labels[kind])
+                self._json(200, {"path": str(selected), "name": selected.name, "kind": kind})
+                return
             if path == "/api/pick-directory":
                 selected = pick_local_directory_on_macos()
                 self._json(200, {"path": str(selected) if selected else ""})
+                return
+            if path == "/api/workflows":
+                body = self._body()
+                content = body.get("content")
+                if not isinstance(content, str):
+                    raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
+                store, _ = self.state
+                workflow_id, _, _ = store.save_workflow(
+                    str(body.get("filename") or "workflow.json"),
+                    content,
+                    account_id=str(body.get("account_id") or ""),
+                    remote_workflow_id=str(body.get("remote_workflow_id") or ""),
+                    source_dir=str(body.get("source_dir") or ""),
+                )
+                self._json(201, store.workflow_detail(workflow_id))
                 return
             if path == "/api/workflows/analyze":
                 body = self._body()
@@ -176,14 +313,25 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if not isinstance(content, str):
                     raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
                 store, _ = self.state
-                workflow_id, workflow_path, analysis = store.save_workflow(str(body.get("filename") or "workflow.json"), content)
+                workflow_id, workflow_path, analysis = store.save_workflow(
+                    str(body.get("filename") or "workflow.json"),
+                    content,
+                    account_id=str(body.get("account_id") or ""),
+                    remote_workflow_id=str(body.get("remote_workflow_id") or ""),
+                    source_dir=str(body.get("source_dir") or ""),
+                    register=False,
+                )
+                saved_workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                saved_metadata = saved_workflow.get("__rh_meta__") if isinstance(saved_workflow, dict) else {}
+                saved_metadata = saved_metadata if isinstance(saved_metadata, dict) else {}
                 self._json(
                     200,
                     {
                         "workflow_id": workflow_id,
-                        "filename": workflow_path.name,
+                        "filename": workflow_path.name[len(f"{workflow_id}_") :] if workflow_path.name.startswith(f"{workflow_id}_") else workflow_path.name,
                         "analysis": analysis,
                         "remote_workflow_id": analysis.get("remote_workflow_id", ""),
+                        "account_id": str(saved_metadata.get("accountId") or saved_metadata.get("account_id") or ""),
                     },
                 )
                 return
@@ -245,6 +393,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                     bypassed_nodes=bypassed_nodes,
                     workflow_data=body.get("workflow") if isinstance(body.get("workflow"), dict) else None,
                     workflow_name=str(body.get("workflow_name") or "") or None,
+                    instance_type=str(body.get("instance_type") or "default"),
+                    workflow_account_id=str(body.get("workflow_account_id") or "") or None,
+                    workflow_input_config=body.get("workflow_input_config") if isinstance(body.get("workflow_input_config"), dict) else None,
+                    custom_inputs=body.get("custom_inputs") if isinstance(body.get("custom_inputs"), dict) else {},
                 )
                 self._json(202, {"task": task})
                 return
@@ -266,13 +418,37 @@ class LocalHandler(BaseHTTPRequestHandler):
                 result = {
                     "output_dir": store.output_dir(),
                     "personal_capacity": store.personal_capacity(),
+                    "current_account_id": store.current_account_id(),
+                    "prompt_library_path": str(self.server.prompt_store.library_path),  # type: ignore[attr-defined]
+                    "action_resources_path": str(self.server.action_store.source_path),  # type: ignore[attr-defined]
+                    "reference_resources_paths": self.server.reference_store.source_paths(),  # type: ignore[attr-defined]
                 }
+                if "current_account_id" in body:
+                    result["current_account_id"] = store.set_current_account(str(body.get("current_account_id") or ""))["id"]
+                    manager._wake.set()
                 if "output_dir" in body:
                     result["output_dir"] = store.set_output_dir(str(body.get("output_dir") or ""))
                 if "personal_capacity" in body:
                     result["personal_capacity"] = store.set_personal_capacity(body.get("personal_capacity"))
                     manager._wake.set()
+                if "prompt_library_path" in body:
+                    prompt_path = store.set_prompt_library_path(str(body.get("prompt_library_path") or ""))
+                    self.server.prompt_store.set_library_path(prompt_path)  # type: ignore[attr-defined]
+                    result["prompt_library_path"] = str(self.server.prompt_store.library_path)  # type: ignore[attr-defined]
+                if "action_resources_path" in body:
+                    action_path = store.set_action_resources_path(str(body.get("action_resources_path") or ""))
+                    self.server.action_store.set_source_path(action_path)  # type: ignore[attr-defined]
+                    result["action_resources_path"] = str(self.server.action_store.source_path)  # type: ignore[attr-defined]
+                if "reference_resources_paths" in body:
+                    reference_paths = store.set_reference_resources_paths(body.get("reference_resources_paths"))
+                    self.server.reference_store.set_source_paths(reference_paths)  # type: ignore[attr-defined]
+                    result["reference_resources_paths"] = self.server.reference_store.source_paths()  # type: ignore[attr-defined]
                 self._json(200, result)
+                return
+            if path.startswith("/api/workflows/"):
+                workflow_id = path.rsplit("/", 1)[-1]
+                store, _ = self.state
+                self._json(200, {"workflow": store.update_workflow(workflow_id, self._body())})
                 return
             if path.startswith("/api/accounts/"):
                 account_id = path.rsplit("/", 1)[-1]
@@ -306,6 +482,12 @@ class LocalHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/prompt/library/"):
                 block_id = path.rsplit("/", 1)[-1]
                 self.server.prompt_store.delete_block(block_id)  # type: ignore[attr-defined]
+                self._json(200, {"ok": True})
+                return
+            if path.startswith("/api/workflows/"):
+                workflow_id = path.rsplit("/", 1)[-1]
+                store, _ = self.state
+                store.delete_workflow(workflow_id)
                 self._json(200, {"ok": True})
                 return
             if path.startswith("/api/prompt/groups/"):
@@ -431,10 +613,48 @@ class LocalHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _serve_action_path(self, path: str, kind: str) -> None:
+        parts = path.split("/")
+        action_id = parts[4] if len(parts) == 6 else ""
+        file_path = self.server.action_store.image_path(action_id, kind)  # type: ignore[attr-defined]
+        if file_path is None:
+            label = "深度图" if kind == "depth" else "原图"
+            self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": f"动作{label}不存在"})
+            return
+        self._json(200, {"path": str(file_path), "name": file_path.name, "kind": kind})
+
+    def _serve_reference_media(self, path: str, kind: str) -> None:
+        parts = path.split("/")
+        reference_id = parts[4] if len(parts) == 6 else ""
+        file_path = self.server.reference_store.media_path(reference_id, kind)  # type: ignore[attr-defined]
+        if file_path is None:
+            self._json(404, {"code": "REFERENCE_MEDIA_NOT_FOUND", "message": "参考资源媒体不存在"})
+            return
+        try:
+            data = file_path.read_bytes()
+        except OSError:
+            self._json(404, {"code": "REFERENCE_MEDIA_NOT_FOUND", "message": "参考资源媒体不存在"})
+            return
+        self.send_response(HTTPStatus.OK)
+        self._headers(mimetypes.guess_type(str(file_path))[0] or "application/octet-stream", len(data))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_reference_path(self, path: str, kind: str) -> None:
+        parts = path.split("/")
+        reference_id = parts[4] if len(parts) == 6 else ""
+        file_path = self.server.reference_store.media_path(reference_id, kind)  # type: ignore[attr-defined]
+        if file_path is None:
+            self._json(404, {"code": "REFERENCE_MEDIA_NOT_FOUND", "message": "参考资源媒体不存在"})
+            return
+        self._json(200, {"path": str(file_path), "name": file_path.name, "kind": kind})
+
     def _serve_static(self, path: str) -> None:
         relative = "index.html" if path in {"", "/"} else path.lstrip("/")
         if relative in {"prompt", "prompt/"}:
             relative = "prompt.html"
+        if relative in {"workflows", "workflows/"}:
+            relative = "workflows.html"
         if relative in {"outputs", "outputs/"}:
             relative = "outputs.html"
         if relative.startswith("static/"):
@@ -459,8 +679,11 @@ class AppServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int]) -> None:
         self.store = LocalStore()
         self.manager = TaskManager(self.store)
-        self.prompt_store = PromptStore(DATA_ROOT)
-        self.action_store = ActionStore(DATA_ROOT)
+        configured_library_path = self.store.prompt_library_path()
+        self.prompt_store = PromptStore(DATA_ROOT, library_path=configured_library_path)
+        configured_action_path = self.store.action_resources_path()
+        self.action_store = ActionStore(DATA_ROOT, source_path=configured_action_path or None)
+        self.reference_store = ReferenceStore(DATA_ROOT, source_paths=self.store.reference_resources_paths())
         super().__init__(address, LocalHandler)
 
     def server_close(self) -> None:

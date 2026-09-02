@@ -31,6 +31,7 @@
           <a class="top-nav-link active" href="/" aria-current="page">任务提交</a>
           <a class="top-nav-link" href="/prompt">提示词工坊</a>
           <a class="top-nav-link" href="/outputs">成片</a>
+          <a class="top-nav-link" href="/workflows">工作流</a>
         </nav>
         <div class="topbar-actions">
           <div class="local-badge"><span class="status-dot"></span>仅本机运行</div>
@@ -87,6 +88,15 @@
                   <option value="">自动选择可用 Key</option>
                 </select>
                 <span class="field-hint submit-shortcut">Ctrl + Enter 快捷提交</span>
+              </div>
+              <div class="submit-config">
+                <label class="field-label" for="instanceType">提交机型</label>
+                <select id="instanceType">
+                  <option value="default">Standard · 24GB · ¥4.70572 / 小时</option>
+                  <option value="plus">Plus · 48GB · ¥6.05020 / 小时</option>
+                  <option value="ultra">Ultra · 84GB · ¥9.07531 / 小时</option>
+                </select>
+                <span class="field-hint">通过 instanceType 指定，默认使用 Standard。</span>
               </div>
               <button id="submitButton" class="primary-button" type="button">
                 <span class="button-glyph">→</span><span class="button-label">加入任务队列</span>
@@ -147,6 +157,54 @@
             <button id="saveOutputDir" class="secondary-button" type="button">保存路径</button>
           </div>
         </div>
+        <div class="divider prompt-resources-divider"></div>
+        <div class="credential-heading prompt-resources-heading">
+          <div>
+            <span class="field-label">提示词工坊资源路径</span>
+            <span class="field-hint">六类积木分别读取各自的本机文件；保存后会立即重新扫描，媒体仍保留原路径，不会复制。</span>
+          </div>
+        </div>
+        <div class="setting-grid prompt-library-setting">
+          <label class="field-group">
+            <span class="field-label field-label-with-help">基础积木 Markdown 文件 <button class="field-help" type="button" aria-label="基础积木文件读取说明" data-tooltip="读取每个 #### 条目；id、tags 和以 > 开头的正文分别对应积木 ID、标签和提示词内容。修改后刷新提示词工坊即可重新抽取。">?</button></span>
+            <input id="promptLibraryPath" type="text" placeholder="~/Documents/VideoMake/ref/prompt/library.md" />
+          </label>
+          <div class="setting-actions">
+            <button id="choosePromptLibrary" class="secondary-button" type="button" data-pick-prompt-resource="library">选择文件</button>
+          </div>
+        </div>
+        <div class="setting-grid action-resources-setting">
+          <label class="field-group">
+            <span class="field-label field-label-with-help">动作库 Markdown 文件 <button class="field-help" type="button" aria-label="动作库文件读取说明" data-tooltip="读取该文件中从 ## pose 到下一个 ## 的内容；每个 #### 条目读取图片链接和 > 开头的提示词。图片仍从原目录读取，不会复制。">?</button></span>
+            <input id="actionResourcesPath" type="text" placeholder="/Users/apple/Documents/VideoMake/ref/pose/pose.md" />
+            <span class="field-hint">保存后会立即重新扫描动作图片、分类标签和姿势提示词。</span>
+          </label>
+          <div class="setting-actions">
+            <button id="chooseActionResources" class="secondary-button" type="button">选择文件</button>
+            <button id="saveActionResources" class="secondary-button" type="button">保存并扫描</button>
+          </div>
+        </div>
+        <div class="reference-path-grid">
+          <label class="reference-path-row">
+            <span class="field-label">人物库 Markdown 文件</span>
+            <span class="reference-path-control"><input id="characterResourcesPath" type="text" placeholder="ref/character/character.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="character">选择</button></span>
+          </label>
+          <label class="reference-path-row">
+            <span class="field-label">音频库 Markdown 文件</span>
+            <span class="reference-path-control"><input id="audioResourcesPath" type="text" placeholder="ref/audio/audio.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="audio">选择</button></span>
+          </label>
+          <label class="reference-path-row">
+            <span class="field-label">背景库 Markdown 文件</span>
+            <span class="reference-path-control"><input id="backgroundResourcesPath" type="text" placeholder="ref/background/background.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="background">选择</button></span>
+          </label>
+          <label class="reference-path-row">
+            <span class="field-label">服装库 Markdown 文件</span>
+            <span class="reference-path-control"><input id="clothesResourcesPath" type="text" placeholder="ref/clothes/clothes.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="clothes">选择</button></span>
+          </label>
+        </div>
+        <div class="setting-resource-actions">
+          <button id="savePromptResources" class="secondary-button" type="button">保存全部路径并扫描</button>
+        </div>
         <div class="setting-grid personal-capacity-setting">
           <label class="field-group">
             <span class="field-label">个人 Key 并发数</span>
@@ -158,7 +216,7 @@
         <div class="divider account-divider"></div>
         <div class="credential-heading account-heading">
           <div>
-            <span class="field-label">账号托管</span>
+            <span class="field-label">账号管理</span>
             <span class="field-hint">首次添加后会打开对应站点登录页。Electron 会保存独立本地会话，不保存密码或 token。</span>
           </div>
         </div>
@@ -178,8 +236,8 @@
         <div class="divider"></div>
         <div class="credential-heading">
           <div>
-            <span class="field-label">RunningHub 凭据</span>
-            <span class="field-hint">每个 Key 独立计数：个人并发数可在上方设置，wallet/共享或企业保持 100 并发</span>
+            <span class="field-label">当前账号 API Key</span>
+            <span class="field-hint">点击账号卡片即可切换；这里只显示当前账号的 Key。</span>
           </div>
           <button id="refreshKeys" class="text-button" type="button">刷新全部</button>
         </div>

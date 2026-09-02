@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -44,23 +46,155 @@ def _block(value: Any, fallback_id: str | None = None) -> dict[str, Any] | None:
     return {"id": block_id, "tags": _tags(value.get("tags")), "title": title, "text": text}
 
 
+def _stable_block_id(title: str, category: str = "") -> str:
+    source = f"{category}\n{title}".strip()
+    return f"block-{hashlib.sha1(source.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _markdown_metadata(line: str, key: str) -> str | None:
+    match = re.match(rf"^\s*(?:[-*]\s*)?{re.escape(key)}\s*:\s*(.*?)\s*$", line, re.IGNORECASE)
+    return match.group(1).strip() if match else None
+
+
+def _parse_markdown_library(path: Path) -> list[dict[str, Any]]:
+    """Parse the stable Markdown format used by the prompt block library."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    blocks: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    current: dict[str, Any] | None = None
+    current_category = ""
+
+    def finish() -> None:
+        nonlocal current
+        if not current:
+            return
+        title = str(current.get("title") or "").strip()
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(current.get("text_lines") or [])).strip()
+        if not title or not text:
+            current = None
+            return
+        block_id = str(current.get("id") or _stable_block_id(title, str(current.get("category") or ""))).strip()
+        if not block_id or block_id in seen_ids:
+            current = None
+            return
+        tags = _tags(current.get("tags"))
+        blocks.append({"id": block_id, "tags": tags, "title": title, "text": text})
+        seen_ids.add(block_id)
+        current = None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line.startswith("## "):
+            finish()
+            current_category = ""
+            continue
+        if line.startswith("### "):
+            finish()
+            current_category = re.sub(r"^###\s*", "", line).strip()
+            continue
+        if not line.startswith("#### ") and not current:
+            continue
+        if line.startswith("#### "):
+            finish()
+            current = {
+                "title": line[5:].strip(),
+                "id": "",
+                "tags": [],
+                "category": current_category,
+                "text_lines": [],
+            }
+            continue
+        if current is None:
+            continue
+        metadata_id = _markdown_metadata(line, "id")
+        if metadata_id is not None:
+            current["id"] = metadata_id
+            continue
+        metadata_tags = _markdown_metadata(line, "tags")
+        if metadata_tags is not None:
+            current["tags"] = _tags(metadata_tags)
+            continue
+        if line.startswith("<!--") and line.endswith("-->"):
+            continue
+        if raw_line.lstrip().startswith(">"):
+            prompt_line = raw_line.lstrip()[1:]
+            current["text_lines"].append(prompt_line[1:] if prompt_line.startswith(" ") else prompt_line)
+        elif not line:
+            if current["text_lines"] and current["text_lines"][-1] != "":
+                current["text_lines"].append("")
+        else:
+            # Plain lines are accepted too, so a user can write normal Markdown
+            # prose without adding a quote marker to every line.
+            current["text_lines"].append(raw_line.rstrip())
+    finish()
+    return blocks
+
+
+def _markdown_library_text(blocks: list[dict[str, Any]]) -> str:
+    lines = [
+        "# MiniMax H3 基础提示词积木",
+        "",
+        "> 每个 #### 条目是一块可拖入提示词工作台的积木。字段和正文建议使用英文；对白与画面可见文字按 H3 规则保留原文。",
+        "> 修改本文件后刷新提示词工坊即可重新抽取；id 用于保持组装台和组状态中的引用稳定。",
+        "",
+        "## blocks",
+        "",
+    ]
+    for block in blocks:
+        lines.extend([
+            f"#### {block['title']}",
+            f"id: {block['id']}",
+            f"tags: {', '.join(block.get('tags') or [])}",
+        ])
+        for text_line in str(block.get("text") or "").splitlines() or [""]:
+            lines.append(f"> {text_line}" if text_line else ">")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _item(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     instance_id = str(value.get("instance_id") or value.get("instanceId") or _new_id("item")).strip()
     kind = str(value.get("kind") or "").strip()
-    if not instance_id or kind not in {"fixed", "action", "text"}:
+    if not instance_id or kind not in {"fixed", "action", "reference", "text"}:
         return None
     if kind == "text":
         return {"instance_id": instance_id, "kind": "text", "text": str(value.get("text") or "")}
     if kind == "action":
         reference_id = value.get("action_id") or value.get("actionId") or value.get("block_id") or value.get("blockId") or value.get("sourceId")
+    elif kind == "reference":
+        reference_id = value.get("reference_id") or value.get("referenceId") or value.get("source_id") or value.get("sourceId")
     else:
         reference_id = value.get("block_id") or value.get("blockId") or value.get("sourceId")
     reference_id = str(reference_id or "").strip()
     snapshot_value = value.get("snapshot")
     if not isinstance(snapshot_value, dict):
         snapshot_value = value
+    if kind == "reference":
+        title = str(snapshot_value.get("title") or value.get("title") or "").strip()
+        text = str(snapshot_value.get("text") or value.get("text") or "").strip()
+        if not reference_id or not title:
+            return None
+        result = {
+            "instance_id": instance_id,
+            "kind": "reference",
+            "reference_id": reference_id,
+            "reference_kind": str(value.get("reference_kind") or value.get("referenceKind") or "").strip(),
+            "snapshot": {
+                "tags": _tags(snapshot_value.get("tags")),
+                "title": title,
+                "text": text,
+            },
+        }
+        for key in ("image_url", "audio_url", "media_type"):
+            if key in snapshot_value:
+                result["snapshot"][key] = str(snapshot_value.get(key) or "").strip()
+        return result
     snapshot = _block({
         "id": "snapshot",
         "title": snapshot_value.get("title"),
@@ -105,23 +239,66 @@ def _timestamp(value: Any) -> int:
 
 
 class PromptStore:
-    """Atomic JSON persistence for the prompt block library and assembly states."""
+    """Markdown-backed prompt block library with JSON state/group persistence."""
 
-    def __init__(self, data_root: str | Path) -> None:
-        self.root = Path(data_root)
+    def __init__(self, data_root: str | Path, library_path: str | Path | None = None) -> None:
+        self.root = Path(data_root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.library_path = self.root / "prompt-library.json"
-        self.state_path = self.root / "prompt-state.json"
-        self.groups_path = self.root / "prompt-groups.json"
+        self.prompt_root = self.root / "prompt"
+        self.prompt_root.mkdir(parents=True, exist_ok=True)
+        self.default_library_path = (self.prompt_root / "library.md").resolve()
+        self.library_path = (
+            Path(library_path).expanduser().resolve()
+            if library_path is not None and str(library_path).strip()
+            else self.default_library_path
+        )
+        self.state_path = self.prompt_root / "state.json"
+        self.groups_path = self.prompt_root / "groups.json"
         self._lock = threading.RLock()
         with self._lock:
+            self._migrate_legacy_files()
             self._ensure(self.library_path, {"version": VERSION, "blocks": []})
             self._ensure(self.state_path, {"version": VERSION, "items": []})
             self._ensure(self.groups_path, {"version": VERSION, "groups": []})
 
+    def _migrate_legacy_files(self) -> None:
+        """Move legacy flat state files and convert the old library JSON once."""
+        migrated_files = {
+            self.root / "prompt-state.json": self.state_path,
+            self.root / "prompt-groups.json": self.groups_path,
+        }
+        for legacy_path, target_path in migrated_files.items():
+            if target_path.exists() or not legacy_path.is_file():
+                continue
+            legacy_path.replace(target_path)
+        if self.library_path == self.default_library_path and not self.library_path.exists():
+            legacy_library_paths = (
+                self.root / "prompt-library.json",
+                self.prompt_root / "library.json",
+            )
+            for legacy_path in legacy_library_paths:
+                if not legacy_path.is_file():
+                    continue
+                document = self._read(legacy_path, {"version": VERSION, "blocks": []})
+                blocks = self._normalise_blocks(document.get("blocks"))
+                if blocks:
+                    self._write_library_markdown(blocks)
+                break
+
+    def set_library_path(self, value: str | Path) -> Path:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise RhCliError("INVALID_PROMPT_LIBRARY_PATH", f"基础积木 Markdown 文件不存在：{path}")
+        with self._lock:
+            self.library_path = path
+        return path
+
     def _ensure(self, path: Path, default: dict[str, Any]) -> None:
         if not path.exists():
-            self._write(path, default)
+            if path == self.library_path and self._is_markdown_library():
+                self._write_library_markdown([])
+            else:
+                self._write(path, default)
 
     def _read(self, path: Path, default: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -139,16 +316,41 @@ class PromptStore:
             if temporary.exists():
                 temporary.unlink()
 
-    def _library(self) -> dict[str, Any]:
-        raw = self._read(self.library_path, {"version": VERSION, "blocks": []})
+    @staticmethod
+    def _normalise_blocks(values: Any) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         ids: set[str] = set()
-        for value in raw.get("blocks", []):
+        for value in values if isinstance(values, list) else []:
             block = _block(value)
             if block and block["id"] not in ids:
                 blocks.append(block)
                 ids.add(block["id"])
-        return {"version": VERSION, "blocks": blocks}
+        return blocks
+
+    def _is_markdown_library(self) -> bool:
+        return self.library_path.suffix.lower() in {".md", ".markdown"}
+
+    def _write_library_markdown(self, blocks: list[dict[str, Any]]) -> None:
+        temporary = self.library_path.with_name(f".{self.library_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            self.library_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(_markdown_library_text(blocks), encoding="utf-8")
+            temporary.replace(self.library_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def _write_library(self, document: dict[str, Any]) -> None:
+        if self._is_markdown_library():
+            self._write_library_markdown(self._normalise_blocks(document.get("blocks")))
+        else:
+            self._write(self.library_path, document)
+
+    def _library(self) -> dict[str, Any]:
+        if self._is_markdown_library():
+            return {"version": VERSION, "blocks": self._normalise_blocks(_parse_markdown_library(self.library_path))}
+        raw = self._read(self.library_path, {"version": VERSION, "blocks": []})
+        return {"version": VERSION, "blocks": self._normalise_blocks(raw.get("blocks"))}
 
     def _state(self) -> dict[str, Any]:
         raw = self._read(self.state_path, {"version": VERSION, "items": []})
@@ -187,7 +389,7 @@ class PromptStore:
             if any(item["id"] == block["id"] for item in document["blocks"]):
                 raise RhCliError("BLOCK_EXISTS", "积木 ID 已存在。")
             document["blocks"].append(block)
-            self._write(self.library_path, document)
+            self._write_library(document)
         return block
 
     def update_block(self, block_id: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -207,7 +409,7 @@ class PromptStore:
             groups = self._groups()
             for group in groups["groups"]:
                 group["items"] = _refresh_item_snapshots(group["items"], block_id, block)
-            self._write(self.library_path, library)
+            self._write_library(library)
             self._write(self.state_path, state)
             self._write(self.groups_path, groups)
         return block
@@ -219,7 +421,7 @@ class PromptStore:
             if len(blocks) == len(document["blocks"]):
                 raise RhCliError("BLOCK_NOT_FOUND", "找不到这块积木。")
             document["blocks"] = blocks
-            self._write(self.library_path, document)
+            self._write_library(document)
 
     def save_state(self, values: Any) -> dict[str, Any]:
         document = {"version": VERSION, "items": _items(values)}
@@ -263,6 +465,6 @@ class PromptStore:
                 if block and block["id"] not in existing:
                     library["blocks"].append(block)
                     existing.add(block["id"])
-            self._write(self.library_path, library)
+            self._write_library(library)
             state = self.save_state(stage)
             return {"library": library, "state": state, "groups": self._groups()}

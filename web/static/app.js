@@ -1,8 +1,10 @@
 (function () {
   "use strict";
 
-  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", analysis: null, workflowDirty: false, bypassedNodes: {}, keys: [], accounts: [], tasks: [], settings: null, loading: false };
+  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", workflowAccountId: "", workflowInputConfig: null, analysis: null, workflowDirty: false, bypassedNodes: {}, keys: [], accounts: [], currentAccountId: "", tasks: [], settings: null, loading: false, activeFileInputId: "" };
   var previewUrls = {};
+  var previewFiles = {};
+  var draggedPreviewInputId = "";
   var credentialBusy = {};
   var accountBusy = {};
   var toastTimer = 0;
@@ -16,6 +18,11 @@
     queued: "排队中", submitting: "提交中", running: "执行中", completed: "已完成",
     failed: "失败", cancelled: "已取消", interrupted: "已中断", recovering: "恢复中", no_balance: "无余额",
     unchecked: "待检测", error: "检测失败"
+  };
+  var instanceTypeLabels = {
+    "default": "Standard · 24GB",
+    plus: "Plus · 48GB",
+    ultra: "Ultra · 84GB"
   };
   var accountStatusLabels = {
     login_required: "待登录", ready: "已登录", checking: "签到中",
@@ -37,6 +44,17 @@
     return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char];
     });
+  }
+  function canonicalWorkflowName(value) {
+    var name = String(value || "").split(/[\\/]/).pop().trim() || "workflow.json";
+    name = name.replace(/^(?:(?:wf_)?[0-9a-f]{12}_)+/i, "");
+    var extension = /\.json$/i.test(name) ? ".json" : "";
+    var stem = extension ? name.slice(0, -extension.length) : name;
+    stem = stem.replace(/(?:_modified_api)+$/i, "");
+    return (stem || "workflow") + extension;
+  }
+  function modifiedWorkflowName(value) {
+    return canonicalWorkflowName(value).replace(/\.json$/i, "") + "_modified_api.json";
   }
   function formatTime(timestamp) {
     if (!timestamp) return "—";
@@ -106,8 +124,10 @@
         remoteWorkflowId: appState.remoteWorkflowId || $("remoteWorkflowId").value.trim(),
         name: appState.workflowName || "workflow_api.json",
         sourceDir: appState.workflowSourceDir || "",
+        accountId: appState.workflowAccountId || "",
         data: appState.workflow,
         analysis: appState.analysis,
+        inputConfig: appState.workflowInputConfig,
         values: collectInputs(),
         savedAt: Date.now()
       };
@@ -125,6 +145,59 @@
   function scheduleDraftSave() {
     window.clearTimeout(draftSaveTimer);
     draftSaveTimer = window.setTimeout(saveDraftNow, 180);
+  }
+
+  function effectiveWorkflowAnalysis(baseAnalysis, config, workflow) {
+    var base = baseAnalysis && typeof baseAnalysis === "object" ? baseAnalysis : {};
+    var result = Object.assign({}, base, { input_mode: "auto", custom_inputs: [], custom_input_count: 0 });
+    if (!config || config.mode !== "manual" || !Array.isArray(config.items) || !workflow || typeof workflow !== "object") return result;
+    var nodes = workflow;
+    var files = [], prompts = [], resolutions = [], randomNoise = [], custom = [];
+    (config.items || []).forEach(function (raw) {
+      if (!raw || typeof raw !== "object") return;
+      var nodeId = String(raw.node_id || "");
+      var field = String(raw.field || "");
+      var node = nodes[nodeId];
+      if (!node || typeof node !== "object" || !node.inputs || typeof node.inputs !== "object") return;
+      var kind = String(raw.kind || "text").toLowerCase();
+      var item = Object.assign({}, raw, {
+        id: String(raw.id || (nodeId + ":" + field)),
+        node_id: nodeId,
+        field: field,
+        title: String(raw.label || raw.title || (node._meta && node._meta.title) || node.class_type || nodeId),
+        class_type: String(raw.class_type || node.class_type || "")
+      });
+      if (kind === "resolution") {
+        var resolution = (base.resolution_inputs || []).find(function (entry) { return String(entry.node_id || entry.id) === nodeId; });
+        item = Object.assign({}, resolution || {}, item, { id: item.id, node_id: nodeId, title: item.title, config_id: item.id });
+        resolutions.push(item);
+      } else if (kind === "random_noise") {
+        var noise = (base.random_noise_inputs || []).find(function (entry) { return String(entry.node_id || entry.id) === nodeId; });
+        item = Object.assign({}, noise || {}, item, { id: item.id, node_id: nodeId, title: item.title, config_id: item.id });
+        randomNoise.push(item);
+      } else if (kind === "file") {
+        item.default = node.inputs[field] == null ? "" : String(node.inputs[field]);
+        files.push(item);
+      } else if (kind === "prompt") {
+        item.default = node.inputs[field] == null ? "" : String(node.inputs[field]);
+        prompts.push(item);
+      } else {
+        item.default = node.inputs[field] == null ? "" : String(node.inputs[field]);
+        custom.push(item);
+      }
+    });
+    result.file_inputs = files;
+    result.prompt_inputs = prompts;
+    result.resolution_inputs = resolutions;
+    result.random_noise_inputs = randomNoise;
+    result.custom_inputs = custom;
+    result.file_count = files.length;
+    result.prompt_count = prompts.length;
+    result.resolution_count = resolutions.length;
+    result.random_noise_count = randomNoise.length;
+    result.custom_input_count = custom.length;
+    result.input_mode = "manual";
+    return result;
   }
 
   function applyPendingPrompt() {
@@ -151,7 +224,7 @@
     return true;
   }
 
-  function restoreDraft() {
+  function restoreDraft(silent) {
     var draft = readDraft();
     if (!draft) return;
 
@@ -167,9 +240,11 @@
     appState.workflowId = String(savedWorkflow.id || "");
     appState.remoteWorkflowId = String(savedWorkflow.remoteWorkflowId || "").trim();
     appState.workflow = savedWorkflow.data;
-    appState.workflowName = String(savedWorkflow.name || "workflow_api.json");
+    appState.workflowName = canonicalWorkflowName(savedWorkflow.name || "workflow_api.json");
     appState.workflowSourceDir = String(savedWorkflow.sourceDir || "");
-    appState.analysis = savedWorkflow.analysis;
+    appState.workflowAccountId = String(savedWorkflow.accountId || "").trim();
+    appState.workflowInputConfig = savedWorkflow.inputConfig && typeof savedWorkflow.inputConfig === "object" ? savedWorkflow.inputConfig : null;
+    appState.analysis = effectiveWorkflowAnalysis(savedWorkflow.analysis, appState.workflowInputConfig, appState.workflow);
     // The restored JSON is sent as the current workflow so edits made before
     // the refresh (including dynamically added nodes) are not lost.
     appState.workflowDirty = true;
@@ -179,7 +254,7 @@
     $("workflowFilename").textContent = "已恢复 " + appState.workflowName;
     $("workflowRemoteConfig").hidden = false;
     $("exportWorkflowButton").hidden = false;
-    showToast("已恢复上次工作流和输入配置");
+    if (!silent) showToast("已恢复上次工作流和输入配置");
   }
 
   function credentialBalanceMarkup(key) {
@@ -231,6 +306,15 @@
     if (current && appState.keys.some(function (key) { return key.id === current && key.status === "ready"; })) select.value = current;
   }
 
+  function syncCurrentAccountSite() {
+    var account = appState.accounts.find(function (item) { return item.id === appState.currentAccountId; });
+    var keySite = $("keySite");
+    if (keySite) {
+      keySite.value = account ? account.site : keySite.value;
+      keySite.disabled = Boolean(account);
+    }
+  }
+
   function managedAccountActionButton(account, action, label, className) {
     var busy = accountBusy[account.id] === action;
     var busyLabel = action === "account-checkin" ? "签到中…" : (action === "account-login" ? "打开中…" : "删除中…");
@@ -252,24 +336,33 @@
   function renderAccounts() {
     var list = $("accountList");
     if (!list) return;
-    if (!appState.accounts.length) {
-      list.innerHTML = '<div class="credential-empty">还没有托管账号。添加后会在 Electron 窗口中完成一次登录。</div>';
-      return;
-    }
-    list.innerHTML = appState.accounts.map(function (account) {
+    var generalAccount = {
+      id: "__general__",
+      name: "通用模式",
+      site: "",
+      status: "ready",
+      status_message: "不绑定任何账号，可使用所有已绑定的 API Key",
+      general: true
+    };
+    list.innerHTML = [generalAccount].concat(appState.accounts).map(function (account) {
       var status = String(account.status || "login_required");
-      var siteLabel = account.site === "cn" ? "runninghub.cn" : "runninghub.ai";
-      return '<div class="credential-card account-card">' +
-        '<div class="credential-top"><div class="credential-name">' + esc(account.name) + '</div>' +
-        '<div class="credential-tags"><span class="status-chip account-status-' + esc(status) + '">' + esc(accountStatusLabel(status)) + '</span>' +
-        '<span class="capacity-chip">本地会话</span></div></div>' +
-        '<div class="credential-key">' + esc(siteLabel) + ' · 登录凭证保存在 Electron 本地会话</div>' +
-        accountRewardMarkup(account) +
-        '<div class="credential-bottom"><span>上次登录 ' + esc(account.last_login_at ? relativeTime(account.last_login_at) : "未记录") + '</span>' +
-        '<span class="credential-actions">' + managedAccountActionButton(account, "account-login", "打开登录窗口", "credential-action-check") +
+      var siteLabel = account.general ? "全部已绑定 Key" : (account.site === "cn" ? "runninghub.cn" : "runninghub.ai");
+      var current = account.id === appState.currentAccountId;
+      var accountDescription = account.general ? "不绑定账号，可调度所有已绑定的 API Key" : "登录凭证保存在 Electron 本地会话";
+      var actions = account.general ? "" :
+        managedAccountActionButton(account, "account-login", "打开登录窗口", "credential-action-check") +
         managedAccountActionButton(account, "account-checkin", "签到", "credential-action-refresh") +
-        managedAccountActionButton(account, "delete-account", "删除", "credential-action-delete") + '</span></div></div>';
-    }).join("");
+        managedAccountActionButton(account, "delete-account", "删除", "credential-action-delete");
+      return '<div class="credential-card account-card' + (current ? ' is-current' : '') + (account.general ? ' general-account-card' : '') + '" data-action="select-account" data-account-id="' + esc(account.id) + '" role="button" tabindex="0" aria-pressed="' + (current ? 'true' : 'false') + '">' +
+        '<div class="credential-top"><div class="credential-name">' + esc(account.name) + '</div>' +
+        '<div class="credential-tags"><span class="status-chip account-status-' + esc(status) + '">' + esc(account.general ? "可用" : accountStatusLabel(status)) + '</span>' +
+        (current ? '<span class="capacity-chip account-current-tag">当前使用</span>' : '') +
+        '<span class="capacity-chip">' + esc(siteLabel) + '</span></div></div>' +
+        '<div class="credential-key">' + esc(accountDescription) + '</div>' +
+        (account.general ? '<div class="account-reward"><span>' + esc(account.status_message) + '</span></div>' : accountRewardMarkup(account)) +
+        '<div class="credential-bottom"><span>' + (account.general ? "当前模式不绑定账号" : "上次登录 " + (account.last_login_at ? relativeTime(account.last_login_at) : "未记录")) + '</span>' +
+        '<span class="credential-actions">' + actions + '</span></div></div>';
+    }).join("") + (!appState.accounts.length ? '<div class="credential-empty">还没有账号。添加后会在 Electron 窗口中完成一次登录。</div>' : "");
   }
 
   function formatTaskCost(task) {
@@ -284,10 +377,27 @@
     return "";
   }
 
+  function formatTaskDuration(task) {
+    var elapsed = Number(task && task.elapsed_ms);
+    if (!isFinite(elapsed) || elapsed < 0) return "耗时 —";
+    var totalSeconds = Math.max(0, Math.floor(elapsed / 1000));
+    if (totalSeconds < 60) return "耗时 " + totalSeconds + " 秒";
+    var minutes = Math.floor(totalSeconds / 60);
+    var seconds = totalSeconds % 60;
+    if (minutes < 60) return "耗时 " + minutes + " 分 " + seconds + " 秒";
+    var hours = Math.floor(minutes / 60);
+    minutes %= 60;
+    return "耗时 " + hours + " 小时 " + minutes + " 分";
+  }
+
   function taskCredentialLabel(task) {
     var name = String(task && task.key_name || "").trim() || "自动调度";
     var site = task && task.key_site === "cn" ? "runninghub.cn" : (task && task.key_site === "ai" ? "runninghub.ai" : "");
     return site ? name + " · " + site : name;
+  }
+
+  function taskInstanceLabel(task) {
+    return instanceTypeLabels[String(task && task.instance_type || "default").toLowerCase()] || instanceTypeLabels.default;
   }
 
   function renderTasks() {
@@ -302,6 +412,7 @@
       var outputCount = (task.outputs || []).filter(function (item) { return item.kind === "file"; }).length;
       var outputLabel = outputCount ? outputCount + " 个产物" : (task.status === "completed" ? "无文件产物" : "");
       var costLabel = formatTaskCost(task);
+      var durationLabel = formatTaskDuration(task);
       var canCancel = ["queued", "submitting", "running", "recovering"].indexOf(task.status) !== -1;
       var canDelete = ["completed", "failed", "cancelled", "interrupted"].indexOf(task.status) !== -1;
       var queueLabel = task.status === "queued" && task.queue_position ? '<span>本地队列第 ' + esc(task.queue_position) + ' 位</span><span>·</span>' : "";
@@ -309,9 +420,9 @@
       return '<article class="task-card ' + statusClass + '" data-task-id="' + esc(task.id) + '">' +
         '<div class="task-top"><button class="task-name task-name-button" type="button" data-action="open-task" title="打开任务详情" aria-label="打开任务 ' + esc(task.workflow_name) + '">' + esc(task.workflow_name) + '</button>' +
         '<span class="task-status ' + statusClass + '">' + statusLabel(task.status) + '</span></div>' +
-        '<div class="task-meta"><span>' + esc(taskCredentialLabel(task)) + '</span><span>·</span>' + queueLabel + '<span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
+        '<div class="task-meta"><span>' + esc(taskCredentialLabel(task)) + '</span><span>·</span><span>机型 ' + esc(taskInstanceLabel(task)) + '</span><span>·</span>' + queueLabel + '<span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
         '<div class="task-progress">' + esc(task.progress || "等待调度…") + (task.error ? '<br /><span style="color:var(--danger)">' + esc(task.error) + '</span>' : "") + '</div>' +
-        '<div class="task-footer"><span class="task-footer-info"><span class="task-output-count">' + esc(outputLabel) + '</span>' + (costLabel ? '<span class="task-cost">' + esc(costLabel) + '</span>' : '') + '</span>' +
+        '<div class="task-footer"><span class="task-footer-info"><span class="task-output-count">' + esc(outputLabel) + '</span>' + (costLabel ? '<span class="task-cost">' + esc(costLabel) + '</span>' : '') + '<span class="task-duration">' + esc(durationLabel) + '</span></span>' +
         '<span class="task-actions"><button class="task-load-button" type="button" data-action="load-task">加载</button>' +
         (canCancel ? '<button type="button" data-action="cancel-task">取消</button>' : "") +
         (canDelete ? '<button type="button" data-action="delete-task">删除</button>' : "") + '</span></div></article>';
@@ -331,10 +442,19 @@
   function renderState(data) {
     appState.keys = data.keys || [];
     appState.accounts = data.accounts || [];
+    appState.currentAccountId = String((data.settings && data.settings.current_account_id) || "").trim();
     appState.tasks = data.tasks || [];
     appState.settings = data.settings || {};
     if (document.activeElement !== $("outputDir")) $("outputDir").value = appState.settings.output_dir || "";
+    if (document.activeElement !== $("promptLibraryPath")) $("promptLibraryPath").value = appState.settings.prompt_library_path || "";
+    if (document.activeElement !== $("actionResourcesPath")) $("actionResourcesPath").value = appState.settings.action_resources_path || "";
+    var referencePaths = appState.settings.reference_resources_paths || {};
+    ["character", "audio", "background", "clothes"].forEach(function (kind) {
+      var input = $(kind + "ResourcesPath");
+      if (input && document.activeElement !== input) input.value = referencePaths[kind] || "";
+    });
     if (document.activeElement !== $("personalCapacity")) $("personalCapacity").value = appState.settings.personal_capacity || 3;
+    syncCurrentAccountSite();
     renderKeys();
     renderAccounts();
     renderTasks();
@@ -355,6 +475,19 @@
     if (window.history && window.history.replaceState) {
       window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
     }
+  }
+
+  function focusInputFromQuery() {
+    var params = new URLSearchParams(window.location.search);
+    var inputId = String(params.get("focusInput") || "").trim();
+    if (!inputId) return;
+    var card = document.querySelector('.input-card[data-input-id="' + CSS.escape(inputId) + '"]');
+    if (!card) return;
+    jumpToInput(inputId);
+    var path = card.querySelector(".file-path");
+    if (path) path.focus();
+    showToast("已定位到「" + (card.querySelector(".input-title") ? card.querySelector(".input-title").textContent : inputId) + "」");
+    if (window.history && window.history.replaceState) window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
   }
 
   function setAnalysisStatus(message, isError) {
@@ -610,6 +743,10 @@
       var prompt = document.querySelector('.prompt-value[data-input-id="' + CSS.escape(inputId) + '"]');
       if (prompt) prompt.value = String(values.prompts[inputId] == null ? "" : values.prompts[inputId]);
     });
+    Object.keys(values.customInputs || values.custom_inputs || {}).forEach(function (inputId) {
+      var custom = document.querySelector('.custom-value[data-input-id="' + CSS.escape(inputId) + '"]');
+      if (custom) custom.value = String((values.customInputs || values.custom_inputs)[inputId] == null ? "" : (values.customInputs || values.custom_inputs)[inputId]);
+    });
     Object.keys(values.randomNoise || {}).forEach(function (nodeId) {
       var config = values.randomNoise[nodeId] || {};
       var seed = document.querySelector('.random-noise-seed[data-node-id="' + CSS.escape(nodeId) + '"]');
@@ -677,20 +814,22 @@
     var prompts = analysis.prompt_inputs || [];
     var randomNoise = analysis.random_noise_inputs || [];
     var resolutions = analysis.resolution_inputs || [];
+    var customInputs = analysis.custom_inputs || [];
     summary.hidden = false;
     summary.innerHTML = '<div class="summary-item"><strong>' + files.length + '</strong> 个文件输入</div>' +
       '<div class="summary-item"><strong>' + prompts.length + '</strong> 个提示词节点</div>' +
       '<div class="summary-item"><strong>' + resolutions.length + '</strong> 个尺寸节点</div>' +
       '<div class="summary-item"><strong>' + randomNoise.length + '</strong> 个 RandomNoise</div>' +
+      '<div class="summary-item"><strong>' + customInputs.length + '</strong> 个自定义输入</div>' +
       '<div class="summary-item bypass-summary"><strong>' + bypassedNodeList().length + '</strong> 个旁路节点</div>' +
       '<div class="summary-item">已完成节点扫描</div>';
     var html = "";
-    var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(resolutions.map(function (item) { return { item: item, kind: "resolution" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; }));
+    var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(resolutions.map(function (item) { return { item: item, kind: "resolution" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; })).concat(customInputs.map(function (item) { return { item: item, kind: "custom" }; }));
     if (inputNodes.length) {
       html += '<div class="input-jump-bar"><div class="input-jump-heading"><span>输入节点</span><small>点击标签快速定位</small></div><div class="input-jump-list">';
       inputNodes.forEach(function (entry) {
         var item = entry.item;
-        var icon = entry.kind === "file" ? "▧" : (entry.kind === "prompt" ? "Aa" : (entry.kind === "resolution" ? "WH" : "RN"));
+        var icon = entry.kind === "file" ? "▧" : (entry.kind === "prompt" ? "Aa" : (entry.kind === "resolution" ? "WH" : (entry.kind === "random-noise" ? "RN" : "CFG")));
         html += '<button class="input-jump-tag ' + entry.kind + '" type="button" data-action="jump-input" data-input-id="' + esc(item.id) + '" title="定位到 ' + esc(item.id) + '"><span class="input-jump-icon" aria-hidden="true">' + icon + '</span><span class="input-jump-title">' + esc(item.title || item.class_type) + '</span><code>' + esc(item.id) + '</code></button>';
       });
       html += '</div></div>';
@@ -703,11 +842,11 @@
         html += '<div class="input-card file-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.title) + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           '<div class="file-input-layout"><div class="file-input-controls">' +
           '<div class="file-dropzone" data-action="pick-file" data-input-id="' + esc(item.id) + '" tabindex="0" role="group" aria-label="文件拖放区域">' +
-          '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">拖入或点击“预览”查看图片</small></span>' +
-          '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" hidden /><button class="file-button" data-action="pick-file" data-input-id="' + esc(item.id) + '" type="button">预览</button></div>' +
+          '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">拖入、⌘V 粘贴或点击“预览”查看图片</small></span>' +
+          '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" hidden /><button class="file-button paste-file-button" data-action="paste-file" data-input-id="' + esc(item.id) + '" type="button">粘贴图片</button><button class="file-button" data-action="pick-file" data-input-id="' + esc(item.id) + '" type="button">预览</button></div>' +
           '<div class="input-control-row"><input class="file-path" data-input-id="' + esc(item.id) + '" data-original-value="' + esc(originalFileValue) + '" type="text" placeholder="输入本机绝对路径（不会复制文件）" value="' + esc(visibleFileValue) + '" /><button class="file-button native-file-button" data-action="pick-native-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button></div>' +
           '<div class="file-meta" data-meta-id="' + esc(item.id) + '">点击“选择文件”后，这里会显示本机绝对路径；输入文件不会复制到项目目录。</div></div>' +
-          '<figure class="file-preview" data-preview-id="' + esc(item.id) + '" hidden><figcaption>图片预览</figcaption><div class="file-preview-frame"><img alt="" /></div><div class="file-preview-name"></div></figure></div></div>';
+          '<figure class="file-preview" data-preview-id="' + esc(item.id) + '" draggable="true" title="拖动此预览到其他文件输入以替换" aria-label="图片预览，可拖动到其他文件输入替换" hidden><figcaption>图片预览</figcaption><div class="file-preview-frame"><img alt="" draggable="false" /></div><div class="file-preview-name"></div></figure></div></div>';
       });
     }
     if (prompts.length) {
@@ -743,7 +882,27 @@
           '<div class="file-meta">导出或提交时写入 ' + esc(item.seed_field || "noise_seed") + ' 和 mode</div></div>';
       });
     }
-    if (!files.length && !prompts.length && !resolutions.length && !randomNoise.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>当前工作流没有需要在这里配置的输入节点。</span></div>';
+    if (customInputs.length) {
+      html += '<div class="section-kicker custom-input-section-label">手动配置输入 · 按工作流库设置</div>';
+      customInputs.forEach(function (item) {
+        var value = item.default == null ? "" : String(item.default);
+        var kind = String(item.kind || "text").toLowerCase();
+        var control = "";
+        if (kind === "select") {
+          var options = Array.isArray(item.options) ? item.options : [];
+          control = '<select class="custom-value" data-input-id="' + esc(item.id) + '">' + options.map(function (option) {
+            return '<option value="' + esc(option) + '"' + (String(option) === value ? " selected" : "") + '>' + esc(option) + '</option>';
+          }).join("") + '</select>';
+        } else if (kind === "boolean") {
+          control = '<select class="custom-value custom-boolean" data-input-id="' + esc(item.id) + '"><option value="true"' + (value === "true" ? " selected" : "") + '>true</option><option value="false"' + (value !== "true" ? " selected" : "") + '>false</option></select>';
+        } else {
+          control = '<input class="custom-value" data-input-id="' + esc(item.id) + '" type="' + (kind === "number" ? "number" : "text") + '"' + (kind === "number" ? ' step="any" inputmode="decimal"' : '') + ' value="' + esc(value) + '" placeholder="' + esc(item.required ? "请输入必填值" : "可选") + '" />';
+        }
+        html += '<div class="input-card custom-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.label || item.title || item.field) + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.kind || "text") + (item.required ? " · 必填" : " · 可选") + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+          '<div class="custom-input-control">' + control + '</div><div class="file-meta">节点字段：' + esc(item.node_id + ":" + item.field) + '</div></div>';
+      });
+    }
+    if (!files.length && !prompts.length && !resolutions.length && !randomNoise.length && !customInputs.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>当前工作流没有需要在这里配置的输入节点。</span></div>';
     inputs.innerHTML = html;
     inputs.hidden = false;
     $("submitStrip").hidden = false;
@@ -769,7 +928,7 @@
       } catch (error) {}
     }
     file.text().then(function (content) {
-      return jsonRequest("/api/workflows/analyze", "POST", { filename: file.name, content: content }).then(function (data) {
+      return jsonRequest("/api/workflows/analyze", "POST", { filename: file.name, content: content, source_dir: appState.workflowSourceDir, account_id: appState.currentAccountId || "" }).then(function (data) {
         return { data: data, workflow: JSON.parse(content) };
       });
     }).then(function (result) {
@@ -777,7 +936,9 @@
       appState.workflowId = data.workflow_id;
       setRemoteWorkflowId(data.remote_workflow_id || (data.analysis && data.analysis.remote_workflow_id) || "");
       appState.workflow = result.workflow;
-      appState.workflowName = file.name;
+      appState.workflowName = canonicalWorkflowName(file.name);
+      appState.workflowAccountId = String(data.account_id || appState.currentAccountId || "").trim();
+      appState.workflowInputConfig = null;
       appState.workflowDirty = false;
       appState.analysis = data.analysis;
       setBypassedNodeMap(data.analysis && data.analysis.bypassed_nodes);
@@ -794,6 +955,8 @@
       appState.workflow = null;
       appState.workflowName = "";
       appState.workflowSourceDir = "";
+      appState.workflowAccountId = "";
+      appState.workflowInputConfig = null;
       appState.workflowDirty = false;
       $("workflowInputs").hidden = true;
       $("submitStrip").hidden = true;
@@ -809,10 +972,16 @@
       appState.workflowId = data.workflow_id || "";
       appState.remoteWorkflowId = String(savedTask.remote_workflow_id || (data.analysis && data.analysis.remote_workflow_id) || "").trim();
       appState.workflow = data.workflow || null;
-      appState.workflowName = savedTask.workflow_name || data.filename || "workflow_api.json";
+      appState.workflowName = canonicalWorkflowName(savedTask.workflow_name || data.filename || "workflow_api.json");
       appState.workflowSourceDir = "";
+      appState.workflowInputConfig = data.input_config && typeof data.input_config === "object" ? data.input_config : (savedTask.input_config || null);
+      var taskAccountId = String(savedTask.account_id || "").trim();
+      var savedWorkflowMetadata = data.workflow && data.workflow.__rh_meta__ && typeof data.workflow.__rh_meta__ === "object" ? data.workflow.__rh_meta__ : {};
+      appState.workflowAccountId = taskAccountId === "__general__"
+        ? String(savedWorkflowMetadata.accountId || savedWorkflowMetadata.account_id || "").trim()
+        : taskAccountId;
       appState.workflowDirty = false;
-      appState.analysis = data.analysis || {};
+      appState.analysis = effectiveWorkflowAnalysis(data.analysis || {}, appState.workflowInputConfig, appState.workflow);
       renderAnalysis(appState.analysis);
       setRemoteWorkflowId(appState.remoteWorkflowId);
       restoreInputValues({
@@ -820,6 +989,7 @@
         prompts: savedTask.prompts || {},
         randomNoise: savedTask.random_noise || {},
         resolution: savedTask.resolution || {},
+        customInputs: savedTask.custom_inputs || {},
         bypassedNodes: savedTask.bypassed_nodes || savedTask.bypassed_inputs || []
       });
       applyPendingPrompt();
@@ -839,8 +1009,168 @@
     });
   }
 
+  function loadWorkflowRecord(localId) {
+    return request("/api/workflows/" + encodeURIComponent(localId)).then(function (data) {
+      var record = data.record || {};
+      appState.workflowId = String(record.id || localId || "");
+      appState.remoteWorkflowId = String(record.remote_workflow_id || "").trim();
+      appState.workflow = data.workflow || null;
+      appState.workflowName = canonicalWorkflowName(record.name || "workflow_api.json");
+      appState.workflowSourceDir = String(record.source_dir || "");
+      appState.workflowAccountId = String(record.account_id || "").trim();
+      appState.workflowInputConfig = record.input_config && typeof record.input_config === "object" ? record.input_config : null;
+      appState.workflowDirty = false;
+      appState.analysis = effectiveWorkflowAnalysis(data.analysis || {}, appState.workflowInputConfig, appState.workflow);
+      setBypassedNodeMap(appState.analysis.bypassed_nodes);
+      renderAnalysis(appState.analysis);
+      setRemoteWorkflowId(appState.remoteWorkflowId);
+      $("workflowFilename").textContent = "已加载 " + appState.workflowName;
+      $("workflowRemoteConfig").hidden = false;
+      $("exportWorkflowButton").hidden = false;
+      setAnalysisStatus("已打开工作流资料，可以配置输入后提交。", false);
+      saveDraftNow();
+      if (window.history && window.history.replaceState) window.history.replaceState({}, document.title, "/");
+      showToast("已打开工作流：" + appState.workflowName);
+    });
+  }
+
   function recordInputFile(inputId, file) {
     return recordInputFileWithEvent(inputId, file, null);
+  }
+
+  function rememberFileInput(inputId) {
+    var value = String(inputId || "").trim();
+    if (value) appState.activeFileInputId = value;
+  }
+
+  function fileToBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var result = String(reader.result || "");
+        var separator = result.indexOf(",");
+        if (separator < 0) {
+          reject(new Error("无法读取剪贴板图片"));
+          return;
+        }
+        resolve(result.slice(separator + 1));
+      };
+      reader.onerror = function () { reject(new Error("无法读取剪贴板图片")); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function clipboardImageName(file) {
+    var name = String(file && file.name || "").trim();
+    if (name) return name;
+    var extension = {
+      "image/avif": ".avif",
+      "image/bmp": ".bmp",
+      "image/gif": ".gif",
+      "image/jpeg": ".jpg",
+      "image/png": ".png",
+      "image/webp": ".webp"
+    }[String(file && file.type || "").toLowerCase()] || ".png";
+    return "clipboard-image" + extension;
+  }
+
+  function setPastedImageState(inputId, selected, originalName) {
+    var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
+    var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+    var card = zone && zone.closest(".file-input-card");
+    var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
+    var name = String(originalName || selected.name || "clipboard-image");
+    if (path) path.value = selected.path || "";
+    setPathPreview(inputId, { preview_url: selected.preview_url, name: name });
+    if (card) card.classList.remove("is-loading", "is-dragging");
+    if (zone) {
+      zone.classList.remove("is-loading", "is-dragging");
+      zone.classList.add("is-ready");
+      zone.querySelector(".file-drop-title").textContent = "已粘贴 " + name;
+      zone.querySelector(".file-drop-hint").textContent = "图片已保存，可重新粘贴替换";
+    }
+    if (card) card.classList.add("is-ready");
+    if (meta) meta.textContent = name + " · 已保存到本地输入缓存";
+    appState.workflowDirty = true;
+    scheduleDraftSave();
+  }
+
+  function pasteClipboardImage(inputId, file) {
+    inputId = String(inputId || "").trim();
+    if (!inputId || !file || String(file.type || "").indexOf("image/") !== 0) {
+      return Promise.reject(new Error("剪贴板中没有图片"));
+    }
+    if (isNodeBypassed(String(inputId).split(":", 1)[0])) return Promise.reject(new Error("该输入节点已旁路"));
+    rememberFileInput(inputId);
+    var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+    var card = zone && zone.closest(".file-input-card");
+    if (card) card.classList.add("is-loading");
+    if (zone) zone.classList.add("is-loading");
+    var name = clipboardImageName(file);
+    return fileToBase64(file).then(function (data) {
+      return jsonRequest("/api/paste-file", "POST", {
+        name: name,
+        mime: file.type || "image/png",
+        data: data
+      });
+    }).then(function (selected) {
+      setPastedImageState(inputId, selected, name);
+      showToast("已粘贴图片并保存到本地输入缓存");
+      return selected;
+    }).catch(function (error) {
+      if (card) card.classList.remove("is-loading");
+      if (zone) zone.classList.remove("is-loading");
+      throw error;
+    });
+  }
+
+  function readClipboardImage() {
+    if (!navigator.clipboard || typeof navigator.clipboard.read !== "function") {
+      return Promise.reject(new Error("当前环境不支持直接读取剪贴板，请先点击输入节点后按 ⌘V / Ctrl+V"));
+    }
+    return navigator.clipboard.read().then(function (items) {
+      for (var i = 0; i < items.length; i += 1) {
+        var types = items[i].types || [];
+        for (var j = 0; j < types.length; j += 1) {
+          if (String(types[j]).indexOf("image/") === 0) return items[i].getType(types[j]);
+        }
+      }
+      throw new Error("剪贴板中没有图片，请先复制图片");
+    });
+  }
+
+  function clipboardImageFromEvent(event) {
+    var items = event && event.clipboardData && event.clipboardData.items;
+    if (!items) return null;
+    for (var i = 0; i < items.length; i += 1) {
+      var item = items[i];
+      if (item && item.kind === "file" && String(item.type || "").indexOf("image/") === 0) {
+        var file = item.getAsFile();
+        if (file) return file;
+      }
+    }
+    return null;
+  }
+
+  function pasteClipboardImageFromEvent(event) {
+    var trigger = event.target.closest(".file-dropzone, .paste-file-button, .file-preview, .file-picker");
+    var file = clipboardImageFromEvent(event);
+    if (!trigger || !file) return;
+    var inputId = trigger.dataset.inputId || trigger.dataset.previewId;
+    if (!inputId) return;
+    event.preventDefault();
+    pasteClipboardImage(inputId, file).catch(function (error) { showToast(error.message, true); });
+  }
+
+  function armClipboardPaste(inputId) {
+    rememberFileInput(inputId);
+    var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+    if (zone) zone.focus();
+    readClipboardImage().then(function (file) {
+      return pasteClipboardImage(inputId, file);
+    }).catch(function (error) {
+      showToast(error.message, true);
+    });
   }
 
   function droppedFilePath(event, file) {
@@ -868,11 +1198,13 @@
 
   function recordInputFileWithEvent(inputId, file, event) {
     if (isNodeBypassed(String(inputId).split(":", 1)[0])) return;
+    rememberFileInput(inputId);
     var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
     var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
     var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
     var card = zone && zone.closest(".file-input-card");
     var selectedPath = droppedFilePath(event, file);
+    previewFiles[inputId] = file;
     updateImagePreview(inputId, file);
     if (path) path.value = selectedPath;
     if (card) card.classList.remove("is-loading", "is-dragging");
@@ -896,6 +1228,7 @@
     preview.querySelector("img").removeAttribute("alt");
     preview.querySelector(".file-preview-name").textContent = "";
     preview.hidden = true;
+    delete previewFiles[inputId];
   }
 
   function pickNativeInput(inputId, button) {
@@ -956,6 +1289,81 @@
     });
   }
 
+  function pickActionResources(button) {
+    var original = button.textContent;
+    button.disabled = true;
+    button.textContent = "选择中…";
+    request("/api/pick-action-resources", { method: "POST" }).then(function (selected) {
+      $("actionResourcesPath").value = selected.path || "";
+      showToast("已选择动作库文件，请点击“保存并扫描”确认");
+    }).catch(function (error) {
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = original;
+    });
+  }
+
+  function pickPromptResource(button) {
+    var kind = button.dataset.pickPromptResource || "";
+    var labels = {
+      library: "基础积木 Markdown 文件",
+      character: "人物库 Markdown 文件",
+      audio: "音频库 Markdown 文件",
+      background: "背景库 Markdown 文件",
+      clothes: "服装库 Markdown 文件",
+    };
+    var original = button.textContent;
+    button.disabled = true;
+    button.textContent = "选择中…";
+    jsonRequest("/api/pick-prompt-resource", "POST", { kind: kind }).then(function (selected) {
+      var input = $(kind === "library" ? "promptLibraryPath" : kind + "ResourcesPath");
+      if (input) input.value = selected.path || "";
+      showToast("已选择" + (labels[kind] || "资源文件") + "，请保存确认");
+    }).catch(function (error) {
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = original;
+    });
+  }
+
+  function promptResourceSettingsPayload() {
+    return {
+      prompt_library_path: $("promptLibraryPath").value.trim(),
+      action_resources_path: $("actionResourcesPath").value.trim(),
+      reference_resources_paths: {
+        character: $("characterResourcesPath").value.trim(),
+        audio: $("audioResourcesPath").value.trim(),
+        background: $("backgroundResourcesPath").value.trim(),
+        clothes: $("clothesResourcesPath").value.trim(),
+      },
+    };
+  }
+
+  function applyPromptResourceSettings(data) {
+    if (data.prompt_library_path) $("promptLibraryPath").value = data.prompt_library_path;
+    if (data.action_resources_path) $("actionResourcesPath").value = data.action_resources_path;
+    var paths = data.reference_resources_paths || {};
+    ["character", "audio", "background", "clothes"].forEach(function (kind) {
+      var input = $(kind + "ResourcesPath");
+      if (input && paths[kind]) input.value = paths[kind];
+    });
+  }
+
+  function savePromptResources() {
+    var button = $("savePromptResources");
+    button.disabled = true;
+    jsonRequest("/api/settings", "PATCH", promptResourceSettingsPayload()).then(function (data) {
+      applyPromptResourceSettings(data);
+      showToast("六类积木路径已保存，资源库已重新扫描");
+    }).catch(function (error) {
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+    });
+  }
+
   function setPathPreview(inputId, selected) {
     var preview = document.querySelector('.file-preview[data-preview-id="' + CSS.escape(inputId) + '"]');
     if (!preview) return;
@@ -966,6 +1374,57 @@
     preview.querySelector("img").alt = selected.name || "输入图片预览";
     preview.querySelector(".file-preview-name").textContent = selected.name || "";
     preview.hidden = false;
+  }
+
+  function previewDragSource(event) {
+    var transfer = event && event.dataTransfer;
+    var sourceId = "";
+    if (transfer && typeof transfer.getData === "function") {
+      sourceId = String(transfer.getData("application/x-rh-preview-source") || "").trim();
+    }
+    return sourceId || draggedPreviewInputId;
+  }
+
+  function getPreviewSource(inputId) {
+    var preview = document.querySelector('.file-preview[data-preview-id="' + CSS.escape(inputId) + '"]');
+    var image = preview && preview.querySelector("img");
+    var url = String(previewUrls[inputId] || (image && image.src) || "").trim();
+    if (!preview || preview.hidden || !url) return null;
+    var pathInput = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
+    var file = previewFiles[inputId] || null;
+    var path = String(pathInput && pathInput.value || "").trim();
+    if (!path && file) path = droppedFilePath(null, file);
+    return { url: url, name: String(preview.querySelector(".file-preview-name").textContent || (file && file.name) || "").trim(), path: path, file: file };
+  }
+
+  function copyPreviewToInput(sourceId, targetId) {
+    sourceId = String(sourceId || "").trim();
+    targetId = String(targetId || "").trim();
+    if (!sourceId || !targetId || sourceId === targetId) return false;
+    if (isNodeBypassed(String(targetId).split(":", 1)[0])) return false;
+    var source = getPreviewSource(sourceId);
+    if (!source) return false;
+    var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(targetId) + '"]');
+    var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(targetId) + '"]');
+    var card = zone && zone.closest(".file-input-card");
+    var meta = document.querySelector('[data-meta-id="' + CSS.escape(targetId) + '"]');
+    if (path) path.value = source.path;
+    if (source.file) {
+      previewFiles[targetId] = source.file;
+      updateImagePreview(targetId, source.file);
+    } else {
+      setPathPreview(targetId, { preview_url: source.url, name: source.name });
+    }
+    if (card) card.classList.add("is-ready");
+    if (zone) {
+      zone.classList.add("is-ready");
+      zone.querySelector(".file-drop-title").textContent = "已选择 " + (source.name || "图片");
+      zone.querySelector(".file-drop-hint").textContent = source.path ? "路径已记录，可重新拖入替换" : "预览已复制，请补充本机绝对路径";
+    }
+    if (meta) meta.textContent = source.path ? (source.name || "图片") + " · 路径已记录，不会复制文件" : (source.name || "图片") + " · 已复制预览；请补充本机绝对路径";
+    appState.workflowDirty = true;
+    scheduleDraftSave();
+    return true;
   }
 
   function previewLocalPath(inputId, value) {
@@ -1026,6 +1485,8 @@
     document.querySelectorAll(".file-path").forEach(function (input) { files[input.dataset.inputId] = input.value.trim(); });
     var prompts = {};
     document.querySelectorAll(".prompt-value").forEach(function (input) { prompts[input.dataset.inputId] = input.value; });
+    var customInputs = {};
+    document.querySelectorAll(".custom-value").forEach(function (input) { customInputs[input.dataset.inputId] = input.value; });
     var randomNoise = {};
     document.querySelectorAll(".random-noise-card").forEach(function (card) {
       var nodeId = card.dataset.nodeId || card.dataset.inputId;
@@ -1040,7 +1501,18 @@
       var megapixels = card.querySelector(".resolution-megapixels");
       resolution[nodeId] = { aspect_ratio: aspect ? aspect.value.trim() : "", megapixels: megapixels ? megapixels.value.trim() : "" };
     });
-    return { files: files, prompts: prompts, randomNoise: randomNoise, resolution: resolution, bypassedNodes: bypassedNodeList() };
+    return { files: files, prompts: prompts, customInputs: customInputs, randomNoise: randomNoise, resolution: resolution, bypassedNodes: bypassedNodeList() };
+  }
+
+  function applyCustomInputValues(workflow, values) {
+    Object.keys(values || {}).forEach(function (inputId) {
+      var separator = inputId.indexOf(":");
+      if (separator <= 0) return;
+      var node = workflow[inputId.slice(0, separator)];
+      if (!node || typeof node !== "object") return;
+      if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+      node.inputs[inputId.slice(separator + 1)] = values[inputId];
+    });
   }
 
   function exportWorkflow() {
@@ -1056,6 +1528,7 @@
     var values = collectInputs();
     var metadata = {};
     if (currentRemoteWorkflowId) metadata.workflowId = currentRemoteWorkflowId;
+    if (appState.workflowAccountId) metadata.accountId = appState.workflowAccountId;
     if (Object.keys(metadata).length) workflow.__rh_meta__ = metadata;
     var changes = 0;
     [values.files, values.prompts].forEach(function (group) {
@@ -1077,6 +1550,8 @@
         changes += 1;
       });
     });
+    applyCustomInputValues(workflow, values.customInputs);
+    changes += Object.keys(values.customInputs).length;
     applyRandomNoiseValues(workflow, values.randomNoise, values.bypassedNodes);
     changes += Object.keys(values.randomNoise).filter(function (nodeId) {
       return values.bypassedNodes.indexOf(nodeId) === -1;
@@ -1087,12 +1562,11 @@
     }).length * 2;
     applyBypassedNodes(workflow, values.bypassedNodes);
     var sourceName = appState.workflowName || "workflow_api.json";
-    var stem = sourceName.replace(/\.json$/i, "") || "workflow";
     var blob = new Blob([JSON.stringify(workflow, null, 2) + "\n"], { type: "application/json;charset=utf-8" });
     var url = URL.createObjectURL(blob);
     var link = document.createElement("a");
     link.href = url;
-    link.download = stem + "_modified_api.json";
+    link.download = modifiedWorkflowName(sourceName);
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -1116,6 +1590,12 @@
       return values.bypassedNodes.indexOf(item.node_id) === -1 && !values.files[item.id];
     });
     if (missing) return showToast("请先为所有文件输入选择本地文件", true);
+    var missingCustom = (appState.analysis && appState.analysis.custom_inputs || []).some(function (item) {
+      if (!item.required || values.bypassedNodes.indexOf(item.node_id) !== -1) return false;
+      var value = values.customInputs[item.id];
+      return value == null || String(value).trim() === "";
+    });
+    if (missingCustom) return showToast("请填写所有必填的自定义输入", true);
     var invalidNoise = Object.keys(values.randomNoise).some(function (nodeId) {
       if (values.bypassedNodes.indexOf(nodeId) !== -1) return false;
       var config = values.randomNoise[nodeId];
@@ -1133,6 +1613,7 @@
     if (appState.workflowDirty && appState.workflow) {
       try {
         workflowPayload = JSON.parse(JSON.stringify(appState.workflow));
+        applyCustomInputValues(workflowPayload, values.customInputs);
         applyRandomNoiseValues(workflowPayload, values.randomNoise, values.bypassedNodes);
         applyResolutionValues(workflowPayload, values.resolution, values.bypassedNodes);
       } catch (error) {
@@ -1152,13 +1633,17 @@
       workflow_id: appState.workflowId,
       workflow: workflowPayload,
       workflow_name: appState.workflowName,
+      workflow_account_id: appState.workflowAccountId || null,
+      workflow_input_config: appState.workflowInputConfig,
       remote_workflow_id: currentRemoteWorkflowId,
       files: values.files,
       prompts: values.prompts,
+      custom_inputs: values.customInputs,
       random_noise: values.randomNoise,
       resolution: values.resolution,
       bypassed_nodes: values.bypassedNodes,
       key_id: $("keySelect").value || null,
+      instance_type: $("instanceType").value || "default",
       output_dir: $("outputDir").value.trim() || null
     }).then(function (data) {
       showToast("任务已加入本地队列");
@@ -1236,7 +1721,7 @@
     $("modalTitle").textContent = task.workflow_name || "任务详情";
     var meta = $("modalMeta");
     var costLabel = formatTaskCost(task);
-    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>凭据：' + esc(taskCredentialLabel(task)) + '</span><span>workflowId：' + esc(task.remote_workflow_id || "未记录") + '</span><span>taskId：' + esc(task.remote_task_id || "尚未返回") + '</span>' + (costLabel ? '<span>' + esc(costLabel) + '</span>' : '') + '<span>' + formatTime(task.created_at) + '</span>';
+    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>凭据：' + esc(taskCredentialLabel(task)) + '</span><span>机型：' + esc(taskInstanceLabel(task)) + '</span><span>workflowId：' + esc(task.remote_workflow_id || "未记录") + '</span><span>taskId：' + esc(task.remote_task_id || "尚未返回") + '</span>' + (costLabel ? '<span>' + esc(costLabel) + '</span>' : '') + '<span>' + esc(formatTaskDuration(task)) + '</span><span>' + formatTime(task.created_at) + '</span>';
     renderDiagnostics(task);
     var outputs = $("modalOutputs");
     var items = task.outputs || [];
@@ -1248,11 +1733,12 @@
         var url = "/api/tasks/" + encodeURIComponent(task.id) + "/output/" + fileIndex++;
         var type = String(item.mime || "");
         var content = type.indexOf("image/") === 0 ? '<img src="' + url + '" alt="' + esc(item.name) + '" />' :
-          type.indexOf("video/") === 0 ? '<video src="' + url + '" controls preload="metadata"></video>' :
+          type.indexOf("video/") === 0 ? window.RHMotion.videoPlayerMarkup(url, false, false) :
           type.indexOf("audio/") === 0 ? '<audio src="' + url + '" controls preload="metadata"></audio>' :
           '<a class="output-link" href="' + url + '" target="_blank" rel="noreferrer">打开或下载文件</a>';
         return '<div class="output-item"><div class="output-label">' + esc(item.name || "output") + '</div>' + content + '</div>';
       }).join("");
+      window.RHMotion.bindVideoLoopControls(outputs);
     }
     window.RHMotion.openModal("taskModal", "closeModal");
   }
@@ -1322,18 +1808,34 @@
 
   function callElectronAccount(method, account) {
     if (!window.rhElectron || typeof window.rhElectron[method] !== "function") {
-      return Promise.reject(new Error("账号托管需要通过 Electron 开发版运行，请使用 npm run electron"));
+      return Promise.reject(new Error("账号管理需要通过 Electron 开发版运行，请使用 npm run electron"));
     }
     return Promise.resolve(window.rhElectron[method](account));
   }
 
   function handleAccountClick(event) {
-    var trigger = event.target.closest("button[data-action]");
+    var trigger = event.target.closest("[data-action]");
     if (!trigger) return;
     var action = trigger.dataset.action;
     var accountId = trigger.dataset.accountId;
-    var account = appState.accounts.find(function (item) { return item.id === accountId; });
+    var account = accountId === "__general__"
+      ? { id: "__general__", name: "通用模式", general: true }
+      : appState.accounts.find(function (item) { return item.id === accountId; });
     if (!account || !action || accountBusy[accountId]) return;
+    if (action === "select-account") {
+      if (appState.currentAccountId === accountId) return;
+      accountBusy[accountId] = action;
+      renderAccounts();
+      jsonRequest("/api/settings", "PATCH", { current_account_id: accountId }).then(function () {
+        appState.currentAccountId = accountId;
+        showToast(accountId === "__general__" ? "已切换到通用模式" : "当前使用账号已切换：" + account.name);
+        return refresh(true);
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () {
+        delete accountBusy[accountId];
+        renderAccounts();
+      });
+      return;
+    }
     if (action === "account-login" || action === "account-checkin") {
       accountBusy[accountId] = action;
       renderAccounts();
@@ -1353,11 +1855,11 @@
       return;
     }
     if (action === "delete-account") {
-      if (!window.confirm("确定删除这个本地托管账号记录吗？Electron 中保存的登录会话不会被删除。")) return;
+      if (!window.confirm("确定删除这个账号记录吗？Electron 中保存的登录会话不会被删除。")) return;
       accountBusy[accountId] = action;
       renderAccounts();
       request("/api/accounts/" + encodeURIComponent(accountId), { method: "DELETE" }).then(function () {
-        showToast("托管账号记录已删除");
+        showToast("账号记录已删除");
         return refresh(true);
       }).catch(function (error) { showToast(error.message, true); }).finally(function () {
         delete accountBusy[accountId];
@@ -1418,10 +1920,11 @@
         return;
       }
       var inputCard = trigger.closest(".input-card");
-      if (inputCard && inputCard.classList.contains("is-bypassed") && ["pick-file", "pick-native-file", "pick-prompt"].indexOf(action) !== -1) return;
+      if (inputCard && inputCard.classList.contains("is-bypassed") && ["pick-file", "pick-native-file", "pick-prompt", "paste-file"].indexOf(action) !== -1) return;
       if (action === "jump-input") jumpToInput(inputId);
       if (action === "add-random-noise") addRandomNoiseNode();
       if (action === "pick-file") document.querySelector('.file-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
+      if (action === "paste-file") armClipboardPaste(inputId);
       if (action === "pick-native-file") pickNativeInput(inputId, trigger);
       if (action === "pick-prompt") document.querySelector('.prompt-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
     });
@@ -1436,10 +1939,13 @@
     });
     $("workflowInputs").addEventListener("focusin", function (event) {
       if (event.target.classList.contains("resolution-help")) event.target.setAttribute("aria-expanded", "true");
+      var fileTarget = event.target.closest(".file-dropzone, .paste-file-button, .file-preview");
+      if (fileTarget) rememberFileInput(fileTarget.dataset.inputId || fileTarget.dataset.previewId);
     });
     $("workflowInputs").addEventListener("focusout", function (event) {
       if (event.target.classList.contains("resolution-help")) event.target.setAttribute("aria-expanded", "false");
     });
+    $("workflowInputs").addEventListener("paste", pasteClipboardImageFromEvent);
     $("workflowInputs").addEventListener("keydown", function (event) {
       var resolutionPreset = event.target.closest("tr[data-resolution-megapixels]");
       if (resolutionPreset && (event.key === "Enter" || event.key === " ")) {
@@ -1454,11 +1960,30 @@
       event.preventDefault();
       document.querySelector('.file-picker[data-input-id="' + CSS.escape(zone.dataset.inputId) + '"]').click();
     });
+    $("workflowInputs").addEventListener("dragstart", function (event) {
+      var preview = event.target.closest(".file-preview");
+      if (!preview || preview.hidden) return;
+      var inputId = preview.dataset.previewId;
+      if (!inputId || isNodeBypassed(String(inputId).split(":", 1)[0])) return;
+      draggedPreviewInputId = inputId;
+      preview.classList.add("is-dragging-source");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "copy";
+        event.dataTransfer.setData("application/x-rh-preview-source", inputId);
+      }
+    });
+    $("workflowInputs").addEventListener("dragend", function (event) {
+      var preview = event.target.closest(".file-preview");
+      if (preview) preview.classList.remove("is-dragging-source");
+      draggedPreviewInputId = "";
+      document.querySelectorAll(".file-input-card.is-preview-target").forEach(function (card) { card.classList.remove("is-preview-target"); });
+    });
     $("workflowInputs").addEventListener("dragenter", function (event) {
       var card = event.target.closest(".file-input-card");
       if (!card || card.classList.contains("is-bypassed")) return;
       event.preventDefault();
       card.classList.add("is-dragging");
+      if (previewDragSource(event) && previewDragSource(event) !== card.dataset.inputId) card.classList.add("is-preview-target");
       var zone = card.querySelector(".file-dropzone");
       if (zone) zone.classList.add("is-dragging");
     });
@@ -1468,6 +1993,7 @@
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
       card.classList.add("is-dragging");
+      if (previewDragSource(event) && previewDragSource(event) !== card.dataset.inputId) card.classList.add("is-preview-target");
       var zone = card.querySelector(".file-dropzone");
       if (zone) zone.classList.add("is-dragging");
     });
@@ -1475,6 +2001,7 @@
       var card = event.target.closest(".file-input-card");
       if (!card || card.classList.contains("is-bypassed") || (event.relatedTarget && card.contains(event.relatedTarget))) return;
       card.classList.remove("is-dragging");
+      card.classList.remove("is-preview-target");
       var zone = card.querySelector(".file-dropzone");
       if (zone) zone.classList.remove("is-dragging");
     });
@@ -1484,8 +2011,18 @@
       event.preventDefault();
       if (card.classList.contains("is-bypassed")) return;
       card.classList.remove("is-dragging");
+      card.classList.remove("is-preview-target");
       var zone = card.querySelector(".file-dropzone");
       if (zone) zone.classList.remove("is-dragging");
+      var sourceId = previewDragSource(event);
+      if (sourceId) {
+        var copied = copyPreviewToInput(sourceId, card.dataset.inputId);
+        if (copied) {
+          var targetTitle = card.querySelector(".input-title");
+          showToast("已将预览图覆盖到 " + (targetTitle ? targetTitle.textContent : "目标输入"));
+        }
+        return;
+      }
       var file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
       if (!file) return;
       card.classList.add("is-loading");
@@ -1523,6 +2060,12 @@
     $("queueList").addEventListener("click", handleQueueClick);
     $("credentialList").addEventListener("click", handleCredentialClick);
     $("accountList").addEventListener("click", handleAccountClick);
+    $("accountList").addEventListener("keydown", function (event) {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      if (!event.target.closest(".account-card")) return;
+      event.preventDefault();
+      handleAccountClick(event);
+    });
     $("accountForm").addEventListener("submit", function (event) {
       event.preventDefault();
       addManagedAccount();
@@ -1535,7 +2078,7 @@
       jsonRequest("/api/keys", "POST", { name: $("keyName").value.trim(), site: $("keySite").value, api_key: apiKey }).then(function (data) {
         $("keyValue").value = "";
         $("keyName").value = "";
-        showToast(data.key.status === "ready" ? "凭据已验证并保存，余额已更新" : data.key.status_message, data.key.status !== "ready");
+        showToast(data.key.status === "ready" ? "当前账号凭据已验证并保存，余额已更新" : data.key.status_message, data.key.status !== "ready");
         refresh(true);
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
     });
@@ -1554,6 +2097,19 @@
         showToast("默认产物目录已保存");
       }).catch(function (error) { showToast(error.message, true); });
     });
+    $("saveActionResources").addEventListener("click", function () {
+      var value = $("actionResourcesPath").value.trim();
+      var button = this;
+      button.disabled = true;
+      jsonRequest("/api/settings", "PATCH", { action_resources_path: value }).then(function (data) {
+        $("actionResourcesPath").value = data.action_resources_path;
+        showToast("动作库路径已保存，已重新扫描");
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
+    });
+    document.querySelectorAll("[data-pick-prompt-resource]").forEach(function (button) {
+      button.addEventListener("click", function () { pickPromptResource(this); });
+    });
+    $("savePromptResources").addEventListener("click", savePromptResources);
     $("savePersonalCapacity").addEventListener("click", function () {
       var value = $("personalCapacity").value.trim();
       jsonRequest("/api/settings", "PATCH", { personal_capacity: value }).then(function (data) {
@@ -1563,6 +2119,7 @@
       }).catch(function (error) { showToast(error.message, true); });
     });
     $("chooseOutputDir").addEventListener("click", function () { pickOutputDirectory(this); });
+    $("chooseActionResources").addEventListener("click", function () { pickActionResources(this); });
     $("openSettings").addEventListener("click", function () {
       window.RHMotion.openModal("settingsModal", "outputDir");
     });
@@ -1587,9 +2144,27 @@
 
   bindEvents();
   refresh(false).then(function () {
+    var workflowQuery = new URLSearchParams(window.location.search).get("workflow");
+    if (workflowQuery) {
+      return loadWorkflowRecord(workflowQuery).catch(function (error) {
+        showToast("打开工作流失败：" + error.message, true);
+        restoreDraft();
+      }).then(function () {
+        applyPendingPrompt();
+        openSettingsFromQuery();
+        focusInputFromQuery();
+      });
+    }
     restoreDraft();
     applyPendingPrompt();
     openSettingsFromQuery();
+    focusInputFromQuery();
+  });
+  window.addEventListener("storage", function (event) {
+    if (event.key !== draftStorageKey || !event.newValue) return;
+    restoreDraft(true);
+    focusInputFromQuery();
+    showToast("任务提交页已同步最新工作流输入");
   });
   window.addEventListener("beforeunload", function () {
     window.clearTimeout(draftSaveTimer);

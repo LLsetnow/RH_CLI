@@ -32,6 +32,7 @@
           <a class="top-nav-link" href="/">任务提交</a>
           <a class="top-nav-link" href="/prompt">提示词工坊</a>
           <a class="top-nav-link active" href="/outputs" aria-current="page">成片</a>
+          <a class="top-nav-link" href="/workflows">工作流</a>
         </nav>
         <div class="topbar-actions">
           <div class="local-badge"><span class="status-dot"></span>仅本机运行</div>
@@ -98,6 +99,37 @@
     </div>
 
     <div id="outputToast" class="toast" role="status" aria-live="polite"></div>
+    <div id="outputPreviewModal" class="modal-backdrop" hidden>
+      <section class="output-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="outputPreviewTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">OUTPUT PREVIEW</div>
+            <h2 id="outputPreviewTitle">产物预览</h2>
+          </div>
+          <button id="closeOutputPreview" class="close-button" type="button" aria-label="关闭产物预览">×</button>
+        </div>
+        <div id="outputPreviewMeta" class="output-preview-meta"></div>
+        <div id="outputPreviewContent" class="output-preview-content"></div>
+      </section>
+    </div>
+    <div id="outputImportModal" class="modal-backdrop" hidden>
+      <section class="output-import-dialog" role="dialog" aria-modal="true" aria-labelledby="outputImportTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">IMPORT OUTPUT</div>
+            <h2 id="outputImportTitle">导入到任务节点</h2>
+          </div>
+          <button id="closeOutputImport" class="close-button" type="button" aria-label="关闭导入">×</button>
+        </div>
+        <p id="outputImportDescription" class="modal-description">选择任务提交页当前工作流中的文件输入节点，产物会作为该节点的本机输入。</p>
+        <div id="outputImportStatus" class="output-import-status"></div>
+        <div id="outputImportTargets" class="output-import-targets" role="radiogroup" aria-label="文件输入节点"></div>
+        <div class="output-import-actions">
+          <button id="cancelOutputImport" class="secondary-button" type="button">取消</button>
+          <button id="confirmOutputImport" class="primary-button" type="button" disabled>导入到选中节点</button>
+        </div>
+      </section>
+    </div>
     <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/outputs.js"></script>
   </body>

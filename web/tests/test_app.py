@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from types import SimpleNamespace
@@ -168,6 +169,46 @@ def test_personal_capacity_setting_changes_personal_keys_but_not_shared_keys(tmp
         store._db.close()
 
 
+def test_action_resources_path_setting_persists_and_validates(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    source = tmp_path / "pose.md"
+    source.write_text("## pose\n", encoding="utf-8")
+    store = web_app.LocalStore()
+    try:
+        assert store.action_resources_path() == ""
+        assert store.set_action_resources_path(str(source)) == str(source.resolve())
+        assert store.action_resources_path() == str(source.resolve())
+        with pytest.raises(RhCliError) as excinfo:
+            store.set_action_resources_path(str(tmp_path / "missing.md"))
+        assert excinfo.value.code == "INVALID_ACTION_RESOURCES_PATH"
+    finally:
+        store._db.close()
+
+
+def test_prompt_resource_paths_setting_persists_all_library_sources(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    library = tmp_path / "library.json"
+    library.write_text(json.dumps({"version": 1, "blocks": []}), encoding="utf-8")
+    sources = {}
+    for kind in ("character", "audio", "background", "clothes"):
+        source = tmp_path / f"{kind}.md"
+        source.write_text(f"## {kind}\n", encoding="utf-8")
+        sources[kind] = source
+
+    store = web_app.LocalStore()
+    try:
+        assert store.set_prompt_library_path(str(library)) == str(library.resolve())
+        assert store.prompt_library_path() == str(library.resolve())
+        assert store.set_reference_resources_paths({kind: str(path) for kind, path in sources.items()}) == {
+            kind: str(path.resolve()) for kind, path in sources.items()
+        }
+        assert store.reference_resources_paths() == {
+            kind: str(path.resolve()) for kind, path in sources.items()
+        }
+    finally:
+        store._db.close()
+
+
 def test_public_key_masks_secret():
     result = web_app.public_key({"id": "k1", "name": "main", "site": "cn", "api_key": "abcdefgh12345678"})
     assert result["masked_key"] == "abcd••••5678"
@@ -228,6 +269,100 @@ def _saved_key() -> dict[str, object]:
         "checked_at": 111,
         "balance_checked_at": 222,
     }
+
+
+def test_current_account_filters_keys_and_migrates_legacy_prefixes(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        account_172 = store.add_account("172", "cn")
+        account_akai = store.add_account("akai", "ai")
+        store.save_keys(
+            [
+                {**_saved_key(), "id": "key_cn", "name": "cn-rh", "site": "cn"},
+                {**_saved_key(), "id": "key_cn_wallet", "name": "cn-wallet", "site": "cn"},
+                {**_saved_key(), "id": "key_ai", "name": "ai-rh", "site": "ai"},
+                {**_saved_key(), "id": "key_ai_wallet", "name": "ai-wallet", "site": "ai"},
+            ]
+        )
+
+        ownership = {item["name"]: item["account_id"] for item in store.keys()}
+        assert ownership["cn-rh"] == account_172["id"]
+        assert ownership["cn-wallet"] == account_172["id"]
+        assert ownership["ai-rh"] == account_akai["id"]
+        assert ownership["ai-wallet"] == account_akai["id"]
+        assert store.current_account_id() == account_172["id"]
+        assert [item["name"] for item in manager.public_keys(account_172["id"])] == ["cn-rh", "cn-wallet"]
+
+        store.set_current_account(account_akai["id"])
+        assert [item["name"] for item in manager.public_keys(account_akai["id"])] == ["ai-rh", "ai-wallet"]
+        store.set_current_account(web_app.GENERAL_ACCOUNT_ID)
+        assert [item["name"] for item in manager.public_keys(web_app.GENERAL_ACCOUNT_ID)] == [
+            "cn-rh", "cn-wallet", "ai-rh", "ai-wallet"
+        ]
+        assert [item["name"] for item in manager._keys_for_task({"account_id": web_app.GENERAL_ACCOUNT_ID}, store.keys())] == [
+            "cn-rh", "cn-wallet", "ai-rh", "ai-wallet"
+        ]
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_new_key_is_bound_to_current_account_and_site(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        account = store.add_account("172", "cn")
+        monkeypatch.setattr(manager, "check_key", lambda key_id: web_app.public_key(store.get_key(key_id)))
+        record = manager.add_key("新 Key", "ai", "new-key-value")
+        assert record["account_id"] == account["id"]
+        assert record["site"] == "cn"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_submit_task_rejects_key_from_other_account(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        account_172 = store.add_account("172", "cn")
+        account_akai = store.add_account("akai", "ai")
+        store.save_keys(
+            [
+                {**_saved_key(), "id": "key_cn", "name": "cn-rh", "site": "cn", "account_id": account_172["id"]},
+                {**_saved_key(), "id": "key_ai", "name": "ai-rh", "site": "ai", "account_id": account_akai["id"]},
+            ]
+        )
+        workflow_id, _, _ = store.save_workflow("demo_api.json", json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}))
+        with pytest.raises(RhCliError) as excinfo:
+            manager.submit_task(workflow_id, {}, {}, "key_ai", None, "123456")
+        assert excinfo.value.code == "KEY_ACCOUNT_MISMATCH"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_imported_workflow_cannot_be_rebound_to_another_account(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account_172 = store.add_account("172", "cn")
+        account_akai = store.add_account("akai", "ai")
+        content = json.dumps(
+            {
+                "1": {"class_type": "SaveImage", "inputs": {}},
+                "__rh_meta__": {"accountId": account_akai["id"]},
+            }
+        )
+        with pytest.raises(RhCliError) as excinfo:
+            store.save_workflow("akai_api.json", content, account_id=account_172["id"], register=False)
+        assert excinfo.value.code == "WORKFLOW_ACCOUNT_MISMATCH"
+    finally:
+        store._db.close()
 
 
 def test_check_key_updates_balance_and_query_time(tmp_path, monkeypatch):
@@ -395,6 +530,115 @@ def test_local_store_persists_workflow_input_and_task(tmp_path, monkeypatch):
         store._db.close()
 
 
+def test_workflow_library_records_can_be_bound_updated_and_deleted(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account = store.add_account("账号 A", "cn")
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        workflow_id, workflow_path, analysis = store.save_workflow(
+            "demo_api.json",
+            json.dumps(
+                {
+                    "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
+                    "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+                }
+            ),
+            account_id=account["id"],
+            remote_workflow_id="123456",
+            source_dir=str(source_dir),
+        )
+
+        record = store.workflow_record(workflow_id)
+        assert record["name"] == "demo_api.json"
+        assert record["account_id"] == account["id"]
+        assert record["account_name"] == "账号 A"
+        assert record["site"] == "cn"
+        assert record["remote_workflow_id"] == "123456"
+        assert record["source_dir"] == str(source_dir)
+        assert record["file_count"] == 1
+        assert analysis["file_count"] == 1
+
+        detail = store.workflow_detail(workflow_id)
+        assert detail["workflow"]["1"]["class_type"] == "LoadImage"
+
+        updated = store.update_workflow(
+            workflow_id,
+            {"name": "人物修复.json", "account_id": account["id"], "remote_workflow_id": "654321"},
+        )
+        assert updated["name"] == "人物修复.json"
+        assert updated["remote_workflow_id"] == "654321"
+        saved = json.loads(workflow_path.read_text(encoding="utf-8"))
+        assert saved["__rh_meta__"] == {"workflowId": "654321", "accountId": account["id"]}
+
+        store.delete_workflow(workflow_id)
+        assert not workflow_path.exists()
+        assert store.workflows() == []
+    finally:
+        store._db.close()
+
+
+def test_library_workflow_input_config_is_saved_and_replayed_in_task_snapshot(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        workflow_id, workflow_path, _ = store.save_workflow(
+            "sampler_api.json",
+            json.dumps({"2": {"class_type": "KSampler", "inputs": {"steps": 20, "cfg": 7.0}}}),
+            remote_workflow_id="987654",
+        )
+        config = {
+            "mode": "manual",
+            "items": [
+                {"id": "2:steps", "label": "采样步数", "kind": "number", "required": True},
+            ],
+        }
+        updated = store.update_workflow(workflow_id, {"input_config": config})
+        assert updated["input_config"]["mode"] == "manual"
+        assert updated["input_config"]["items"][0]["id"] == "2:steps"
+        assert "input_config" in json.loads((store._workflow_registry_path()).read_text(encoding="utf-8"))["workflows"][0]
+        assert json.loads(workflow_path.read_text(encoding="utf-8"))["2"]["inputs"]["steps"] == 20
+
+        task = manager.submit_task(
+            workflow_id,
+            {},
+            {},
+            None,
+            str(tmp_path / "out"),
+            remote_workflow_id="987654",
+            custom_inputs={"2:steps": "12"},
+        )
+        loaded = store.load_task_workflow(task["id"])
+        assert loaded["task"]["input_config"]["mode"] == "manual"
+        assert loaded["task"]["custom_inputs"] == {"2:steps": 12}
+        assert loaded["analysis"]["custom_inputs"][0]["label"] == "采样步数"
+        assert loaded["workflow"]["2"]["inputs"]["steps"] == 12
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_task_workflow_copy_is_not_added_to_workflow_library(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        workflow_id, workflow_path, _ = store.save_workflow(
+            "task_only_api.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+            register=False,
+        )
+
+        assert workflow_path.is_file()
+        assert store.workflows() == []
+        with pytest.raises(RhCliError) as excinfo:
+            store.workflow_record(workflow_id)
+        assert excinfo.value.code == "WORKFLOW_NOT_FOUND"
+    finally:
+        store._db.close()
+
+
 def test_load_task_workflow_returns_saved_workflow_and_task_inputs(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -531,6 +775,31 @@ def test_submit_task_saves_modified_workflow_with_random_noise(tmp_path, monkeyp
         store._db.close()
 
 
+def test_workflow_name_stays_clean_after_repeated_export_and_submit(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        task = manager.submit_task(
+            "unused",
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="123456",
+            workflow_data={"2": {"class_type": "SaveImage", "inputs": {}}},
+            workflow_name="184de3c55c53_e2fd13581177_10Eros二采0901_api_modified_api_modified_api.json",
+        )
+
+        assert task["workflow_name"] == "10Eros二采0901_api.json"
+        assert Path(task["workflow_path"]).name.endswith("_10Eros二采0901_api.json")
+        loaded = store.load_task_workflow(task["id"])
+        assert loaded["filename"] == "10Eros二采0901_api.json"
+    finally:
+        manager.close()
+        store._db.close()
+
+
 def test_submit_task_saves_modified_resolution_selector(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -637,6 +906,58 @@ def test_personal_queue_keeps_fourth_task_until_slot_is_free(tmp_path, monkeypat
         manager.close()
 
 
+def test_public_tasks_records_elapsed_time_from_queue_entry(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        task_id = "task_elapsed"
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": 1_000,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "elapsed_api.json",
+                "files": {},
+                "prompts": {},
+                "key_id": None,
+                "output_dir": str(tmp_path / "outputs"),
+            }
+        )
+        store.update_task(task_id, status="completed", completed_at=4_600)
+
+        public_task = manager.public_tasks()[0]
+
+        assert public_task["elapsed_ms"] == 3_600
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_submit_task_records_instance_type(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        task = manager.submit_task(
+            "unused",
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="123456",
+            workflow_data={"1": {"class_type": "SaveImage", "inputs": {}}},
+            workflow_name="ultra_api.json",
+            instance_type="ultra",
+        )
+
+        assert task["instance_type"] == "ultra"
+        assert store.task(task["id"])["instance_type"] == "ultra"
+    finally:
+        manager.close()
+        store._db.close()
+
+
 def test_local_file_preview_reads_image_without_copying(tmp_path):
     source = tmp_path / "existing.png"
     source.write_bytes(b"png-bytes")
@@ -647,6 +968,36 @@ def test_local_file_preview_reads_image_without_copying(tmp_path):
     assert result["name"] == "existing.png"
     assert result["preview_url"].startswith("data:image/png;base64,")
     assert not (web_app.WEB_ROOT / "data" / "inputs" / source.name).exists()
+
+
+def test_save_pasted_image_persists_a_local_input_copy(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_server, "DATA_ROOT", tmp_path / "data")
+    raw = b"clipboard-png"
+
+    result = web_server.save_pasted_image(
+        {
+            "name": "Screenshot.png",
+            "mime": "image/png",
+            "data": base64.b64encode(raw).decode("ascii"),
+        }
+    )
+
+    target = Path(result["path"])
+    assert target.parent == tmp_path / "data" / "pasted-inputs"
+    assert target.suffix == ".png"
+    assert target.read_bytes() == raw
+    assert result["preview_url"].startswith("data:image/png;base64,")
+
+
+def test_save_pasted_image_rejects_non_image_payload(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_server, "DATA_ROOT", tmp_path / "data")
+
+    with pytest.raises(RhCliError) as excinfo:
+        web_server.save_pasted_image({"mime": "text/plain", "data": "aGVsbG8="})
+
+    assert excinfo.value.code == "INVALID_PASTED_IMAGE"
 
 
 def test_public_outputs_lists_available_files_and_text(tmp_path, monkeypatch):
@@ -793,7 +1144,7 @@ def test_run_task_uses_remote_id_and_strips_web_metadata(tmp_path, monkeypatch):
             web_app,
             "_submit",
             lambda client, api_key, workflow_id, workflow_json, **kwargs: submitted.update(
-                {"workflow_id": workflow_id, "workflow": json.loads(workflow_json)}
+                {"workflow_id": workflow_id, "workflow": json.loads(workflow_json), "instance_type": kwargs.get("instance_type")}
             ) or "remote-task-1",
         )
         monkeypatch.setattr(web_app, "_poll_outputs", lambda *args, **kwargs: [])
@@ -802,6 +1153,7 @@ def test_run_task_uses_remote_id_and_strips_web_metadata(tmp_path, monkeypatch):
 
         assert submitted["workflow_id"] == "987654"
         assert "__rh_meta__" not in submitted["workflow"]
+        assert submitted["instance_type"] == "default"
         assert store.task(task["id"])["status"] == "completed"
     finally:
         manager.close()

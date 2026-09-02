@@ -7,7 +7,13 @@
   var promptApiReady = false;
   var stateSaveTimer = 0;
   var editingBlockId = "";
-  var state = { libraryBlocks: [], actions: [], actionSource: null, libraryMode: "blocks", assemblyView: "stage", stage: [], groups: [], activeGroupId: "", filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
+  var editingStageIndex = null;
+  var depthImportActionId = "";
+  var workflowImportAsset = null;
+  var GRID_SPLITTER_STORAGE_KEY = "rh-workflow-desk-prompt-library-width-v2";
+  var gridSplitterDrag = null;
+  var REFERENCE_MODES = ["character", "audio", "background", "clothes"];
+  var state = { libraryBlocks: [], actions: [], actionSource: null, references: [], referenceSource: null, libraryMode: "blocks", assemblyView: "stage", stage: [], groups: [], activeGroupId: "", filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
   var toastTimer = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -30,6 +36,12 @@
     return prefix + "-" + Date.now().toString(36) + "-" + idCounter;
   }
   function allBlocks() { return state.libraryBlocks; }
+  function isReferenceMode() { return REFERENCE_MODES.indexOf(state.libraryMode) !== -1; }
+  function currentLibraryEntries() {
+    if (state.libraryMode === "pose" || state.libraryMode === "actions") return state.actions;
+    if (isReferenceMode()) return state.references.filter(function (item) { return item.kind === state.libraryMode; });
+    return allBlocks();
+  }
   function getPromptText() {
     return state.stage.map(function (item) { return String(item.text || "").trim(); }).filter(Boolean).join("\n\n");
   }
@@ -64,6 +76,81 @@
     button.setAttribute("aria-label", isLight ? "切换到夜间模式" : "切换到日间模式");
     button.title = isLight ? "切换到夜间模式" : "切换到日间模式";
   }
+  function promptGridWidthBounds() {
+    var splitter = $("promptGridSplitter");
+    var grid = splitter && splitter.parentElement;
+    if (!grid) return null;
+    var gridWidth = grid.getBoundingClientRect().width;
+    var min = 300;
+    var max = Math.max(min, Math.min(gridWidth - 620, gridWidth * .6));
+    return { grid: grid, min: min, max: max };
+  }
+  function setPromptLibraryWidth(value, persist) {
+    var bounds = promptGridWidthBounds();
+    if (!bounds) return;
+    var numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) numericValue = 420;
+    var width = Math.max(bounds.min, Math.min(bounds.max, numericValue));
+    bounds.grid.style.setProperty("--prompt-library-width", width + "px");
+    var splitter = $("promptGridSplitter");
+    if (splitter) {
+      splitter.setAttribute("aria-valuenow", String(Math.round(width)));
+      splitter.setAttribute("aria-valuemax", String(Math.round(bounds.max)));
+    }
+    if (persist) {
+      try { localStorage.setItem(GRID_SPLITTER_STORAGE_KEY, String(Math.round(width))); } catch (error) {}
+    }
+  }
+  function initPromptGridSplitter() {
+    var splitter = $("promptGridSplitter");
+    if (!splitter) return;
+    var savedWidth = 0;
+    try { savedWidth = Number(localStorage.getItem(GRID_SPLITTER_STORAGE_KEY)); } catch (error) {}
+    setPromptLibraryWidth(savedWidth || 420, false);
+    splitter.addEventListener("pointerdown", function (event) {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      var bounds = promptGridWidthBounds();
+      if (!bounds) return;
+      gridSplitterDrag = { pointerId: event.pointerId, grid: bounds.grid, gap: parseFloat(window.getComputedStyle(bounds.grid).columnGap) || 16 };
+      document.body.classList.add("prompt-grid-resizing");
+      if (splitter.setPointerCapture) splitter.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    splitter.addEventListener("keydown", function (event) {
+      var current = Number(splitter.getAttribute("aria-valuenow")) || 420;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        setPromptLibraryWidth(current + (event.key === "ArrowLeft" ? -24 : 24), true);
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        var bounds = promptGridWidthBounds();
+        if (bounds) setPromptLibraryWidth(bounds.min, true);
+      } else if (event.key === "End") {
+        event.preventDefault();
+        var endBounds = promptGridWidthBounds();
+        if (endBounds) setPromptLibraryWidth(endBounds.max, true);
+      }
+    });
+    document.addEventListener("pointermove", function (event) {
+      if (!gridSplitterDrag || gridSplitterDrag.pointerId !== event.pointerId) return;
+      var rect = gridSplitterDrag.grid.getBoundingClientRect();
+      setPromptLibraryWidth(event.clientX - rect.left - gridSplitterDrag.gap, false);
+      event.preventDefault();
+    });
+    function finishGridSplitterDrag(event) {
+      if (!gridSplitterDrag || gridSplitterDrag.pointerId !== event.pointerId) return;
+      setPromptLibraryWidth(Number(splitter.getAttribute("aria-valuenow")) || 420, true);
+      gridSplitterDrag = null;
+      document.body.classList.remove("prompt-grid-resizing");
+    }
+    document.addEventListener("pointerup", finishGridSplitterDrag);
+    document.addEventListener("pointercancel", finishGridSplitterDrag);
+    window.addEventListener("resize", function () {
+      if (!window.matchMedia("(max-width: 820px)").matches) {
+        setPromptLibraryWidth(Number(splitter.getAttribute("aria-valuenow")) || 420, false);
+      }
+    });
+  }
   function stageItemToApi(item) {
     var result = { instance_id: item.instanceId, kind: item.kind };
     if (item.kind === "text") {
@@ -78,6 +165,17 @@
         depth_image_url: item.depthImageUrl || "",
         pair_status: item.pairStatus || "",
       };
+    } else if (item.kind === "reference") {
+      result.reference_id = item.sourceId || "";
+      result.reference_kind = item.referenceKind || "";
+      result.snapshot = {
+        title: item.title || "",
+        text: item.text || "",
+        tags: item.tags || [],
+        image_url: item.imageUrl || "",
+        audio_url: item.audioUrl || "",
+        media_type: item.mediaType || "",
+      };
     } else {
       result.block_id = item.sourceId || "";
       result.snapshot = { title: item.title || "", text: item.text || "", tags: item.tags || [] };
@@ -85,18 +183,36 @@
     return result;
   }
   function stageItemFromApi(item) {
-    if (!item || (item.kind !== "text" && item.kind !== "fixed" && item.kind !== "action")) return null;
+    if (!item || (item.kind !== "text" && item.kind !== "fixed" && item.kind !== "action" && item.kind !== "reference")) return null;
     if (item.kind === "text") return { instanceId: item.instance_id || makeId("text"), kind: "text", title: "自由文本", text: String(item.text || ""), tags: [] };
-    var sourceId = item.kind === "action" ? (item.action_id || item.block_id) : item.block_id;
-    var source = item.kind === "action" ? state.actions.find(function (candidate) { return candidate.id === sourceId; }) : allBlocks().find(function (candidate) { return candidate.id === sourceId; });
+    var sourceId = item.kind === "action" ? (item.action_id || item.block_id) : (item.kind === "reference" ? item.reference_id : item.block_id);
+    var source = item.kind === "action" ? state.actions.find(function (candidate) { return candidate.id === sourceId; }) : (item.kind === "reference" ? state.references.find(function (candidate) { return candidate.id === sourceId; }) : allBlocks().find(function (candidate) { return candidate.id === sourceId; }));
     var snapshot = item.snapshot || {};
+    var hasSnapshotTitle = Object.prototype.hasOwnProperty.call(snapshot, "title");
+    var hasSnapshotText = Object.prototype.hasOwnProperty.call(snapshot, "text");
+    var hasSnapshotTags = Object.prototype.hasOwnProperty.call(snapshot, "tags");
+    if (item.kind === "reference") {
+      return {
+        instanceId: item.instance_id || makeId("reference"),
+        kind: "reference",
+        sourceId: sourceId || "",
+        referenceKind: item.reference_kind || (source && source.kind) || "",
+        title: hasSnapshotTitle ? String(snapshot.title || "") : (source ? source.title : "参考资源已不可用"),
+        text: hasSnapshotText ? String(snapshot.text || "") : (source ? source.text : ""),
+        tags: hasSnapshotTags ? (Array.isArray(snapshot.tags) ? snapshot.tags : []) : (source ? (source.tags || []) : []),
+        imageUrl: source ? (source.image_url || "") : (snapshot.image_url || ""),
+        audioUrl: source ? (source.audio_url || "") : (snapshot.audio_url || ""),
+        mediaType: source ? (source.media_type || "") : (snapshot.media_type || ""),
+        missing: !source,
+      };
+    }
     return {
       instanceId: item.instance_id || makeId(item.kind),
       kind: item.kind,
       sourceId: sourceId || "",
-      title: source ? source.title : (snapshot.title || (item.kind === "action" ? "动作已不可用" : "已删除积木")),
-      text: source ? source.text : (snapshot.text || ""),
-      tags: source ? (source.tags || []) : (snapshot.tags || []),
+      title: hasSnapshotTitle ? String(snapshot.title || "") : (source ? source.title : (item.kind === "action" ? "动作已不可用" : "已删除积木")),
+      text: hasSnapshotText ? String(snapshot.text || "") : (source ? source.text : ""),
+      tags: hasSnapshotTags ? (Array.isArray(snapshot.tags) ? snapshot.tags : []) : (source ? (source.tags || []) : []),
       imageUrl: source ? (source.color_image_url || source.image_url || "") : (snapshot.color_image_url || ""),
       colorImageUrl: source ? (source.color_image_url || source.image_url || "") : (snapshot.color_image_url || ""),
       depthImageUrl: source ? (source.depth_image_url || "") : (snapshot.depth_image_url || ""),
@@ -118,6 +234,10 @@
     state.actions = snapshot && Array.isArray(snapshot.actions) ? snapshot.actions : [];
     state.actionSource = snapshot && snapshot.source_status ? snapshot.source_status : null;
   }
+  function applyReferenceSnapshot(snapshot) {
+    state.references = snapshot && Array.isArray(snapshot.references) ? snapshot.references : [];
+    state.referenceSource = snapshot && snapshot.source_status ? snapshot.source_status : null;
+  }
   function refreshActions() {
     return jsonRequest("/api/prompt/actions").then(function (snapshot) {
       applyActionSnapshot(snapshot);
@@ -127,6 +247,17 @@
       return snapshot;
     }).catch(function (error) {
       showToast("动作库刷新失败：" + error.message, true);
+    });
+  }
+  function refreshReferences() {
+    return jsonRequest("/api/prompt/references").then(function (snapshot) {
+      applyReferenceSnapshot(snapshot);
+      renderFilters();
+      renderLibrary();
+      showToast("参考资源库已重新扫描");
+      return snapshot;
+    }).catch(function (error) {
+      showToast("参考资源库刷新失败：" + error.message, true);
     });
   }
   function readLegacyState() {
@@ -154,12 +285,14 @@
   function loadState() {
     return Promise.all([
       jsonRequest("/api/prompt/actions").catch(function () { return { actions: [] }; }),
+      jsonRequest("/api/prompt/references").catch(function () { return { references: [] }; }),
       jsonRequest("/api/prompt/state"),
     ]).then(function (snapshots) {
       applyActionSnapshot(snapshots[0]);
-      applyPromptSnapshot(snapshots[1]);
+      applyReferenceSnapshot(snapshots[1]);
+      applyPromptSnapshot(snapshots[2]);
       var legacy = readLegacyState();
-      if (!legacy) return snapshots[1];
+      if (!legacy) return snapshots[2];
       return jsonRequest("/api/prompt/migrate", "POST", legacy).then(function (migrated) {
         window.localStorage.removeItem(STORAGE_KEY);
         applyPromptSnapshot(migrated);
@@ -175,31 +308,42 @@
     return matchesTag && matchesSearch;
   }
   function renderFilters() {
-    var entries = state.libraryMode === "actions" ? state.actions : allBlocks();
+    var entries = currentLibraryEntries();
     var tags = unique([].concat.apply([], entries.map(function (entry) { return entry.tags || []; })));
     if (state.filter !== "全部" && tags.indexOf(state.filter) === -1) state.filter = "全部";
     $("tagFilters").innerHTML = ["全部"].concat(tags).map(function (tag) {
       return '<button class="tag-filter' + (state.filter === tag ? " active" : "") + '" type="button" data-filter-tag="' + esc(tag) + '">' + esc(tag) + '</button>';
     }).join("");
   }
+  function animateLibraryModeSwitch() {
+    var list = $("libraryList");
+    if (!list) return;
+    list.classList.remove("library-mode-switching");
+    void list.offsetWidth;
+    list.classList.add("library-mode-switching");
+    window.clearTimeout(list.libraryModeAnimationTimer);
+    list.libraryModeAnimationTimer = window.setTimeout(function () {
+      list.classList.remove("library-mode-switching");
+    }, 360);
+  }
   function renderLibraryMode() {
-    var isActions = state.libraryMode === "actions";
-    var blocksButton = $("libraryModeBlocks");
-    var actionsButton = $("libraryModeActions");
-    if (blocksButton) {
-      blocksButton.classList.toggle("active", !isActions);
-      blocksButton.setAttribute("aria-selected", String(!isActions));
-    }
-    if (actionsButton) {
-      actionsButton.classList.toggle("active", isActions);
-      actionsButton.setAttribute("aria-selected", String(isActions));
-    }
     var modeTabs = document.querySelector(".library-mode-tabs");
-    if (modeTabs) modeTabs.classList.toggle("is-actions", isActions);
+    if (!modeTabs) return;
+    var isActions = state.libraryMode === "pose" || state.libraryMode === "actions";
+    modeTabs.querySelectorAll("[data-library-mode]").forEach(function (button) {
+      var active = button.dataset.libraryMode === state.libraryMode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
     var actionCount = $("actionModeCount");
     if (actionCount) actionCount.textContent = String(state.actions.length);
+    state.references.forEach(function (reference) {
+      var count = $(reference.kind + "ModeCount");
+      if (count) count.textContent = String(state.references.filter(function (item) { return item.kind === reference.kind; }).length);
+    });
     var refreshButton = $("refreshActions");
-    if (refreshButton) refreshButton.hidden = !isActions;
+    if (refreshButton) refreshButton.hidden = state.libraryMode === "blocks";
+    modeTabs.classList.toggle("is-actions", isActions);
   }
   function actionMediaMarkup(action, extraClass) {
     var title = action.title || "动作图片";
@@ -213,23 +357,32 @@
     var depth = depthAvailable
       ? '<button class="image-preview-trigger action-media-image" type="button" data-action-media-image="depth" data-image-preview="' + esc(depthUrl) + '" data-image-title="' + esc(title + " · 深度图") + '" aria-label="放大查看「' + esc(title) + '」深度图" hidden><img src="' + esc(depthUrl) + '" alt="' + esc(title) + ' · 深度图" loading="lazy" /></button>'
       : '<div class="action-media-missing action-media-image" hidden><span>深度图缺失</span></div>';
+    var toggle = depthAvailable
+      ? '<button class="action-media-toggle" type="button" data-action-media-toggle data-action-media-current="color" aria-label="当前显示原图，点击切换到深度图" title="当前：原图；点击切换到深度图"></button>'
+      : "";
     return '<div class="action-media-shell ' + (extraClass || "") + '" data-action-media>' +
       '<div class="action-media-viewport">' + color + depth + '</div>' +
-      '<div class="action-media-switcher" role="group" aria-label="切换动作图片"><button class="action-media-tab is-active" type="button" data-action-media-view="color">原图</button><button class="action-media-tab" type="button" data-action-media-view="depth"' + (depthAvailable ? "" : " disabled") + '>深度图</button></div>' +
+      toggle +
       '</div>';
   }
   function setActionMediaView(container, kind) {
     if (!container || (kind !== "color" && kind !== "depth")) return;
     var target = container.querySelector('[data-action-media-image="' + kind + '"]');
-    var tab = container.querySelector('[data-action-media-view="' + kind + '"]');
-    if (!target || !tab || tab.disabled) return;
+    if (!target) return;
     container.querySelectorAll("[data-action-media-image]").forEach(function (image) {
       image.hidden = image.dataset.actionMediaImage !== kind;
       image.classList.toggle("is-active", image.dataset.actionMediaImage === kind);
     });
-    container.querySelectorAll("[data-action-media-view]").forEach(function (button) {
-      button.classList.toggle("is-active", button.dataset.actionMediaView === kind);
-    });
+    var toggle = container.querySelector("[data-action-media-toggle]");
+    if (toggle) {
+      var nextKind = kind === "color" ? "depth" : "color";
+      var currentLabel = kind === "color" ? "原图" : "深度图";
+      var nextLabel = nextKind === "color" ? "原图" : "深度图";
+      toggle.dataset.actionMediaCurrent = kind;
+      toggle.classList.toggle("is-depth", kind === "depth");
+      toggle.setAttribute("aria-label", "当前显示" + currentLabel + "，点击切换到" + nextLabel);
+      toggle.title = "当前：" + currentLabel + "；点击切换到" + nextLabel;
+    }
   }
   function actionPairLabel(action) {
     var labels = {
@@ -244,6 +397,175 @@
   function actionPairClass(action) {
     return action.pair_status === "paired" ? "is-paired" : "is-warning";
   }
+  function readTaskDraft() {
+    try {
+      var raw = window.localStorage.getItem("rh-workflow-desk-draft-v1");
+      var draft = raw ? JSON.parse(raw) : null;
+      if (!draft || draft.version !== 1 || !draft.workflow || !draft.workflow.data || typeof draft.workflow.data !== "object") return null;
+      return draft;
+    } catch (error) {
+      return null;
+    }
+  }
+  function filenameFromPath(value) {
+    var parts = String(value || "").split(/[\\/]/);
+    return parts[parts.length - 1] || "未设置";
+  }
+  function loadImageTargets(draft) {
+    if (!draft || !draft.workflow) return [];
+    var workflow = draft.workflow.data || {};
+    var values = draft.workflow.values || {};
+    var bypassed = values.bypassedNodes || values.bypassed_nodes || [];
+    var bypassedMap = {};
+    if (Array.isArray(bypassed)) bypassed.forEach(function (nodeId) { bypassedMap[String(nodeId)] = true; });
+    else Object.keys(bypassed).forEach(function (nodeId) { if (bypassed[nodeId]) bypassedMap[String(nodeId)] = true; });
+    var targets = [];
+    Object.keys(workflow).forEach(function (nodeId) {
+      if (nodeId === "__rh_meta__") return;
+      var node = workflow[nodeId];
+      if (!node || typeof node !== "object" || String(node.class_type || "").toLowerCase().indexOf("loadimage") === -1) return;
+      var inputs = node.inputs && typeof node.inputs === "object" ? node.inputs : {};
+      var title = node._meta && node._meta.title ? node._meta.title : node.class_type || "LoadImage";
+      Object.keys(inputs).forEach(function (field) {
+        if (String(field).toLowerCase() !== "image") return;
+        var inputId = nodeId + ":" + field;
+        var current = Object.prototype.hasOwnProperty.call(values.files || {}, inputId) ? values.files[inputId] : inputs[field];
+        targets.push({
+          inputId: inputId,
+          nodeId: String(nodeId),
+          field: String(field),
+          title: String(title),
+          classType: String(node.class_type || "LoadImage"),
+          current: String(current == null ? "" : current),
+          bypassed: Boolean(bypassedMap[String(nodeId)]),
+        });
+      });
+    });
+    return targets;
+  }
+  function renderDepthImportTargets(draft) {
+    var targets = loadImageTargets(draft);
+    var description = $("depthImportDescription");
+    var status = $("depthImportStatus");
+    var list = $("depthImportTargets");
+    var confirm = $("confirmDepthImport");
+    var assetLabel = workflowImportAsset && workflowImportAsset.label ? workflowImportAsset.label : "图片";
+    if (!draft) {
+      description.textContent = "还没有检测到任务提交页的当前工作流。请先导入工作流，再回来选择 LoadImage 节点。";
+      status.textContent = "任务提交页暂无可用工作流草稿";
+      list.innerHTML = '<div class="depth-import-empty"><strong>先导入一个 API 工作流</strong><span>导入后，这里会列出工作流中的全部 LoadImage 节点。</span></div>';
+      confirm.disabled = true;
+      return;
+    }
+    description.textContent = "选择任务提交页当前工作流中的 LoadImage 节点，" + assetLabel + "会作为该节点的本机输入。";
+    status.textContent = "当前工作流：" + (draft.workflow.name || "workflow_api.json") + " · 找到 " + targets.length + " 个 LoadImage 节点";
+    if (!targets.length) {
+      list.innerHTML = '<div class="depth-import-empty"><strong>没有找到 LoadImage 节点</strong><span>请确认当前工作流使用的是 API 格式，并包含 LoadImage 节点。</span></div>';
+      confirm.disabled = true;
+      return;
+    }
+    var available = targets.filter(function (target) { return !target.bypassed; });
+    var selected = available[0] || null;
+    list.innerHTML = targets.map(function (target) {
+      var disabled = target.bypassed;
+      var checked = selected && selected.inputId === target.inputId;
+      return '<label class="depth-import-target' + (disabled ? ' is-disabled' : '') + '">' +
+        '<input type="radio" name="depth-import-target" value="' + esc(target.inputId) + '"' + (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + ' />' +
+        '<span class="depth-import-target-copy"><strong>' + esc(target.title) + '</strong><span><code>' + esc(target.inputId) + '</code> · ' + esc(target.classType) + '</span><small>' + (disabled ? '已旁路，本次提交不会使用' : '当前：' + esc(filenameFromPath(target.current))) + '</small></span>' +
+        '</label>';
+    }).join("");
+    confirm.disabled = !selected;
+  }
+  function openDepthImport(action) {
+    if (!action || !action.depth_image_url || !action.depth_image_available) return showToast("这个动作没有可用的深度图", true);
+    depthImportActionId = action.id;
+    workflowImportAsset = {
+      endpoint: "/api/prompt/actions/" + encodeURIComponent(action.id) + "/depth-path",
+      label: "深度图",
+      title: action.title + " · 深度图",
+      toastLabel: "深度图",
+    };
+    renderDepthImportTargets(readTaskDraft());
+    $("depthImportTitle").textContent = "导入深度图";
+    $("depthImportKicker").textContent = "IMPORT DEPTH MAP";
+    window.RHMotion.openModal("depthImportModal", "closeDepthImport");
+  }
+  function openWorkflowImport(asset) {
+    if (!asset || !asset.endpoint) return showToast("这个积木没有可用的图片", true);
+    depthImportActionId = "";
+    workflowImportAsset = asset;
+    renderDepthImportTargets(readTaskDraft());
+    $("depthImportTitle").textContent = "导入工作流";
+    $("depthImportKicker").textContent = "IMPORT TO WORKFLOW";
+    window.RHMotion.openModal("depthImportModal", "closeDepthImport");
+  }
+  function openWorkflowImportFromTrigger(trigger) {
+    var kind = trigger.dataset.importWorkflowKind || "";
+    var id = trigger.dataset.importWorkflowId || "";
+    if (kind === "action") {
+      var action = state.actions.find(function (item) { return item.id === id; });
+      if (!action || !action.depth_image_available || !action.depth_image_url) return showToast("这个动作没有可用的深度图", true);
+      return openWorkflowImport({
+        endpoint: "/api/prompt/actions/" + encodeURIComponent(id) + "/depth-path",
+        label: "深度图",
+        title: action.title + " · 深度图",
+        toastLabel: "深度图",
+      });
+    }
+    if (kind === "reference") {
+      var reference = state.references.find(function (item) { return item.id === id; });
+      if (!reference || !reference.image_available || !reference.image_url) return showToast("这个参考资源没有可用的图片", true);
+      return openWorkflowImport({
+        endpoint: "/api/prompt/references/" + encodeURIComponent(id) + "/image-path",
+        label: "图片",
+        title: reference.title + " · 图片",
+        toastLabel: "图片",
+      });
+    }
+    showToast("这个积木没有可导入的图片", true);
+  }
+  function closeDepthImport() {
+    depthImportActionId = "";
+    workflowImportAsset = null;
+    $("depthImportTitle").textContent = "导入深度图";
+    $("depthImportKicker").textContent = "IMPORT DEPTH MAP";
+    window.RHMotion.closeModal("depthImportModal");
+  }
+  function confirmWorkflowImport() {
+    var selected = $("depthImportTargets").querySelector('input[name="depth-import-target"]:checked');
+    if (!workflowImportAsset || !selected) return showToast("请先选择一个 LoadImage 节点", true);
+    var button = $("confirmDepthImport");
+    var importedLabel = workflowImportAsset.label || "图片";
+    var toastLabel = workflowImportAsset.toastLabel || importedLabel;
+    button.disabled = true;
+    button.textContent = "导入中…";
+    jsonRequest(workflowImportAsset.endpoint).then(function (asset) {
+      var draft = readTaskDraft();
+      var target = loadImageTargets(draft).find(function (item) { return item.inputId === selected.value && !item.bypassed; });
+      if (!draft || !target) throw new Error("任务提交页的工作流已发生变化，请重新打开导入窗口");
+      var workflow = draft.workflow.data;
+      var node = workflow[target.nodeId];
+      if (!node || !node.inputs || typeof node.inputs !== "object") throw new Error("找不到选中的 LoadImage 节点");
+      node.inputs[target.field] = asset.path;
+      draft.workflow.values = draft.workflow.values || {};
+      draft.workflow.values.files = draft.workflow.values.files || {};
+      draft.workflow.values.files[target.inputId] = asset.path;
+      draft.workflow.savedAt = Date.now();
+      window.localStorage.setItem("rh-workflow-desk-draft-v1", JSON.stringify(draft));
+      closeDepthImport();
+      showToast(toastLabel + "已导入「" + target.title + "」，已保存到任务草稿");
+    }).catch(function (error) {
+      showToast(importedLabel + "导入失败：" + error.message, true);
+    }).finally(function () {
+      if ($("confirmDepthImport")) {
+        $("confirmDepthImport").disabled = false;
+        $("confirmDepthImport").textContent = "导入到选中节点";
+      }
+    });
+  }
+  function confirmDepthImport() {
+    confirmWorkflowImport();
+  }
   function renderActionLibrary() {
     var actions = state.actions.filter(blockMatches);
     if (!actions.length) {
@@ -253,19 +575,94 @@
       return;
     }
     $("libraryList").innerHTML = actions.map(function (action, index) {
+      var importWorkflowButton = action.depth_image_available
+        ? '<button class="import-workflow-button action-card-import" type="button" data-import-workflow data-import-workflow-kind="action" data-import-workflow-id="' + esc(action.id) + '" title="选择 LoadImage 节点并导入深度图">导入工作流</button>'
+        : "";
       return '<article class="action-library-card" draggable="true" data-action-id="' + esc(action.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
         '<div class="action-card-media">' + actionMediaMarkup(action, "") + '</div>' +
-        '<div class="action-card-body"><div class="library-block-top"><div class="library-block-title"><span class="block-type-dot action" aria-hidden="true"></span><span>' + esc(action.title) + '</span></div><span class="library-block-label">POSE</span></div>' +
-        '<div class="action-library-text">' + esc(action.text) + '</div>' +
+        '<div class="action-card-body"><div class="library-block-top action-card-top"><div class="library-block-title"><span class="block-type-dot action" aria-hidden="true"></span><span>' + esc(action.title) + '</span></div><span class="action-card-top-actions">' + importWorkflowButton + '<span class="library-block-label">POSE</span></span></div>' +
         '<div class="block-tags">' + (action.tags || []).map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' +
-        '<div class="library-block-footer"><button class="add-block-button" type="button" data-add-action="' + esc(action.id) + '">加入组装台&nbsp;→</button><span class="action-pair-status ' + actionPairClass(action) + '" title="' + esc(action.pair_message || "") + '">' + esc(actionPairLabel(action)) + '</span></div></div></article>';
+        '<div class="action-library-text">' + esc(action.text) + '</div>' +
+        '<div class="library-block-footer"><span class="action-card-buttons"><button class="add-block-button" type="button" data-add-action="' + esc(action.id) + '">加入组装台&nbsp;→</button></span><span class="action-pair-status ' + actionPairClass(action) + '" title="' + esc(action.pair_message || "") + '">' + esc(actionPairLabel(action)) + '</span></div></div></article>';
     }).join("");
     $("libraryCount").textContent = actions.length + " 个动作";
     $("libraryFooterHint").textContent = state.actionSource ? state.actionSource.paired_count + "/" + state.actionSource.action_count + " 对已配对" : "点击或拖动加入";
   }
+  function referenceMediaMarkup(reference, extraClass) {
+    var title = reference.title || "参考资源";
+    var imageUrl = reference.image_url || reference.imageUrl || "";
+    var audioUrl = reference.audio_url || reference.audioUrl || "";
+    if (imageUrl && (reference.image_available !== false || reference.imageUrl)) {
+      return '<div class="reference-media ' + (extraClass || "") + '"><button class="image-preview-trigger reference-media-image" type="button" data-image-preview="' + esc(imageUrl) + '" data-image-title="' + esc(title) + '" aria-label="放大查看「' + esc(title) + '」"><img src="' + esc(imageUrl) + '" alt="' + esc(title) + '" loading="lazy" /></button></div>';
+    }
+    if (audioUrl && (reference.audio_available !== false || reference.audioUrl)) {
+      return '<div class="reference-media reference-audio-media ' + (extraClass || "") + '"><button class="reference-media-icon reference-audio-toggle" type="button" data-audio-toggle aria-pressed="false" aria-label="播放「' + esc(title) + '」" title="播放/暂停音频">♫</button><audio class="reference-audio-player" preload="none" src="' + esc(audioUrl) + '"></audio></div>';
+    }
+    return '<div class="reference-media reference-media-missing ' + (extraClass || "") + '"><span>暂无媒体预览</span></div>';
+  }
+  function syncReferenceAudioButton(audio, isPlaying) {
+    var container = audio && audio.closest(".reference-audio-media");
+    var button = container && container.querySelector("[data-audio-toggle]");
+    if (!button) return;
+    button.classList.toggle("is-playing", Boolean(isPlaying));
+    button.setAttribute("aria-pressed", isPlaying ? "true" : "false");
+    button.setAttribute("aria-label", (isPlaying ? "暂停" : "播放") + "「" + (button.dataset.audioTitle || "音频") + "」");
+    button.title = isPlaying ? "暂停音频" : "播放音频";
+  }
+  function prepareReferenceAudio(audio, title) {
+    if (!audio) return;
+    var button = audio.closest(".reference-audio-media") && audio.closest(".reference-audio-media").querySelector("[data-audio-toggle]");
+    if (button) button.dataset.audioTitle = title || "音频";
+    if (audio.dataset.promptListeners) return;
+    audio.dataset.promptListeners = "1";
+    audio.addEventListener("play", function () { syncReferenceAudioButton(audio, true); });
+    audio.addEventListener("pause", function () { syncReferenceAudioButton(audio, false); });
+    audio.addEventListener("ended", function () { syncReferenceAudioButton(audio, false); });
+  }
+  function toggleReferenceAudio(button) {
+    var container = button && button.closest(".reference-audio-media");
+    var audio = container && container.querySelector(".reference-audio-player");
+    if (!audio) return;
+    prepareReferenceAudio(audio, button.dataset.audioTitle || "音频");
+    document.querySelectorAll(".reference-audio-player").forEach(function (other) {
+      if (other === audio) return;
+      other.pause();
+      other.currentTime = 0;
+    });
+    if (audio.paused) {
+      var promise = audio.play();
+      if (promise && promise.catch) promise.catch(function () { showToast("音频播放失败，请检查本机文件路径", true); });
+    } else {
+      audio.pause();
+    }
+  }
+  function renderReferenceLibrary() {
+    var references = currentLibraryEntries().filter(blockMatches);
+    if (!references.length) {
+      $("libraryList").innerHTML = '<div class="library-empty">没有匹配的' + esc(({ character: "人物", audio: "音频", background: "背景", clothes: "服装" }[state.libraryMode] || "参考资源")) + '。<br />试试其他标签或搜索提示词。</div>';
+      $("libraryCount").textContent = "0 个参考资源";
+      $("libraryFooterHint").textContent = "点击或拖动加入";
+      return;
+    }
+    $("libraryList").innerHTML = references.map(function (reference, index) {
+      var label = reference.kind_label || "参考资源";
+      var importWorkflowButton = reference.image_available
+        ? '<button class="import-workflow-button" type="button" data-import-workflow data-import-workflow-kind="reference" data-import-workflow-id="' + esc(reference.id) + '" title="选择 LoadImage 节点并导入图片">导入工作流</button>'
+        : "";
+      return '<article class="reference-library-card" draggable="true" data-reference-id="' + esc(reference.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
+        referenceMediaMarkup(reference, "reference-card-media") +
+        '<div class="reference-card-body"><div class="library-block-top reference-card-top"><div class="library-block-title"><span class="block-type-dot reference" aria-hidden="true"></span><span>' + esc(reference.title) + '</span></div><span class="action-card-top-actions">' + importWorkflowButton + '<span class="library-block-label">' + esc(label) + '</span></span></div>' +
+        '<div class="block-tags">' + (reference.tags || []).map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' +
+        '<div class="reference-library-text">' + esc(reference.text || "暂无提示词文本") + '</div>' +
+        '<div class="library-block-footer"><button class="add-block-button" type="button" data-add-reference="' + esc(reference.id) + '">加入组装台&nbsp;→</button><span class="reference-card-kind">' + esc(reference.media_type === "audio" ? "音频预览" : reference.image_available ? "图片预览" : "文本资源") + '</span></div></div></article>';
+    }).join("");
+    $("libraryCount").textContent = references.length + " 个参考资源";
+    $("libraryFooterHint").textContent = state.referenceSource ? "共 " + state.referenceSource.reference_count + " 个资源" : "点击或拖动加入";
+  }
   function renderLibrary() {
     renderLibraryMode();
-    if (state.libraryMode === "actions") return renderActionLibrary();
+    if (state.libraryMode === "pose" || state.libraryMode === "actions") return renderActionLibrary();
+    if (isReferenceMode()) return renderReferenceLibrary();
     var blocks = allBlocks().filter(blockMatches);
     var html = '<button class="free-block-card" type="button" draggable="true" data-add-text-block>' +
       '<span class="block-type-dot text" aria-hidden="true"></span>' +
@@ -278,8 +675,8 @@
         return '<article class="library-block" draggable="true" data-library-block-id="' + esc(block.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
           '<div class="library-block-top"><div class="library-block-title"><span class="block-type-dot" aria-hidden="true"></span><span>' + esc(block.title) + '</span></div>' +
           '<span class="library-block-label">JSON</span></div>' +
-          '<div class="library-block-text">' + esc(block.text) + '</div>' +
           '<div class="block-tags">' + (block.tags || []).map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' +
+          '<div class="library-block-text">' + esc(block.text) + '</div>' +
           '<div class="library-block-footer"><button class="add-block-button" type="button" data-add-block="' + esc(block.id) + '">加入组装台&nbsp;→</button>' +
           '<span class="library-block-manage-actions"><button class="edit-block-button" type="button" data-edit-block="' + esc(block.id) + '">编辑</button><button class="delete-block-button" type="button" data-delete-block="' + esc(block.id) + '">删除</button></span></div></article>';
       }).join("");
@@ -288,21 +685,37 @@
     $("libraryCount").textContent = blocks.length + " 个固定积木";
     $("libraryFooterHint").textContent = "点击或拖动加入";
   }
-  function stageBlockMarkup(item, index, total) {
+  function stageBlockMarkup(item, index) {
     var isText = item.kind === "text";
     var isAction = item.kind === "action";
+    var isReference = item.kind === "reference";
     var tags = item.tags || [];
+    var sourceAction = isAction && !item.missing ? state.actions.find(function (action) { return action.id === item.sourceId; }) : null;
+    var canImportWorkflow = Boolean(
+      (sourceAction && sourceAction.depth_image_available && sourceAction.depth_image_url) ||
+      (isReference && !item.missing && item.imageUrl)
+    );
     var actionThumb = isAction && !item.missing && (item.colorImageUrl || item.imageUrl || item.depthImageUrl)
       ? actionMediaMarkup({ title: item.title || "动作图片", color_image_url: item.colorImageUrl || item.imageUrl || "", depth_image_url: item.depthImageUrl || "", color_image_available: Boolean(item.colorImageUrl || item.imageUrl), depth_image_available: Boolean(item.depthImageUrl), pair_status: item.pairStatus || "" }, "stage-action-media")
       : "";
-    var typeLabel = isText ? "自由文本" : (isAction ? (item.missing ? "动作 · 已不可用" : "动作库") : (item.missing ? "固定积木 · 已删除" : "固定积木"));
-    return '<article class="stage-block ' + (isText ? "text" : (isAction ? "action" : "fixed")) + (item.missing ? " missing" : "") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + '">' +
+    var referenceThumb = isReference && !item.missing && (item.imageUrl || item.audioUrl)
+      ? referenceMediaMarkup({ title: item.title, imageUrl: item.imageUrl, audioUrl: item.audioUrl, image_available: Boolean(item.imageUrl), audio_available: Boolean(item.audioUrl), media_type: item.mediaType }, "stage-reference-media")
+      : "";
+    var referenceLabels = { character: "人物库", audio: "音频库", background: "背景库", clothes: "服装库" };
+    var typeLabel = isText ? "自由文本" : (isAction ? (item.missing ? "动作 · 已不可用" : "动作库") : (isReference ? (item.missing ? "参考资源 · 已不可用" : (referenceLabels[item.referenceKind] || "参考资源库")) : (item.missing ? "固定积木 · 已删除" : "固定积木")));
+    var importWorkflowButton = canImportWorkflow
+      ? '<button class="import-workflow-button stage-workflow-import" type="button" data-import-workflow data-import-workflow-kind="' + (isAction ? "action" : "reference") + '" data-import-workflow-id="' + esc(item.sourceId) + '" title="选择 LoadImage 节点并导入' + (isAction ? "深度图" : "图片") + '">导入工作流</button>'
+      : "";
+    var textMarkup = isText
+      ? '<textarea class="stage-text-editor" data-stage-text="' + index + '" placeholder="输入这一块要拼接的文本内容"></textarea>'
+      : '<button class="stage-block-copy stage-block-copy-trigger" type="button" data-edit-stage="' + index + '" title="点击编辑当前积木" aria-label="编辑当前积木：' + esc(item.title || "固定积木") + '">' + esc(item.text) + '</button>';
+    return '<article class="stage-block ' + (isText ? "text" : (isAction ? "action" : (isReference ? "reference" : "fixed"))) + (item.missing ? " missing" : "") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + '">' +
       '<div class="stage-block-grip" data-drag-handle title="拖动排序" aria-label="拖动排序">⋮⋮</div>' +
       '<div class="stage-block-main"><div class="stage-block-copy-content"><div class="stage-block-top"><span class="stage-index">' + String(index + 1).padStart(2, "0") + '</span><span class="stage-type-label">' + typeLabel + '</span></div>' +
       '<h3>' + esc(item.title || (isText ? "自由文本" : "固定积木")) + '</h3>' +
-      (isText ? '<textarea class="stage-text-editor" data-stage-text="' + index + '" placeholder="输入这一块要拼接的文本内容"></textarea>' : '<div class="stage-block-copy">' + esc(item.text) + '</div>') +
-      (tags.length ? '<div class="stage-block-tags">' + tags.map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' : "") +
-      '</div>' + actionThumb + '</div><div class="stage-block-actions"><button class="stage-action" type="button" data-move-stage="up" data-stage-index="' + index + '" aria-label="上移"' + (index === 0 ? ' disabled' : '') + '>↑</button><button class="stage-action" type="button" data-move-stage="down" data-stage-index="' + index + '" aria-label="下移"' + (index === total - 1 ? ' disabled' : '') + '>↓</button><button class="stage-action remove" type="button" data-remove-stage="' + index + '">移除</button></div></article>';
+      ((tags.length || importWorkflowButton) ? '<div class="stage-block-tags">' + importWorkflowButton + tags.map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' : "") +
+      textMarkup +
+      '</div>' + actionThumb + referenceThumb + '</div><div class="stage-block-actions"><button class="stage-action remove" type="button" data-remove-stage="' + index + '">移除</button></div></article>';
   }
   function updateStageDom() {
     var cards = $("stageList").querySelectorAll(".stage-block");
@@ -312,17 +725,7 @@
       card.dataset.stageIndex = String(index);
       var indexLabel = card.querySelector(".stage-index");
       if (indexLabel) indexLabel.textContent = String(index + 1).padStart(2, "0");
-      var upButton = card.querySelector('[data-move-stage="up"]');
-      var downButton = card.querySelector('[data-move-stage="down"]');
       var removeButton = card.querySelector("[data-remove-stage]");
-      if (upButton) {
-        upButton.dataset.stageIndex = String(index);
-        upButton.disabled = index === 0;
-      }
-      if (downButton) {
-        downButton.dataset.stageIndex = String(index);
-        downButton.disabled = index === state.stage.length - 1;
-      }
       if (removeButton) removeButton.dataset.removeStage = String(index);
       var editor = card.querySelector("[data-stage-text]");
       if (editor) editor.dataset.stageText = String(index);
@@ -337,7 +740,7 @@
       return;
     }
     list.innerHTML = state.stage.map(function (item, index) {
-      return stageBlockMarkup(item, index, state.stage.length);
+      return stageBlockMarkup(item, index);
     }).join("");
     state.stage.forEach(function (item, index) {
       if (item.kind !== "text") return;
@@ -401,13 +804,13 @@
       }).join("");
     }
     var saveButton = $("saveGroup");
-    if (saveButton) saveButton.textContent = state.activeGroupId ? "覆盖保存" : "保存组状态";
+    if (saveButton) saveButton.textContent = state.activeGroupId ? "覆盖保存" : "新建并保存";
     var groupCount = $("groupTabCount");
     if (groupCount) groupCount.textContent = String(state.groups.length);
   }
   function stageItemFromLibrary(id) {
     if (id === "__free_text__") return { instanceId: makeId("text"), kind: "text", title: "自由文本", text: "", tags: [] };
-    if (state.libraryMode === "actions") {
+    if (state.libraryMode === "pose" || state.libraryMode === "actions") {
       var action = state.actions.find(function (item) { return item.id === id; });
       if (!action) return null;
       return {
@@ -421,6 +824,23 @@
         colorImageUrl: action.color_image_url || action.image_url || "",
         depthImageUrl: action.depth_image_url || "",
         pairStatus: action.pair_status || "",
+        missing: false,
+      };
+    }
+    if (isReferenceMode()) {
+      var reference = state.references.find(function (item) { return item.id === id && item.kind === state.libraryMode; });
+      if (!reference) return null;
+      return {
+        instanceId: makeId("reference"),
+        kind: "reference",
+        sourceId: reference.id,
+        referenceKind: reference.kind,
+        title: reference.title,
+        text: reference.text || "",
+        tags: reference.tags || [],
+        imageUrl: reference.image_url || "",
+        audioUrl: reference.audio_url || "",
+        mediaType: reference.media_type || "",
         missing: false,
       };
     }
@@ -438,7 +858,7 @@
     var empty = list.querySelector(".stage-empty");
     if (empty) empty.remove();
     var card = document.createElement("article");
-    card.innerHTML = stageBlockMarkup(item, safeIndex, state.stage.length);
+    card.innerHTML = stageBlockMarkup(item, safeIndex);
     var newCard = card.firstElementChild;
     list.insertBefore(newCard, list.children[safeIndex] || null);
     if (item.kind === "text") {
@@ -459,21 +879,31 @@
   function addAction(id) {
     insertLibraryBlock(id, state.stage.length);
   }
+  function addReference(id) {
+    insertLibraryBlock(id, state.stage.length);
+  }
   function addTextBlock() {
     insertLibraryBlock("__free_text__", state.stage.length);
-  }
-  function moveStage(index, direction) {
-    var target = index + direction;
-    if (target < 0 || target >= state.stage.length) return;
-    var item = state.stage.splice(index, 1)[0];
-    state.stage.splice(target, 0, item);
-    saveState();
-    renderStage();
   }
   function removeStage(index) {
     state.stage.splice(index, 1);
     saveState();
     renderStage();
+  }
+  function editStage(index) {
+    var item = state.stage[index];
+    if (!item || item.kind === "text") return;
+    editingBlockId = "";
+    editingStageIndex = index;
+    $("customBlockTitle").textContent = "编辑组装台积木";
+    $("customBlockModal").querySelector(".section-kicker").textContent = "EDIT ASSEMBLY BLOCK";
+    $("customBlockDescription").textContent = "这里只修改当前组装台中的这一块，不会改变积木库里的原始内容。";
+    $("customBlockForm").querySelector('button[type="submit"]').textContent = "保存到组装台";
+    $("customBlockForm").reset();
+    $("customBlockName").value = item.title || "";
+    $("customBlockText").value = item.text || "";
+    $("customBlockTags").value = (item.tags || []).join("，");
+    window.RHMotion.openModal("customBlockModal", "customBlockName");
   }
   function parseTags(value) {
     return unique(String(value || "").split(/[,，、\s]+/));
@@ -493,6 +923,18 @@
     document.querySelectorAll(".stage-block, .stage-empty").forEach(function (card) {
       card.classList.remove("drop-target", "drop-before", "drop-after");
     });
+    clearLibraryDropTarget();
+  }
+  function clearLibraryDropTarget() {
+    document.querySelectorAll(".library-panel.is-stage-drop-target").forEach(function (panel) {
+      panel.classList.remove("is-stage-drop-target");
+    });
+  }
+  function libraryDropTargetAtPointer(x, y) {
+    var panel = document.querySelector(".library-panel");
+    if (!panel) return null;
+    var rect = panel.getBoundingClientRect();
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom ? panel : null;
   }
   function clearDropHighlights() {
     document.querySelectorAll(".stage-block, .stage-empty").forEach(function (card) {
@@ -508,7 +950,9 @@
     return positions;
   }
   function animateStageReflow(previousPositions) {
+    var draggedCard = findDraggedStageCard();
     document.querySelectorAll(".stage-block").forEach(function (card) {
+      if (card === draggedCard) return;
       var key = card.dataset.stageInstanceId || card.dataset.stageIndex;
       var previousTop = previousPositions[key];
       if (previousTop == null) return;
@@ -523,6 +967,15 @@
         state.dragPreviewFrames = state.dragPreviewFrames.filter(function (item) { return item !== frame; });
       });
       state.dragPreviewFrames.push(frame);
+    });
+  }
+  function playStageDropAnimation(card) {
+    if (!card || !card.isConnected) return;
+    card.classList.remove("drop-settling");
+    window.requestAnimationFrame(function () {
+      if (!card.isConnected) return;
+      card.classList.add("drop-settling");
+      window.setTimeout(function () { card.classList.remove("drop-settling"); }, 380);
     });
   }
   function setLibraryDropPreview(card, event) {
@@ -610,12 +1063,25 @@
     var drag = state.pointerDrag;
     if (!drag) return;
     var sourceIndex = state.draggedIndex;
+    drag.overLibrary = Boolean(libraryDropTargetAtPointer(drag.x, drag.y));
     if (drag.card.hasPointerCapture && drag.card.hasPointerCapture(drag.pointerId)) drag.card.releasePointerCapture(drag.pointerId);
     if (typeof sourceIndex !== "number" || sourceIndex < 0 || sourceIndex >= state.stage.length || !drag.card.isConnected) {
       clearDropIndicators();
       state.pointerDrag = null;
       state.draggedIndex = null;
       state.dragPreviewIndex = null;
+      return;
+    }
+    if (commit && drag.overLibrary) {
+      var removed = state.stage.splice(sourceIndex, 1)[0];
+      clearDropIndicators();
+      drag.card.classList.remove("dragging");
+      state.pointerDrag = null;
+      state.draggedIndex = null;
+      state.dragPreviewIndex = null;
+      saveState();
+      renderStage();
+      showToast(removed ? "已从工作台移除「" + (removed.title || "当前积木") + "」" : "已从工作台移除当前积木");
       return;
     }
     var insertIndex = state.dragPreviewIndex;
@@ -630,6 +1096,7 @@
       drag.card.remove();
       $("stageList").insertBefore(drag.card, $("stageList").querySelectorAll(".stage-block")[insertIndex] || null);
       updateStageDom();
+      playStageDropAnimation(drag.card);
       saveState();
       renderOutput();
     } else {
@@ -702,8 +1169,10 @@
   }
   function openCustomModal(block) {
     editingBlockId = block ? block.id : "";
+    editingStageIndex = null;
     $("customBlockTitle").textContent = editingBlockId ? "编辑固定积木" : "添加固定积木";
     $("customBlockModal").querySelector(".section-kicker").textContent = editingBlockId ? "EDIT BLOCK" : "CUSTOM BLOCK";
+    $("customBlockDescription").textContent = "把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。";
     $("customBlockForm").querySelector('button[type="submit"]').textContent = editingBlockId ? "保存修改" : "保存积木";
     $("customBlockForm").reset();
     if (block) {
@@ -716,8 +1185,10 @@
   function closeCustomModal() {
     window.RHMotion.closeModal("customBlockModal");
     editingBlockId = "";
+    editingStageIndex = null;
     $("customBlockTitle").textContent = "添加固定积木";
     $("customBlockModal").querySelector(".section-kicker").textContent = "CUSTOM BLOCK";
+    $("customBlockDescription").textContent = "把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。";
     $("customBlockForm").querySelector('button[type="submit"]').textContent = "保存积木";
     $("customBlockForm").reset();
   }
@@ -783,6 +1254,7 @@
   }
   function bindEvents() {
     updateThemeToggle();
+    initPromptGridSplitter();
     $("themeToggle").addEventListener("click", function () {
       var nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
       document.documentElement.dataset.theme = nextTheme;
@@ -798,20 +1270,23 @@
       renderGroups();
       renderAssemblyView();
     });
-    $("libraryModeBlocks").addEventListener("click", function () {
-      if (state.libraryMode === "blocks") return;
-      state.libraryMode = "blocks";
+    document.querySelector(".library-mode-tabs").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-library-mode]");
+      if (!button) return;
+      var nextMode = button.dataset.libraryMode;
+      if (nextMode === state.libraryMode) return;
+      state.libraryMode = nextMode;
       state.filter = "全部";
       renderFilters();
       renderLibrary();
+      animateLibraryModeSwitch();
+      if (nextMode === "pose" || nextMode === "actions") return refreshActions();
+      if (isReferenceMode()) return refreshReferences();
     });
-    $("libraryModeActions").addEventListener("click", function () {
-      if (state.libraryMode === "actions") return refreshActions();
-      state.libraryMode = "actions";
-      state.filter = "全部";
-      refreshActions();
+    $("refreshActions").addEventListener("click", function () {
+      if (state.libraryMode === "pose" || state.libraryMode === "actions") return refreshActions();
+      if (isReferenceMode()) return refreshReferences();
     });
-    $("refreshActions").addEventListener("click", refreshActions);
     $("blockSearch").addEventListener("input", function () { state.search = this.value.trim(); renderLibrary(); });
     $("tagFilters").addEventListener("click", function (event) {
       var button = event.target.closest("[data-filter-tag]");
@@ -827,12 +1302,26 @@
       if (deleteButton) deleteGroup(deleteButton.dataset.deleteGroup);
     });
     $("libraryList").addEventListener("click", function (event) {
-      var mediaTab = event.target.closest("[data-action-media-view]");
-      if (mediaTab) return setActionMediaView(mediaTab.closest("[data-action-media]"), mediaTab.dataset.actionMediaView);
+      var mediaToggle = event.target.closest("[data-action-media-toggle]");
+      if (mediaToggle) {
+        var mediaContainer = mediaToggle.closest("[data-action-media]");
+        return setActionMediaView(mediaContainer, mediaToggle.dataset.actionMediaCurrent === "depth" ? "color" : "depth");
+      }
+      var audioButton = event.target.closest("[data-audio-toggle]");
+      if (audioButton) return toggleReferenceAudio(audioButton);
       var previewButton = event.target.closest("[data-image-preview]");
       if (previewButton) return openImagePreview(previewButton.dataset.imagePreview, previewButton.dataset.imageTitle);
+      var workflowImportButton = event.target.closest("[data-import-workflow]");
+      if (workflowImportButton) return openWorkflowImportFromTrigger(workflowImportButton);
+      var importButton = event.target.closest("[data-import-depth]");
+      if (importButton) {
+        var action = state.actions.find(function (item) { return item.id === importButton.dataset.importDepth; });
+        return openDepthImport(action);
+      }
       var actionButton = event.target.closest("[data-add-action]");
       if (actionButton) return addAction(actionButton.dataset.addAction);
+      var referenceButton = event.target.closest("[data-add-reference]");
+      if (referenceButton) return addReference(referenceButton.dataset.addReference);
       var addButton = event.target.closest("[data-add-block]");
       if (addButton) return addFixedBlock(addButton.dataset.addBlock);
       if (event.target.closest("[data-add-text-block]")) return addTextBlock();
@@ -853,12 +1342,12 @@
       });
     });
     $("libraryList").addEventListener("dragstart", function (event) {
-      var card = event.target.closest(".library-block, .action-library-card");
+      var card = event.target.closest(".library-block, .action-library-card, .reference-library-card");
       var freeCard = event.target.closest("[data-add-text-block]");
       if (!card && !freeCard) return;
       if (card && event.target.closest("button")) return event.preventDefault();
       state.draggedIndex = null;
-      state.draggedLibraryId = card ? (card.dataset.libraryBlockId || card.dataset.actionId) : "__free_text__";
+      state.draggedLibraryId = card ? (card.dataset.libraryBlockId || card.dataset.actionId || card.dataset.referenceId) : "__free_text__";
       state.dragPreviewIndex = null;
       clearDropIndicators();
       (card || freeCard).classList.add("dragging");
@@ -868,7 +1357,7 @@
     $("libraryList").addEventListener("dragend", function () {
       state.draggedLibraryId = "";
       clearDropIndicators();
-      document.querySelectorAll(".library-block, .action-library-card, .free-block-card").forEach(function (card) { card.classList.remove("dragging"); });
+      document.querySelectorAll(".library-block, .action-library-card, .reference-library-card, .free-block-card").forEach(function (card) { card.classList.remove("dragging"); });
     });
     $("stageList").addEventListener("input", function (event) {
       var editor = event.target.closest("[data-stage-text]");
@@ -880,12 +1369,24 @@
       renderOutput();
     });
     $("stageList").addEventListener("click", function (event) {
-      var mediaTab = event.target.closest("[data-action-media-view]");
-      if (mediaTab) return setActionMediaView(mediaTab.closest("[data-action-media]"), mediaTab.dataset.actionMediaView);
+      var mediaToggle = event.target.closest("[data-action-media-toggle]");
+      if (mediaToggle) {
+        var mediaContainer = mediaToggle.closest("[data-action-media]");
+        return setActionMediaView(mediaContainer, mediaToggle.dataset.actionMediaCurrent === "depth" ? "color" : "depth");
+      }
+      var audioButton = event.target.closest("[data-audio-toggle]");
+      if (audioButton) return toggleReferenceAudio(audioButton);
       var previewButton = event.target.closest("[data-image-preview]");
       if (previewButton) return openImagePreview(previewButton.dataset.imagePreview, previewButton.dataset.imageTitle);
-      var moveButton = event.target.closest("[data-move-stage]");
-      if (moveButton) return moveStage(Number(moveButton.dataset.stageIndex), moveButton.dataset.moveStage === "up" ? -1 : 1);
+      var workflowImportButton = event.target.closest("[data-import-workflow]");
+      if (workflowImportButton) return openWorkflowImportFromTrigger(workflowImportButton);
+      var importButton = event.target.closest("[data-import-depth]");
+      if (importButton) {
+        var action = state.actions.find(function (item) { return item.id === importButton.dataset.importDepth; });
+        return openDepthImport(action);
+      }
+      var editButton = event.target.closest("[data-edit-stage]");
+      if (editButton) return editStage(Number(editButton.dataset.editStage));
       var removeButton = event.target.closest("[data-remove-stage]");
       if (removeButton) removeStage(Number(removeButton.dataset.removeStage));
     });
@@ -896,7 +1397,7 @@
       state.draggedIndex = Number(card.dataset.stageIndex);
       state.draggedLibraryId = "";
       clearDropIndicators();
-      state.pointerDrag = { card: card, pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      state.pointerDrag = { card: card, pointerId: event.pointerId, x: event.clientX, y: event.clientY, overLibrary: false };
       card.classList.add("dragging");
       if (card.setPointerCapture) card.setPointerCapture(event.pointerId);
       event.preventDefault();
@@ -907,6 +1408,17 @@
       drag.x = event.clientX;
       drag.y = event.clientY;
       event.preventDefault();
+      var libraryTarget = libraryDropTargetAtPointer(event.clientX, event.clientY);
+      if (libraryTarget) {
+        if (!drag.overLibrary) clearDropIndicators();
+        drag.overLibrary = true;
+        libraryTarget.classList.add("is-stage-drop-target");
+        return;
+      }
+      if (drag.overLibrary) {
+        drag.overLibrary = false;
+        clearLibraryDropTarget();
+      }
       var card = stageCardAtPointer(event, drag.card);
       if (card && card !== drag.card) setStageDropPreview(card, event);
     });
@@ -986,18 +1498,41 @@
     $("downloadPrompt").addEventListener("click", downloadPrompt);
     $("addTextStage").addEventListener("click", addTextBlock);
     $("newGroup").addEventListener("click", startNewGroup);
-    $("saveGroup").addEventListener("click", saveGroup);
+    $("groupForm").addEventListener("submit", function (event) {
+      event.preventDefault();
+      saveGroup();
+    });
     $("openCustomBlock").addEventListener("click", openCustomModal);
     $("closeCustomBlock").addEventListener("click", closeCustomModal);
     $("cancelCustomBlock").addEventListener("click", closeCustomModal);
     $("customBlockModal").addEventListener("click", function (event) { if (event.target === $("customBlockModal")) closeCustomModal(); });
     $("closeImagePreview").addEventListener("click", closeImagePreview);
     $("imagePreviewModal").addEventListener("click", function (event) { if (event.target === $("imagePreviewModal")) closeImagePreview(); });
+    $("closeDepthImport").addEventListener("click", closeDepthImport);
+    $("cancelDepthImport").addEventListener("click", closeDepthImport);
+    $("confirmDepthImport").addEventListener("click", confirmDepthImport);
+    $("depthImportTargets").addEventListener("change", function (event) {
+      if (event.target.name === "depth-import-target") $("confirmDepthImport").disabled = false;
+    });
+    $("depthImportModal").addEventListener("click", function (event) { if (event.target === $("depthImportModal")) closeDepthImport(); });
     $("customBlockForm").addEventListener("submit", function (event) {
       event.preventDefault();
       var name = $("customBlockName").value.trim();
       var text = $("customBlockText").value.trim();
       if (!name || !text) return showToast("请填写积木名称和固定文本", true);
+      var stageIndex = editingStageIndex;
+      if (stageIndex != null) {
+        var stageItem = state.stage[stageIndex];
+        if (!stageItem) return closeCustomModal();
+        stageItem.title = name;
+        stageItem.text = text;
+        stageItem.tags = parseTags($("customBlockTags").value);
+        closeCustomModal();
+        saveState();
+        renderStage();
+        showToast("组装台积木已更新，积木库未改变");
+        return;
+      }
       var blockId = editingBlockId;
       var submitButton = event.target.querySelector('button[type="submit"]');
       submitButton.disabled = true;
@@ -1032,6 +1567,7 @@
       if (event.key !== "Escape") return;
       closeCustomModal();
       closeImagePreview();
+      closeDepthImport();
     });
   }
 

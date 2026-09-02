@@ -12,7 +12,8 @@ from typing import Any
 from urllib.parse import quote
 
 
-VERSION = 2
+VERSION = 3
+DEFAULT_POSE_RESOURCES_PATH = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.md")
 DEFAULT_RESOURCES_PATH = Path("/Users/apple/Documents/VideoMake/ref/Resources.md")
 
 
@@ -63,34 +64,55 @@ def _normalise_action(value: Any) -> dict[str, Any] | None:
 
 
 class ActionStore:
-    """Build and serve a local action library from the pose section of Resources.md."""
+    """Build and serve a local action library from a configured pose Markdown file."""
 
     def __init__(self, data_root: str | Path, source_path: str | Path | None = None) -> None:
         self.root = Path(data_root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.path = self.root / "prompt-actions.json"
+        self.prompt_root = self.root / "prompt"
+        self.prompt_root.mkdir(parents=True, exist_ok=True)
+        self.path = self.prompt_root / "actions.json"
         self.source_path = (
             Path(source_path).expanduser().resolve()
             if source_path is not None
             else self._resolve_source_path()
         )
         self._lock = threading.RLock()
+        self._migrate_legacy_cache()
         self._actions: list[dict[str, Any]] = []
         self.refresh()
+
+    def _migrate_legacy_cache(self) -> None:
+        """Move the legacy flat cache into the prompt data directory once."""
+        legacy_path = self.root / "prompt-actions.json"
+        if not self.path.exists() and legacy_path.is_file():
+            legacy_path.replace(self.path)
 
     @staticmethod
     def _resolve_source_path() -> Path:
         configured = os.environ.get("RH_PROMPT_RESOURCES_PATH", "").strip()
         candidates = [
             Path(configured).expanduser() if configured else None,
+            DEFAULT_POSE_RESOURCES_PATH,
             DEFAULT_RESOURCES_PATH,
+            Path.home() / "Documents" / "VideoMake" / "ref" / "pose" / "pose.md",
             Path.home() / "Documents" / "VideoMake" / "ref" / "Resources.md",
+            Path(__file__).resolve().parents[2] / "VideoMake" / "ref" / "pose" / "pose.md",
             Path(__file__).resolve().parents[2] / "VideoMake" / "ref" / "Resources.md",
         ]
         for candidate in candidates:
             if candidate and candidate.is_file():
                 return candidate.resolve()
         return (Path(configured).expanduser() if configured else DEFAULT_RESOURCES_PATH).resolve()
+
+    def set_source_path(self, value: str | Path) -> Path:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"动作库文件不存在：{path}")
+        with self._lock:
+            self.source_path = path
+            self.refresh(force=True)
+        return path
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -125,7 +147,9 @@ class ActionStore:
             title = current["title"]
             color_image_path = current["color_image_path"]
             depth_image_path = current["depth_image_path"]
-            image_path = color_image_path or depth_image_path
+            # Keep the legacy alias color-only. A depth-only placeholder must
+            # never be served or counted as an original image.
+            image_path = color_image_path
             tags = ["pose"]
             if current_category:
                 tags.insert(0, current_category)
@@ -223,15 +247,24 @@ class ActionStore:
                 return None
             if kind not in {"color", "depth"}:
                 return None
-            raw_path = action.get("color_image_path") or action.get("image_path") if kind == "color" else action.get("depth_image_path")
+            if kind == "color":
+                raw_path = action.get("color_image_path")
+                if raw_path is None:  # legacy cache without the new field
+                    raw_path = action.get("image_path")
+            else:
+                raw_path = action.get("depth_image_path")
             relative = Path(str(raw_path or ""))
-            source_root = self.source_path.parent.resolve()
             if not relative.parts or relative.is_absolute() or ".." in relative.parts:
                 return None
-            path = (source_root / relative).resolve()
-            if source_root not in path.parents or not path.is_file():
-                return None
-            return path
+            source_roots = [self.source_path.parent.resolve()]
+            # pose/pose.md stores links as pose/color/... relative to ref/.
+            if source_roots[0].name == "pose":
+                source_roots.append(source_roots[0].parent)
+            for source_root in source_roots:
+                path = (source_root / relative).resolve()
+                if source_root in path.parents and path.is_file():
+                    return path
+            return None
 
     def _pair_status(self, action: dict[str, Any]) -> tuple[str, str, bool, bool]:
         color_path = self.image_path(action["id"], "color")

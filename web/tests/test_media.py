@@ -65,9 +65,9 @@ def test_output_supports_http_ranges_for_video_seek(tmp_path, monkeypatch):
 
 
 def test_action_api_exposes_both_paired_assets(tmp_path, monkeypatch):
-    resources = Path("/Users/apple/Documents/VideoMake/ref/Resources.md")
+    resources = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.md")
     if not resources.is_file():
-        pytest.skip("本机未安装 VideoMake 的 Resources.md")
+        pytest.skip("本机未安装 VideoMake 的 pose.md")
     _configure_web_paths(tmp_path, monkeypatch)
 
     server = web_server.AppServer(("127.0.0.1", 0))
@@ -79,11 +79,18 @@ def test_action_api_exposes_both_paired_assets(tmp_path, monkeypatch):
         response = connection.getresponse()
         payload = json.loads(response.read())
         assert response.status == 200
-        assert payload["source_status"]["issue_count"] == 0
+        assert payload["source_status"]["issue_count"] == 1
+        assert payload["source_status"]["paired_count"] == payload["source_status"]["action_count"] - 1
         action = payload["actions"][0]
         assert action["pair_status"] == "paired"
         assert action["color_image_url"].endswith("/image")
         assert action["depth_image_url"].endswith("/depth")
+
+        connection.request("GET", action["depth_image_url"].replace("/depth", "/depth-path"))
+        path_response = connection.getresponse()
+        path_payload = json.loads(path_response.read())
+        assert path_response.status == 200
+        assert Path(path_payload["path"]).is_file()
 
         connection.request("GET", action["depth_image_url"])
         depth_response = connection.getresponse()
