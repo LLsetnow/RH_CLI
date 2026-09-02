@@ -66,14 +66,53 @@ PROMPT_FIELDS = {"text", "prompt", "positive", "negative", "caption", "instructi
 PROMPT_CLASS_HINTS = ("textencode", "cliptext", "prompt", "t5", "llama")
 FILE_CLASS_HINTS = ("loadimage", "loadaudio", "loadvideo", "loadfile", "load3d", "vhs_load")
 RANDOM_NOISE_MODES = {"fixed", "randomize"}
+WORKFLOW_INPUT_KINDS = {"file", "prompt", "text", "number", "select", "boolean", "resolution", "random_noise"}
+WORKFLOW_VIRTUAL_FIELDS = {"resolution": "__resolution__", "random_noise": "__random_noise__"}
+RESOLUTION_ASPECT_RATIOS = (
+    "1:1 (Square)",
+    "2:3 (Portrait Photo)",
+    "3:2 (Photo)",
+    "3:4 (Portrait Standard)",
+    "4:3 (Standard)",
+    "9:16 (Portrait Widescreen)",
+    "16:9 (Widescreen)",
+    "21:9 (Ultrawide)",
+)
 DEFAULT_PERSONAL_CAPACITY = 3
 MIN_PERSONAL_CAPACITY = 1
 MAX_PERSONAL_CAPACITY = 3
 WORKFLOW_META_KEY = "__rh_meta__"
+GENERAL_ACCOUNT_ID = "__general__"
+INSTANCE_TYPES = {"default", "plus", "ultra"}
+TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def normalize_instance_type(value: Any) -> str:
+    normalized = str(value or "default").strip().lower()
+    if normalized not in INSTANCE_TYPES:
+        raise RhCliError("INVALID_INSTANCE_TYPE", "提交机型只能是 default、plus 或 ultra。")
+    return normalized
+
+
+def task_elapsed_ms(task: dict[str, Any], current_time: int | None = None) -> int | None:
+    """Return the persisted task lifetime, including local queue waiting time."""
+    created_at = int(task.get("created_at") or 0)
+    if not created_at:
+        return None
+    completed_at = int(task.get("completed_at") or 0)
+    if completed_at:
+        end_at = completed_at
+    elif task.get("status") in TERMINAL_TASK_STATUSES:
+        end_at = int(task.get("updated_at") or 0)
+    else:
+        end_at = int(current_time if current_time is not None else now_ms())
+    if not end_at:
+        return None
+    return max(0, end_at - created_at)
 
 
 def default_local_output_dir() -> Path:
@@ -84,16 +123,17 @@ def native_file_picker_available() -> bool:
     return platform.system() == "Darwin" and shutil.which("osascript") is not None
 
 
-def pick_local_file_on_macos() -> Path:
+def pick_local_file_on_macos(prompt: str = "选择工作流输入文件") -> Path:
     """Use the macOS native picker so the browser never needs the real path."""
     if platform.system() != "Darwin":
         raise RhCliError("LOCAL_PICKER_UNAVAILABLE", "本机路径选择目前仅支持 macOS；请手动填写绝对路径。")
     if shutil.which("osascript") is None:
         raise RhCliError("LOCAL_PICKER_UNAVAILABLE", "本机没有可用的 macOS 文件选择器，请手动填写绝对路径。")
 
-    script = r'''
+    prompt_literal = str(prompt or "选择文件").replace("\\", "\\\\").replace('"', '\\"')
+    script = f'''
 try
-    set pickedFile to choose file with prompt "选择工作流输入文件"
+    set pickedFile to choose file with prompt "{prompt_literal}"
     return POSIX path of pickedFile
 on error number -128
     return ""
@@ -160,6 +200,29 @@ def safe_name(value: str, fallback: str = "file") -> str:
     name = Path(str(value or "")).name.strip() or fallback
     name = re.sub(r"[^A-Za-z0-9._()\-\u4e00-\u9fff ]+", "_", name)
     return name[:160] or fallback
+
+
+def canonical_workflow_name(value: str, fallback: str = "workflow.json") -> str:
+    """Keep user-facing workflow names stable across repeated exports/submits."""
+    name = safe_name(value, fallback)
+    path = Path(name)
+    suffix = path.suffix
+    stem = path.stem if suffix else path.name
+    # Older versions leaked one or more internal workflow IDs into task names.
+    stem = re.sub(r"^(?:(?:wf_)?[0-9a-f]{12}_)+", "", stem, flags=re.IGNORECASE)
+    # Exported files may be imported and exported again; keep one clean source name.
+    stem = re.sub(r"(?:_modified_api)+$", "", stem, flags=re.IGNORECASE)
+    if not stem:
+        fallback_path = Path(fallback)
+        stem = fallback_path.stem or "workflow"
+        suffix = fallback_path.suffix
+    return safe_name(f"{stem}{suffix}", fallback)
+
+
+def workflow_name_from_path(path: Path, workflow_id: str) -> str:
+    prefix = f"{workflow_id}_"
+    name = path.name[len(prefix) :] if path.name.startswith(prefix) else path.name
+    return canonical_workflow_name(name)
 
 
 def is_link(value: Any) -> bool:
@@ -243,12 +306,17 @@ def workflow_nodes(workflow: dict[str, Any]) -> dict[str, Any]:
     return {node_id: node for node_id, node in workflow.items() if node_id != WORKFLOW_META_KEY}
 
 
-def metadata_bypassed_inputs(workflow: dict[str, Any]) -> list[str]:
-    """Read Web-app input bypass state from local workflow metadata."""
+def metadata_bypassed_nodes(workflow: dict[str, Any]) -> list[str]:
+    """Read Web-app node bypass state from local workflow metadata."""
     metadata = workflow.get(WORKFLOW_META_KEY)
     if not isinstance(metadata, dict):
         return []
-    raw = metadata.get("bypassedInputs")
+    raw = metadata.get("bypassedNodes")
+    if raw is None:
+        raw = metadata.get("bypassed_nodes")
+    if raw is None:
+        # Accept the pre-node-bypass metadata written by older Web builds.
+        raw = metadata.get("bypassedInputs")
     if raw is None:
         raw = metadata.get("bypassed_inputs")
     if isinstance(raw, dict):
@@ -282,12 +350,28 @@ def random_noise_spec(node_id: str, node: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def resolution_spec(node_id: str, node: dict[str, Any]) -> dict[str, Any] | None:
+    if str(node.get("class_type", "")).lower() != "resolutionselector":
+        return None
+    inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+    return {
+        "id": str(node_id),
+        "node_id": str(node_id),
+        "title": str(node.get("_meta", {}).get("title") or "ResolutionSelector"),
+        "class_type": str(node.get("class_type") or "ResolutionSelector"),
+        "aspect_ratio": str(inputs.get("aspect_ratio") or RESOLUTION_ASPECT_RATIOS[0]),
+        "megapixels": display_value(inputs.get("megapixels", 0.4)),
+        "aspect_ratio_options": list(RESOLUTION_ASPECT_RATIOS),
+    }
+
+
 def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
     nodes = workflow_nodes(workflow)
     _validate_api_workflow(nodes)
     files: list[dict[str, Any]] = []
     prompts: list[dict[str, Any]] = []
     random_noise: list[dict[str, Any]] = []
+    resolutions: list[dict[str, Any]] = []
     for node_id, node in nodes.items():
         class_type = str(node.get("class_type", ""))
         lower_class = class_type.lower()
@@ -296,6 +380,9 @@ def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
         noise = random_noise_spec(str(node_id), node)
         if noise:
             random_noise.append(noise)
+        resolution = resolution_spec(str(node_id), node)
+        if resolution:
+            resolutions.append(resolution)
         for field, value in inputs.items():
             lower_field = str(field).lower()
             if is_link(value):
@@ -336,17 +423,259 @@ def inspect_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
         "prompt_count": len(prompts),
         "random_noise_inputs": random_noise,
         "random_noise_count": len(random_noise),
-        "bypassed_inputs": metadata_bypassed_inputs(workflow),
+        "resolution_inputs": resolutions,
+        "resolution_count": len(resolutions),
+        "bypassed_nodes": metadata_bypassed_nodes(workflow),
         "remote_workflow_id": remote_workflow_id(workflow),
     }
 
 
-def normalize_bypassed_inputs(
+def workflow_input_catalog(workflow: dict[str, Any], analysis: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Return editable scalar inputs for a saved workflow configuration UI."""
+    current = analysis or inspect_workflow(workflow)
+    automatic: dict[str, dict[str, Any]] = {}
+    for kind, key in (("file", "file_inputs"), ("prompt", "prompt_inputs")):
+        for item in current.get(key) or []:
+            automatic[str(item.get("id") or "")] = {"kind": kind, "required": bool(item.get("required"))}
+    for item in current.get("resolution_inputs") or []:
+        node_id = str(item.get("node_id") or item.get("id") or "")
+        if node_id:
+            automatic[f"{node_id}:{WORKFLOW_VIRTUAL_FIELDS['resolution']}"] = {"kind": "resolution", "required": False}
+    for item in current.get("random_noise_inputs") or []:
+        node_id = str(item.get("node_id") or item.get("id") or "")
+        if node_id:
+            automatic[f"{node_id}:{WORKFLOW_VIRTUAL_FIELDS['random_noise']}"] = {"kind": "random_noise", "required": False}
+
+    catalog: list[dict[str, Any]] = []
+    for node_id, node in workflow_nodes(workflow).items():
+        if not isinstance(node, dict) or not isinstance(node.get("inputs"), dict):
+            continue
+        title = str(node.get("_meta", {}).get("title") or node.get("class_type") or node_id)
+        class_type = str(node.get("class_type") or "")
+        for kind, virtual_field in WORKFLOW_VIRTUAL_FIELDS.items():
+            if kind == "resolution" and class_type.lower() == "resolutionselector":
+                input_id = f"{node_id}:{virtual_field}"
+                catalog.append({
+                    "id": input_id, "node_id": str(node_id), "field": "", "title": title,
+                    "class_type": class_type, "label": title, "kind": kind,
+                    "required": automatic.get(input_id, {}).get("required", False), "virtual": True,
+                })
+            if kind == "random_noise" and class_type.lower() == "randomnoise":
+                input_id = f"{node_id}:{virtual_field}"
+                catalog.append({
+                    "id": input_id, "node_id": str(node_id), "field": "", "title": title,
+                    "class_type": class_type, "label": title, "kind": kind,
+                    "required": automatic.get(input_id, {}).get("required", False), "virtual": True,
+                })
+        for field, value in node["inputs"].items():
+            if is_link(value) or isinstance(value, (list, dict, tuple)):
+                continue
+            input_id = f"{node_id}:{field}"
+            automatic_item = automatic.get(input_id, {})
+            catalog.append({
+                "id": input_id, "node_id": str(node_id), "field": str(field), "title": title,
+                "class_type": class_type, "label": f"{title} · {field}",
+                "kind": automatic_item.get("kind", "text"),
+                "required": automatic_item.get("required", False), "default": display_value(value),
+                "default_value": value,
+            })
+    return catalog
+
+
+def normalize_workflow_input_config(
+    workflow: dict[str, Any], config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate the optional per-library-workflow input configuration."""
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", "工作流输入配置必须是对象。")
+    mode = str(config.get("mode") or "auto").strip().lower()
+    if mode not in {"auto", "manual"}:
+        raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", "工作流输入配置模式只能是 auto 或 manual。")
+    if mode == "auto":
+        return {"mode": "auto", "items": []}
+    raw_items = config.get("items")
+    if not isinstance(raw_items, list):
+        raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", "手动输入配置必须是 items 列表。")
+    nodes = workflow_nodes(workflow)
+    catalog = {str(item["id"]): item for item in workflow_input_catalog(workflow)}
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for position, raw in enumerate(raw_items):
+        if not isinstance(raw, dict):
+            raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", f"第 {position + 1} 个输入配置不是对象。")
+        node_id = str(raw.get("node_id") or "").strip()
+        field = str(raw.get("field") or "").strip()
+        input_id = str(raw.get("id") or "").strip()
+        if not input_id and node_id:
+            input_id = f"{node_id}:{field or WORKFLOW_VIRTUAL_FIELDS.get(str(raw.get('kind') or '').strip(), '')}"
+        entry = catalog.get(input_id)
+        if entry:
+            node_id = str(entry["node_id"])
+            field = str(entry.get("field") or "")
+        if node_id not in nodes:
+            raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", f"找不到输入配置节点：{node_id}")
+        kind = str(raw.get("kind") or (entry or {}).get("kind") or "text").strip().lower()
+        if kind not in WORKFLOW_INPUT_KINDS:
+            raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", f"输入 {input_id} 的类型不支持：{kind}")
+        virtual_field = WORKFLOW_VIRTUAL_FIELDS.get(kind)
+        if kind in WORKFLOW_VIRTUAL_FIELDS:
+            field = ""
+            input_id = f"{node_id}:{virtual_field}"
+            node_class = str(nodes[node_id].get("class_type") or "").lower()
+            expected = "resolutionselector" if kind == "resolution" else "randomnoise"
+            if node_class != expected:
+                raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", f"节点 {node_id} 不是有效的 {kind} 节点。")
+        else:
+            if not field or field not in (nodes[node_id].get("inputs") or {}):
+                raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", f"找不到输入字段：{node_id}:{field}")
+            input_id = f"{node_id}:{field}"
+        if input_id in seen:
+            raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", f"输入配置重复：{input_id}")
+        seen.add(input_id)
+        options = raw.get("options", [])
+        if kind == "select":
+            if not isinstance(options, list) or not options or any(not isinstance(option, (str, int, float, bool)) for option in options):
+                raise RhCliError("INVALID_WORKFLOW_INPUT_CONFIG", f"下拉输入 {input_id} 必须提供选项列表。")
+            options = [str(option) for option in options]
+        else:
+            options = []
+        label = str(raw.get("label") or (entry or {}).get("label") or (entry or {}).get("title") or field or node_id).strip()
+        if not label:
+            label = input_id
+        items.append({
+            "id": input_id,
+            "node_id": node_id,
+            "field": field,
+            "title": str((entry or {}).get("title") or nodes[node_id].get("_meta", {}).get("title") or nodes[node_id].get("class_type") or node_id),
+            "class_type": str((entry or {}).get("class_type") or nodes[node_id].get("class_type") or ""),
+            "label": label[:160],
+            "kind": kind,
+            "required": bool(raw.get("required", (entry or {}).get("required", False))),
+            "options": options,
+            "virtual": bool((entry or {}).get("virtual")),
+            "order": position,
+        })
+    return {"mode": "manual", "items": items}
+
+
+def configured_workflow_analysis(
+    workflow: dict[str, Any], config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Replace automatic inputs with a saved manual configuration when enabled."""
+    base = inspect_workflow(workflow)
+    normalized = normalize_workflow_input_config(workflow, config)
+    if not normalized or normalized.get("mode") != "manual":
+        base["input_mode"] = "auto"
+        base["custom_inputs"] = []
+        base["custom_input_count"] = 0
+        return base
+    nodes = workflow_nodes(workflow)
+    files: list[dict[str, Any]] = []
+    prompts: list[dict[str, Any]] = []
+    resolutions: list[dict[str, Any]] = []
+    random_noise: list[dict[str, Any]] = []
+    custom: list[dict[str, Any]] = []
+    for item in normalized["items"]:
+        node = nodes[item["node_id"]]
+        inputs = node.get("inputs") or {}
+        if item["kind"] == "resolution":
+            spec = resolution_spec(item["node_id"], node) or {}
+            spec.update({"title": item["label"], "required": item["required"], "config_id": item["id"]})
+            resolutions.append(spec)
+        elif item["kind"] == "random_noise":
+            spec = random_noise_spec(item["node_id"], node) or {}
+            spec.update({"title": item["label"], "config_id": item["id"]})
+            random_noise.append(spec)
+        elif item["kind"] == "file":
+            files.append({**item, "default": display_value(inputs.get(item["field"]))})
+        elif item["kind"] == "prompt":
+            prompts.append({**item, "default": display_value(inputs.get(item["field"]))})
+        else:
+            custom.append({**item, "default": display_value(inputs.get(item["field"]))})
+    result = dict(base)
+    result.update({
+        "file_inputs": files,
+        "prompt_inputs": prompts,
+        "resolution_inputs": resolutions,
+        "random_noise_inputs": random_noise,
+        "custom_inputs": custom,
+        "file_count": len(files),
+        "prompt_count": len(prompts),
+        "resolution_count": len(resolutions),
+        "random_noise_count": len(random_noise),
+        "custom_input_count": len(custom),
+        "input_mode": "manual",
+    })
+    return result
+
+
+def normalize_custom_input_values(
+    workflow: dict[str, Any], analysis: dict[str, Any], values: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if values is None:
+        values = {}
+    if not isinstance(values, dict):
+        raise RhCliError("INVALID_CUSTOM_INPUT", "自定义输入值必须是对象。")
+    result: dict[str, Any] = {}
+    for item in analysis.get("custom_inputs") or []:
+        input_id = str(item.get("id") or "")
+        if not input_id or input_id not in values:
+            continue
+        raw = values[input_id]
+        kind = str(item.get("kind") or "text")
+        if kind == "number":
+            try:
+                number = float(str(raw).strip())
+            except (TypeError, ValueError) as exc:
+                raise RhCliError("INVALID_CUSTOM_INPUT", f"输入 {item.get('label') or input_id} 必须是数字。") from exc
+            result[input_id] = int(number) if number.is_integer() else number
+        elif kind == "boolean":
+            if isinstance(raw, bool):
+                result[input_id] = raw
+            elif str(raw).strip().lower() in {"true", "1", "yes", "on"}:
+                result[input_id] = True
+            elif str(raw).strip().lower() in {"false", "0", "no", "off"}:
+                result[input_id] = False
+            else:
+                raise RhCliError("INVALID_CUSTOM_INPUT", f"输入 {item.get('label') or input_id} 必须是布尔值。")
+        else:
+            result[input_id] = str(raw)
+        if kind == "select" and result[input_id] not in (item.get("options") or []):
+            raise RhCliError("INVALID_CUSTOM_INPUT", f"输入 {item.get('label') or input_id} 的选项无效。")
+    required = [
+        item for item in analysis.get("custom_inputs") or []
+        if item.get("required") and not str(result.get(str(item.get("id") or ""), "")).strip()
+    ]
+    if required:
+        raise RhCliError("MISSING_INPUT", "请填写所有必填的自定义输入。", detail={"inputs": [item.get("id") for item in required]})
+    return result
+
+
+def apply_custom_input_values(workflow: dict[str, Any], values: dict[str, Any] | None) -> list[str]:
+    changes: list[str] = []
+    for input_id, value in (values or {}).items():
+        node_id, separator, field = str(input_id).partition(":")
+        if not separator or not field or node_id not in workflow:
+            continue
+        node = workflow.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        inputs = node.setdefault("inputs", {})
+        if not isinstance(inputs, dict):
+            continue
+        inputs[field] = value
+        changes.append(f"{node_id}.{field}")
+    return changes
+
+
+def normalize_bypassed_nodes(
     workflow: dict[str, Any], values: list[str] | dict[str, Any] | None,
 ) -> list[str]:
-    """Validate input-card IDs whose Web overrides should be ignored."""
+    """Validate node IDs whose execution should be bypassed."""
     if values is None:
-        raw_values: Any = metadata_bypassed_inputs(workflow)
+        raw_values: Any = metadata_bypassed_nodes(workflow)
     elif isinstance(values, dict):
         raw_values = [key for key, enabled in values.items() if enabled]
     elif isinstance(values, (list, tuple, set)):
@@ -354,53 +683,42 @@ def normalize_bypassed_inputs(
     else:
         raise RhCliError("INVALID_BYPASS", "输入旁路配置必须是列表或对象。")
 
-    analysis = inspect_workflow(workflow)
-    known = {
-        item["id"]
-        for group in (analysis["file_inputs"], analysis["prompt_inputs"])
-        for item in group
-    }
-    known.update(item["id"] for item in analysis["random_noise_inputs"])
+    known = {str(node_id) for node_id in workflow_nodes(workflow)}
     result: list[str] = []
     seen: set[str] = set()
     for raw_value in raw_values:
-        input_id = str(raw_value or "").strip()
-        if not input_id or input_id in seen:
+        node_id = str(raw_value or "").strip()
+        if not node_id:
             continue
-        if input_id not in known:
-            raise RhCliError("INVALID_BYPASS", f"找不到可旁路的输入节点：{input_id}")
-        result.append(input_id)
-        seen.add(input_id)
+        # Convert IDs saved by the previous input-override implementation.
+        if node_id not in known and ":" in node_id:
+            node_id = node_id.split(":", 1)[0]
+        if node_id not in known:
+            raise RhCliError("INVALID_BYPASS", f"找不到可旁路的工作流节点：{node_id}")
+        if node_id in seen:
+            continue
+        result.append(node_id)
+        seen.add(node_id)
     return result
 
 
-def bypassed_local_file_args(workflow: dict[str, Any], bypassed_inputs: set[str]) -> list[str]:
-    """Upload original local file values needed by bypassed Load* inputs."""
-    if not bypassed_inputs:
+def apply_bypassed_nodes(workflow: dict[str, Any], bypassed_nodes: set[str]) -> list[str]:
+    """Remove bypassed nodes and direct links to their outputs from an API graph."""
+    if not bypassed_nodes:
         return []
-    file_ids = {item["id"] for item in inspect_workflow(workflow)["file_inputs"]}
-    file_args: list[str] = []
-    for input_id in sorted(bypassed_inputs & file_ids):
-        separator = input_id.find(":")
-        if separator <= 0:
-            continue
-        node = workflow.get(input_id[:separator])
+    nodes = workflow_nodes(workflow)
+    removed = sorted(node_id for node_id in bypassed_nodes if node_id in nodes)
+    for node_id in removed:
+        workflow.pop(node_id, None)
+    removed_set = set(removed)
+    for node in workflow_nodes(workflow).values():
         inputs = node.get("inputs") if isinstance(node, dict) else None
         if not isinstance(inputs, dict):
             continue
-        original_value = inputs.get(input_id[separator + 1 :])
-        if not isinstance(original_value, str) or not original_value.strip():
-            continue
-        original_path = Path(original_value).expanduser()
-        if not original_path.is_absolute():
-            continue
-        if not original_path.is_file():
-            raise RhCliError(
-                "BYPASS_FILE_NOT_FOUND",
-                f"旁路输入 {input_id} 的原始本机文件不存在：{original_path}。请关闭旁路并选择新文件，或恢复原始文件。",
-            )
-        file_args.append(f"{input_id}={original_path}")
-    return file_args
+        for field, value in list(inputs.items()):
+            if is_link(value) and str(value[0]) in removed_set:
+                inputs.pop(field, None)
+    return removed
 
 
 def normalize_random_noise_inputs(
@@ -444,10 +762,53 @@ def apply_random_noise_inputs(workflow: dict[str, Any], values: dict[str, Any] |
     return changes
 
 
+def normalize_resolution_inputs(
+    workflow: dict[str, Any], values: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if values is None:
+        return {}
+    if not isinstance(values, dict):
+        raise RhCliError("INVALID_RESOLUTION", "尺寸节点配置必须是对象。")
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_node_id, raw_config in values.items():
+        node_id = str(raw_node_id).strip()
+        node = workflow.get(node_id)
+        if not isinstance(node, dict) or str(node.get("class_type", "")).lower() != "resolutionselector":
+            raise RhCliError("INVALID_RESOLUTION", f"节点 {node_id} 不是有效的 ResolutionSelector 节点。")
+        if not isinstance(raw_config, dict):
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 配置无效。")
+        aspect_ratio = str(raw_config.get("aspect_ratio") or "").strip()
+        if aspect_ratio not in RESOLUTION_ASPECT_RATIOS:
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 的比例选项无效。")
+        try:
+            megapixels = float(str(raw_config.get("megapixels")).strip())
+        except (TypeError, ValueError) as exc:
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 的 megapixels 必须是数字。") from exc
+        if not 0.1 <= megapixels <= 4:
+            raise RhCliError("INVALID_RESOLUTION", f"尺寸节点 {node_id} 的 megapixels 范围必须是 0.1 到 4。")
+        normalized[node_id] = {"aspect_ratio": aspect_ratio, "megapixels": megapixels, "multiple": 32}
+    return normalized
+
+
+def apply_resolution_inputs(workflow: dict[str, Any], values: dict[str, Any] | None) -> list[str]:
+    normalized = normalize_resolution_inputs(workflow, values)
+    changes: list[str] = []
+    for node_id, config in normalized.items():
+        node = workflow[node_id]
+        inputs = node.setdefault("inputs", {})
+        inputs["aspect_ratio"] = config["aspect_ratio"]
+        inputs["megapixels"] = config["megapixels"]
+        inputs["multiple"] = 32
+        changes.append(f"{node_id}.aspect_ratio={config['aspect_ratio']}")
+        changes.append(f"{node_id}.megapixels={config['megapixels']}")
+    return changes
+
+
 def public_key(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": record["id"],
         "name": record["name"],
+        "account_id": str(record.get("account_id") or ""),
         "site": record["site"],
         "masked_key": mask_key(record.get("api_key", "")),
         "status": record.get("status", "unchecked"),
@@ -503,6 +864,8 @@ class LocalStore:
               workflow_path TEXT NOT NULL,
               workflow_name TEXT NOT NULL,
               key_id TEXT,
+              account_id TEXT NOT NULL DEFAULT '',
+              instance_type TEXT NOT NULL DEFAULT 'default',
               dispatch_key_name TEXT NOT NULL DEFAULT '',
               dispatch_key_site TEXT NOT NULL DEFAULT '',
               dispatch_key_api_type TEXT NOT NULL DEFAULT '',
@@ -510,8 +873,11 @@ class LocalStore:
               remote_workflow_id TEXT NOT NULL DEFAULT '',
               input_json TEXT NOT NULL,
               prompt_json TEXT NOT NULL,
+              custom_json TEXT NOT NULL DEFAULT '{}',
+              input_config_json TEXT NOT NULL DEFAULT '{}',
               bypass_json TEXT NOT NULL DEFAULT '[]',
               random_noise_json TEXT NOT NULL DEFAULT '{}',
+              resolution_json TEXT NOT NULL DEFAULT '{}',
               workflow_snapshot_path TEXT NOT NULL DEFAULT '',
               output_dir TEXT NOT NULL,
               outputs_json TEXT NOT NULL DEFAULT '[]',
@@ -539,8 +905,14 @@ class LocalStore:
             self._db.execute("ALTER TABLE tasks ADD COLUMN stage_logs_json TEXT NOT NULL DEFAULT '[]'")
         if "random_noise_json" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN random_noise_json TEXT NOT NULL DEFAULT '{}'")
+        if "resolution_json" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN resolution_json TEXT NOT NULL DEFAULT '{}'")
         if "bypass_json" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN bypass_json TEXT NOT NULL DEFAULT '[]'")
+        if "custom_json" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN custom_json TEXT NOT NULL DEFAULT '{}'")
+        if "input_config_json" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN input_config_json TEXT NOT NULL DEFAULT '{}'")
         if "workflow_snapshot_path" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN workflow_snapshot_path TEXT NOT NULL DEFAULT ''")
         if "dispatch_key_name" not in columns:
@@ -549,7 +921,28 @@ class LocalStore:
             self._db.execute("ALTER TABLE tasks ADD COLUMN dispatch_key_site TEXT NOT NULL DEFAULT ''")
         if "dispatch_key_api_type" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN dispatch_key_api_type TEXT NOT NULL DEFAULT ''")
+        if "account_id" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+        if "instance_type" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN instance_type TEXT NOT NULL DEFAULT 'default'")
         self._backfill_dispatch_credential_snapshots()
+
+    def _infer_key_account_id(self, key: dict[str, Any], accounts: list[dict[str, Any]]) -> str:
+        """Infer legacy Key ownership from an explicit account-name/prefix match."""
+        key_name = str(key.get("name") or "").strip().lower()
+        if not key_name:
+            return ""
+        for account in accounts:
+            account_name = str(account.get("name") or "").strip().lower()
+            if account_name and (key_name == account_name or key_name.startswith(account_name + "-") or key_name.startswith(account_name + "_")):
+                return str(account.get("id") or "")
+        site = "cn" if key.get("site") == "cn" else "ai"
+        prefix_matches = [
+            account for account in accounts
+            if str(account.get("site") or "") == site
+            and (key_name.startswith(site + "-") or key_name.startswith(site + "_"))
+        ]
+        return str(prefix_matches[0].get("id") or "") if len(prefix_matches) == 1 else ""
 
     def _backfill_dispatch_credential_snapshots(self) -> None:
         """Fill immutable credential labels for older tasks when the Key still exists."""
@@ -616,6 +1009,8 @@ class LocalStore:
     def keys(self) -> list[dict[str, Any]]:
         with self._lock:
             data = self._read_json_file()
+            accounts = self.accounts()
+            changed = False
             configured_capacity = personal_capacity_value(data.get("personal_capacity", DEFAULT_PERSONAL_CAPACITY))
             raw_keys = data.get("keys", [])
             if not isinstance(raw_keys, list):
@@ -628,6 +1023,7 @@ class LocalStore:
                         {
                             "id": f"key_{uuid.uuid4().hex[:12]}",
                             "name": name,
+                            "account_id": self._infer_key_account_id({"name": name, "site": site}, accounts),
                             "site": site,
                             "api_key": api_key,
                             "status": "unchecked",
@@ -643,14 +1039,15 @@ class LocalStore:
                         }
                     )
                 if imported:
-                    self._write_json_file(
+                    data.update(
                         {
                             "keys": imported,
-                            "output_dir": str(default_local_output_dir()),
+                            "output_dir": data.get("output_dir") or str(default_local_output_dir()),
                             "personal_capacity": configured_capacity,
                             "initialized": True,
                         }
                     )
+                    self._write_json_file(data)
                     raw_keys = imported
                 else:
                     data["initialized"] = True
@@ -662,10 +1059,20 @@ class LocalStore:
                     continue
                 normalized = dict(item)
                 normalized["site"] = "cn" if item.get("site") == "cn" else "ai"
+                account_id = str(item.get("account_id") or "").strip()
+                if not account_id:
+                    account_id = self._infer_key_account_id(normalized, accounts)
+                    if account_id:
+                        item["account_id"] = account_id
+                        changed = True
+                normalized["account_id"] = account_id
                 api_type = str(item.get("api_type") or "")
                 normalized["capacity"] = key_capacity(api_type, configured_capacity)
                 normalized["active_tasks"] = int(item.get("active_tasks") or 0)
                 result.append(normalized)
+            if changed:
+                data["keys"] = raw_keys
+                self._write_json_file(data)
             return result
 
     def get_key(self, key_id: str) -> dict[str, Any] | None:
@@ -680,6 +1087,44 @@ class LocalStore:
                 data["output_dir"] = str(default_local_output_dir())
             data["personal_capacity"] = personal_capacity_value(data.get("personal_capacity", DEFAULT_PERSONAL_CAPACITY))
             self._write_json_file(data)
+
+    def current_account_id(self) -> str:
+        with self._lock:
+            data = self._read_json_file()
+            configured = str(data.get("current_account_id") or "").strip()
+            accounts = self.accounts()
+            account_ids = {str(item.get("id") or "") for item in accounts}
+            if configured == GENERAL_ACCOUNT_ID:
+                return GENERAL_ACCOUNT_ID
+            if configured and configured in account_ids:
+                return configured
+            if not accounts:
+                return ""
+            selected = str(accounts[0]["id"])
+            data["current_account_id"] = selected
+            self._write_json_file(data)
+            return selected
+
+    def current_account(self) -> dict[str, Any] | None:
+        account_id = self.current_account_id()
+        return self.get_account(account_id) if account_id else None
+
+    def set_current_account(self, account_id: str) -> dict[str, Any]:
+        account_id = str(account_id or "").strip()
+        if account_id == GENERAL_ACCOUNT_ID:
+            with self._lock:
+                data = self._read_json_file()
+                data["current_account_id"] = GENERAL_ACCOUNT_ID
+                self._write_json_file(data)
+            return {"id": GENERAL_ACCOUNT_ID, "name": "通用模式", "site": "", "status": "ready"}
+        account = self.get_account(account_id)
+        if not account:
+            raise RhCliError("ACCOUNT_NOT_FOUND", "找不到要切换的账号。")
+        with self._lock:
+            data = self._read_json_file()
+            data["current_account_id"] = account_id
+            self._write_json_file(data)
+        return account
 
     def _read_accounts_file(self) -> dict[str, Any]:
         if not ACCOUNTS_PATH.exists():
@@ -779,7 +1224,7 @@ class LocalStore:
         records = self.accounts()
         account = next((item for item in records if item["id"] == account_id), None)
         if not account:
-            raise RhCliError("ACCOUNT_NOT_FOUND", "找不到这个托管账号。")
+            raise RhCliError("ACCOUNT_NOT_FOUND", "找不到这个账号。")
         for field in (
             "name", "site", "status", "status_message", "last_login_at",
             "last_checkin_at", "daily_coin", "balance", "checked_at",
@@ -807,7 +1252,7 @@ class LocalStore:
         records = self.accounts()
         remaining = [item for item in records if item["id"] != str(account_id or "").strip()]
         if len(remaining) == len(records):
-            raise RhCliError("ACCOUNT_NOT_FOUND", "找不到这个托管账号。")
+            raise RhCliError("ACCOUNT_NOT_FOUND", "找不到这个账号。")
         self.save_accounts(remaining)
 
     def output_dir(self) -> str:
@@ -823,6 +1268,78 @@ class LocalStore:
         data["output_dir"] = path
         self._write_json_file(data)
         return path
+
+    def action_resources_path(self) -> str:
+        value = self._read_json_file().get("action_resources_path")
+        return str(value).strip() if isinstance(value, str) and value.strip() else ""
+
+    def set_action_resources_path(self, value: str) -> str:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise RhCliError("INVALID_ACTION_RESOURCES_PATH", f"动作库文件不存在：{path}")
+        data = self._read_json_file()
+        data["action_resources_path"] = str(path)
+        self._write_json_file(data)
+        return str(path)
+
+    def prompt_library_path(self) -> str:
+        value = self._read_json_file().get("prompt_library_path")
+        if isinstance(value, str) and value.strip():
+            return str(Path(value).expanduser().resolve())
+        return str((Path.home() / "Documents" / "VideoMake" / "ref" / "prompt" / "library.md").resolve())
+
+    def set_prompt_library_path(self, value: str) -> str:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise RhCliError("INVALID_PROMPT_LIBRARY_PATH", f"基础积木 Markdown 文件不存在：{path}")
+        if path.suffix.lower() in {".md", ".markdown"}:
+            try:
+                path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise RhCliError("INVALID_PROMPT_LIBRARY_PATH", f"基础积木 Markdown 文件无法读取：{path}") from exc
+            data = self._read_json_file()
+            data["prompt_library_path"] = str(path)
+            self._write_json_file(data)
+            return str(path)
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            raise RhCliError("INVALID_PROMPT_LIBRARY_PATH", f"基础积木 JSON 文件无法读取：{path}") from exc
+        if not isinstance(document, dict) or not isinstance(document.get("blocks", []), list):
+            raise RhCliError("INVALID_PROMPT_LIBRARY_PATH", "基础积木 JSON 必须是包含 blocks 数组的对象。")
+        data = self._read_json_file()
+        data["prompt_library_path"] = str(path)
+        self._write_json_file(data)
+        return str(path)
+
+    def reference_resources_paths(self) -> dict[str, str]:
+        value = self._read_json_file().get("reference_resources_paths")
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(kind): str(path).strip()
+            for kind, path in value.items()
+            if str(kind).strip() and isinstance(path, str) and path.strip()
+        }
+
+    def set_reference_resources_paths(self, values: Any) -> dict[str, str]:
+        if not isinstance(values, dict):
+            raise RhCliError("INVALID_REFERENCE_RESOURCES_PATHS", "参考资源路径必须是对象。")
+        allowed = {"character", "audio", "background", "clothes"}
+        current = self.reference_resources_paths()
+        updated = dict(current)
+        for raw_kind, raw_path in values.items():
+            kind = str(raw_kind or "").strip()
+            if kind not in allowed:
+                raise RhCliError("INVALID_REFERENCE_RESOURCE_KIND", f"未知的参考资源类型：{kind}")
+            path = Path(str(raw_path or "")).expanduser().resolve()
+            if not path.is_file():
+                raise RhCliError("INVALID_REFERENCE_RESOURCES_PATH", f"{kind} 资源 Markdown 文件不存在：{path}")
+            updated[kind] = str(path)
+        data = self._read_json_file()
+        data["reference_resources_paths"] = updated
+        self._write_json_file(data)
+        return updated
 
     def personal_capacity(self) -> int:
         return personal_capacity_value(self._read_json_file().get("personal_capacity", DEFAULT_PERSONAL_CAPACITY))
@@ -840,18 +1357,114 @@ class LocalStore:
         self._write_json_file(data)
         return capacity
 
-    def save_workflow(self, filename: str, content: str) -> tuple[str, Path, dict[str, Any]]:
+    def _workflow_registry_path(self) -> Path:
+        return WORKFLOW_ROOT.parent / "workflow-registry.json"
+
+    def _read_workflow_registry(self) -> list[dict[str, Any]]:
+        path = self._workflow_registry_path()
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        records = data.get("workflows", []) if isinstance(data, dict) else []
+        return [dict(item) for item in records if isinstance(item, dict) and str(item.get("id") or "").strip()]
+
+    def _write_workflow_registry(self, records: list[dict[str, Any]]) -> None:
+        path = self._workflow_registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"workflows": records}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(path)
+
+    @staticmethod
+    def _workflow_local_id_from_path(path: Path) -> str:
+        match = re.match(r"^(wf_[A-Za-z0-9]+)_(.+)$", path.name)
+        return match.group(1) if match else path.stem
+
+    def _upsert_workflow_registry(self, record: dict[str, Any]) -> None:
+        records = self._read_workflow_registry()
+        records = [item for item in records if str(item.get("id") or "") != str(record.get("id") or "")]
+        saved = {
+            "id": str(record.get("id") or ""),
+            "name": str(record.get("name") or "workflow.json"),
+            "account_id": str(record.get("account_id") or ""),
+            "site": str(record.get("site") or ""),
+            "remote_workflow_id": str(record.get("remote_workflow_id") or ""),
+            "source_dir": str(record.get("source_dir") or ""),
+            "source": "library",
+            "created_at": int(record.get("created_at") or now_ms()),
+            "updated_at": int(record.get("updated_at") or now_ms()),
+        }
+        if isinstance(record.get("input_config"), dict):
+            saved["input_config"] = record["input_config"]
+        records.append(saved)
+        self._write_workflow_registry(records)
+
+    def save_workflow(
+        self,
+        filename: str,
+        content: str,
+        *,
+        account_id: str = "",
+        remote_workflow_id: str = "",
+        source_dir: str = "",
+        register: bool = True,
+    ) -> tuple[str, Path, dict[str, Any]]:
         try:
             workflow = json.loads(content)
         except (ValueError, TypeError) as exc:
             raise RhCliError("INVALID_WORKFLOW", "无法解析工作流 JSON。") from exc
         if not isinstance(workflow, dict):
             raise RhCliError("INVALID_WORKFLOW", "工作流顶层必须是 API 格式节点字典。")
-        analysis = inspect_workflow(workflow)
+        try:
+            analysis = inspect_workflow(workflow)
+        except RhCliError as exc:
+            # ComfyUI's editor format has top-level fields such as id, nodes,
+            # links and groups. It is not directly runnable as an API prompt;
+            # surface that distinction instead of reporting the first scalar
+            # field as if it were a malformed node.
+            if isinstance(workflow.get("nodes"), list) and isinstance(workflow.get("links"), list):
+                raise RhCliError(
+                    "INVALID_WORKFLOW",
+                    "检测到 ComfyUI 编辑器工作流格式，请在 ComfyUI 中导出 API 工作流 JSON 后再导入。",
+                ) from exc
+            raise
+        account_id = str(account_id or "").strip()
+        if account_id == GENERAL_ACCOUNT_ID:
+            account_id = ""
+        metadata = workflow.get(WORKFLOW_META_KEY)
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        embedded_account_id = str(metadata.get("accountId") or metadata.get("account_id") or "").strip()
+        if account_id and embedded_account_id and account_id != embedded_account_id:
+            raise RhCliError("WORKFLOW_ACCOUNT_MISMATCH", "工作流已绑定其他账号，不能导入到当前账号。")
+        if not account_id:
+            account_id = embedded_account_id
+        account = self.get_account(account_id) if account_id else None
+        if account_id and not account:
+            raise RhCliError("ACCOUNT_NOT_FOUND", "找不到该工作流所属账号。")
+        if account_id:
+            metadata["accountId"] = account_id
+            workflow[WORKFLOW_META_KEY] = metadata
         workflow_id = f"wf_{uuid.uuid4().hex[:12]}"
-        clean_name = safe_name(filename, "workflow.json")
+        clean_name = canonical_workflow_name(filename)
         path = WORKFLOW_ROOT / f"{workflow_id}_{clean_name}"
         path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
+        if register:
+            self._upsert_workflow_registry(
+                {
+                    "id": workflow_id,
+                    "name": clean_name,
+                    "account_id": account["id"] if account else "",
+                    "site": account["site"] if account else "",
+                    "remote_workflow_id": str(remote_workflow_id or "").strip() or analysis.get("remote_workflow_id", ""),
+                    "source_dir": str(source_dir or "").strip(),
+                    "created_at": now_ms(),
+                    "updated_at": now_ms(),
+                }
+            )
         return workflow_id, path, analysis
 
     def workflow_path(self, workflow_id: str) -> Path:
@@ -859,6 +1472,146 @@ class LocalStore:
         if not matches:
             raise RhCliError("WORKFLOW_NOT_FOUND", f"找不到工作流：{workflow_id}")
         return matches[0]
+
+    def workflows(self) -> list[dict[str, Any]]:
+        """Return local workflow library records without exposing workflow JSON."""
+        registry = {
+            str(item.get("id")): item
+            for item in self._read_workflow_registry()
+            if str(item.get("source") or "") == "library"
+        }
+        accounts = {str(item.get("id")): item for item in self.accounts()}
+        result: list[dict[str, Any]] = []
+        for local_id, registered in registry.items():
+            matches = [path for path in WORKFLOW_ROOT.glob(f"{local_id}_*") if path.is_file()]
+            if not matches:
+                continue
+            path = matches[0]
+            try:
+                stat = path.stat()
+                workflow = json.loads(path.read_text(encoding="utf-8"))
+                analysis = inspect_workflow(workflow)
+                analysis_error = ""
+            except (OSError, ValueError, RhCliError) as exc:
+                stat = None
+                workflow = {}
+                analysis = {}
+                analysis_error = str(exc)
+            metadata = workflow.get(WORKFLOW_META_KEY) if isinstance(workflow, dict) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            account_id = str(registered.get("account_id") or metadata.get("accountId") or metadata.get("account_id") or "").strip()
+            account = accounts.get(account_id)
+            name = str(registered.get("name") or "").strip()
+            if not name:
+                name = path.name[len(local_id) + 1 :] if path.name.startswith(local_id + "_") else path.name
+            site = account.get("site") if account else str(registered.get("site") or "").strip()
+            remote_id = str(registered.get("remote_workflow_id") or "").strip() or str(analysis.get("remote_workflow_id") or "").strip()
+            created_at = int(registered.get("created_at") or (stat.st_ctime * 1000 if stat else 0))
+            updated_at = int(registered.get("updated_at") or (stat.st_mtime * 1000 if stat else 0))
+            result.append(
+                {
+                    "id": local_id,
+                    "name": name,
+                    "account_id": account_id,
+                    "account_name": str(account.get("name") or "") if account else "",
+                    "site": site,
+                    "remote_workflow_id": remote_id,
+                    "source_dir": str(registered.get("source_dir") or ""),
+                    "workflow_path": str(path.resolve()),
+                    "input_config": registered.get("input_config") if isinstance(registered.get("input_config"), dict) else None,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    "file_size": int(stat.st_size if stat else 0),
+                    "file_count": int(analysis.get("file_count") or 0),
+                    "prompt_count": int(analysis.get("prompt_count") or 0),
+                    "resolution_count": int(analysis.get("resolution_count") or 0),
+                    "random_noise_count": int(analysis.get("random_noise_count") or 0),
+                    "node_count": len(workflow_nodes(workflow)) if isinstance(workflow, dict) else 0,
+                    "analysis_error": analysis_error,
+                }
+            )
+        return sorted(result, key=lambda item: (int(item.get("updated_at") or 0), str(item.get("name") or "")), reverse=True)
+
+    def workflow_record(self, workflow_id: str) -> dict[str, Any]:
+        workflow_id = str(workflow_id or "").strip()
+        record = next((item for item in self.workflows() if item["id"] == workflow_id), None)
+        if not record:
+            raise RhCliError("WORKFLOW_NOT_FOUND", f"找不到工作流：{workflow_id}")
+        return record
+
+    def workflow_account_id(self, workflow_id: str) -> str:
+        workflow_id = str(workflow_id or "").strip()
+        if not workflow_id:
+            return ""
+        record = next((item for item in self._read_workflow_registry() if str(item.get("id") or "") == workflow_id), None)
+        return str(record.get("account_id") or "").strip() if record else ""
+
+    def workflow_detail(self, workflow_id: str) -> dict[str, Any]:
+        record = self.workflow_record(workflow_id)
+        path = Path(record["workflow_path"])
+        try:
+            workflow = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RhCliError("INVALID_WORKFLOW", f"无法读取工作流：{path}") from exc
+        if not isinstance(workflow, dict):
+            raise RhCliError("INVALID_WORKFLOW", "工作流顶层必须是 API 格式节点字典。")
+        analysis = inspect_workflow(workflow)
+        analysis["input_catalog"] = workflow_input_catalog(workflow, analysis)
+        return {"record": record, "workflow": workflow, "analysis": analysis}
+
+    def update_workflow(self, workflow_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        detail = self.workflow_detail(workflow_id)
+        current = detail["record"]
+        workflow = detail["workflow"]
+        account_id = str(changes["account_id"]).strip() if "account_id" in changes else str(current.get("account_id") or "")
+        account = self.get_account(account_id) if account_id else None
+        if account_id and not account:
+            raise RhCliError("ACCOUNT_NOT_FOUND", "找不到该工作流所属账号。")
+        name = str(changes.get("name", current.get("name") or "workflow.json")).strip()
+        name = safe_name(name, "workflow.json")
+        remote_id = str(changes.get("remote_workflow_id", current.get("remote_workflow_id") or "")).strip()
+        input_config = current.get("input_config") if isinstance(current.get("input_config"), dict) else None
+        if "input_config" in changes:
+            input_config = normalize_workflow_input_config(workflow, changes.get("input_config"))
+        record = {
+            **current,
+            "name": name,
+            "account_id": account["id"] if account else "",
+            "account_name": account["name"] if account else "",
+            "site": account["site"] if account else str(current.get("site") or ""),
+            "remote_workflow_id": remote_id,
+            "input_config": input_config,
+            "updated_at": now_ms(),
+        }
+        metadata = workflow.get(WORKFLOW_META_KEY)
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        if remote_id:
+            metadata["workflowId"] = remote_id
+        else:
+            metadata.pop("workflowId", None)
+        if account_id:
+            metadata["accountId"] = account_id
+        else:
+            metadata.pop("accountId", None)
+        if metadata:
+            workflow[WORKFLOW_META_KEY] = metadata
+        else:
+            workflow.pop(WORKFLOW_META_KEY, None)
+        Path(record["workflow_path"]).write_text(json.dumps(workflow, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self._upsert_workflow_registry(record)
+        return self.workflow_record(workflow_id)
+
+    def delete_workflow(self, workflow_id: str) -> None:
+        record = self.workflow_record(workflow_id)
+        path = Path(record["workflow_path"])
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise RhCliError("WORKFLOW_DELETE_FAILED", f"删除工作流失败：{path}") from exc
+        records = [item for item in self._read_workflow_registry() if str(item.get("id") or "") != str(workflow_id)]
+        self._write_workflow_registry(records)
 
     @staticmethod
     def task_snapshot_path(task: dict[str, Any]) -> Path:
@@ -966,7 +1719,8 @@ class LocalStore:
             "filename": task.get("workflow_name") or workflow_path.name,
             "workflow_path": str(workflow_path),
             "workflow": workflow,
-            "analysis": inspect_workflow(workflow),
+            "analysis": configured_workflow_analysis(workflow, task.get("input_config")),
+            "input_config": task.get("input_config"),
             "task": task,
         }
 
@@ -980,6 +1734,8 @@ class LocalStore:
             "workflow_path": task["workflow_path"],
             "workflow_name": task["workflow_name"],
             "key_id": task.get("key_id"),
+            "account_id": str(task.get("account_id") or "").strip(),
+            "instance_type": normalize_instance_type(task.get("instance_type")),
             "dispatch_key_name": str(task.get("dispatch_key_name") or "").strip(),
             "dispatch_key_site": str(task.get("dispatch_key_site") or "").strip(),
             "dispatch_key_api_type": str(task.get("dispatch_key_api_type") or "").strip(),
@@ -987,8 +1743,11 @@ class LocalStore:
             "remote_workflow_id": str(task.get("remote_workflow_id") or "").strip(),
             "input_json": json.dumps(task["files"], ensure_ascii=False),
             "prompt_json": json.dumps(task["prompts"], ensure_ascii=False),
-            "bypass_json": json.dumps(task.get("bypassed_inputs") or [], ensure_ascii=False),
+            "custom_json": json.dumps(task.get("custom_inputs") or {}, ensure_ascii=False),
+            "input_config_json": json.dumps(task.get("input_config") or {}, ensure_ascii=False),
+            "bypass_json": json.dumps(task.get("bypassed_nodes") or [], ensure_ascii=False),
             "random_noise_json": json.dumps(task.get("random_noise") or {}, ensure_ascii=False),
+            "resolution_json": json.dumps(task.get("resolution") or {}, ensure_ascii=False),
             "workflow_snapshot_path": str(task.get("workflow_snapshot_path") or ""),
             "output_dir": task["output_dir"],
             "outputs_json": "[]",
@@ -1011,17 +1770,17 @@ class LocalStore:
         }
         with self._lock:
             self._db.execute(
-                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,remote_task_id,remote_workflow_id,"
-                "input_json,prompt_json,bypass_json,random_noise_json,workflow_snapshot_path,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
-                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:remote_task_id,:remote_workflow_id,"
-                ":input_json,:prompt_json,:bypass_json,:random_noise_json,:workflow_snapshot_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
+                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,account_id,instance_type,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,remote_task_id,remote_workflow_id,"
+                "input_json,prompt_json,custom_json,input_config_json,bypass_json,random_noise_json,resolution_json,workflow_snapshot_path,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
+                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:account_id,:instance_type,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:remote_task_id,:remote_workflow_id,"
+                ":input_json,:prompt_json,:custom_json,:input_config_json,:bypass_json,:random_noise_json,:resolution_json,:workflow_snapshot_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
                 fields,
             )
             self._db.commit()
 
     def update_task(self, task_id: str, **changes: Any) -> None:
         allowed = {
-            "status", "progress", "updated_at", "started_at", "completed_at", "key_id", "dispatch_key_name", "dispatch_key_site", "dispatch_key_api_type", "remote_task_id", "remote_workflow_id",
+            "status", "progress", "updated_at", "started_at", "completed_at", "key_id", "account_id", "dispatch_key_name", "dispatch_key_site", "dispatch_key_api_type", "remote_task_id", "remote_workflow_id",
             "outputs_json", "error", "error_detail", "stage_logs_json", "cost_type", "cost", "duration", "output_dir", "workflow_snapshot_path",
         }
         changes = {key: value for key, value in changes.items() if key in allowed}
@@ -1075,11 +1834,15 @@ class LocalStore:
     @staticmethod
     def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
         task = dict(row)
+        task["workflow_name"] = canonical_workflow_name(task.get("workflow_name") or "workflow.json")
         names = {
             "input_json": "files",
             "prompt_json": "prompts",
-            "bypass_json": "bypassed_inputs",
+            "custom_json": "custom_inputs",
+            "input_config_json": "input_config",
+            "bypass_json": "bypassed_nodes",
             "random_noise_json": "random_noise",
+            "resolution_json": "resolution",
             "outputs_json": "outputs",
             "stage_logs_json": "stage_logs",
             "error_detail": "error_detail",
@@ -1088,7 +1851,7 @@ class LocalStore:
             try:
                 task[public_name] = json.loads(task.pop(field))
             except (ValueError, TypeError):
-                task[public_name] = {} if public_name == "error_detail" else []
+                task[public_name] = {} if public_name in {"error_detail", "custom_inputs", "input_config"} else []
         return task
 
     def task(self, task_id: str) -> dict[str, Any] | None:
@@ -1185,6 +1948,9 @@ class TaskManager:
             task["dispatch_credential_recorded"] = bool(snapshot_name)
             task["remote_task_id"] = task.get("remote_task_id") or ""
             task["remote_workflow_id"] = task.get("remote_workflow_id") or ""
+            stored_instance_type = str(task.get("instance_type") or "default").strip().lower()
+            task["instance_type"] = stored_instance_type if stored_instance_type in INSTANCE_TYPES else "default"
+            task["elapsed_ms"] = task_elapsed_ms(task)
             result.append(task)
         queued = sorted((item for item in result if item.get("status") == "queued"), key=lambda item: item.get("created_at", 0))
         positions = {item["id"]: index for index, item in enumerate(queued, start=1)}
@@ -1192,15 +1958,22 @@ class TaskManager:
             task["queue_position"] = positions.get(task["id"], 0)
         return result
 
-    def public_keys(self) -> list[dict[str, Any]]:
+    def public_keys(self, account_id: str = "") -> list[dict[str, Any]]:
         with self._lock:
             active = dict(self._active_by_key)
         records = self.store.keys()
+        account_id = str(account_id or "").strip()
+        if account_id == GENERAL_ACCOUNT_ID:
+            return [public_key({**record, "active_tasks": active.get(record["id"], 0)}) for record in records]
+        elif account_id:
+            records = [item for item in records if str(item.get("account_id") or "").strip() == account_id]
         return [public_key({**record, "active_tasks": active.get(record["id"], 0)}) for record in records]
 
     def add_key(self, name: str, site: str, api_key: str) -> dict[str, Any]:
         api_key = str(api_key or "").strip()
-        site = "cn" if site == "cn" else "ai"
+        account_id = self.store.current_account_id()
+        account = self.store.get_account(account_id) if account_id else None
+        site = account["site"] if account else ("cn" if site == "cn" else "ai")
         if not api_key:
             raise RhCliError("INVALID_API_KEY", "API Key 不能为空。")
         records = self.store.keys()
@@ -1209,6 +1982,7 @@ class TaskManager:
         record = {
             "id": f"key_{uuid.uuid4().hex[:12]}",
             "name": str(name or "").strip() or f"{site.upper()} Key {len(records) + 1}",
+            "account_id": account_id,
             "site": site,
             "api_key": api_key,
             "status": "unchecked",
@@ -1314,9 +2088,14 @@ class TaskManager:
         output_dir: str | None,
         remote_workflow_id: str | None = None,
         random_noise: dict[str, Any] | None = None,
-        bypassed_inputs: list[str] | dict[str, Any] | None = None,
+        resolution: dict[str, Any] | None = None,
+        bypassed_nodes: list[str] | dict[str, Any] | None = None,
         workflow_data: dict[str, Any] | None = None,
         workflow_name: str | None = None,
+        instance_type: str = "default",
+        workflow_account_id: str | None = None,
+        workflow_input_config: dict[str, Any] | None = None,
+        custom_inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if workflow_data is not None:
             if not isinstance(workflow_data, dict):
@@ -1325,16 +2104,51 @@ class TaskManager:
         else:
             workflow_path = self.store.workflow_path(workflow_id)
             workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-        analysis = inspect_workflow(workflow)
+        instance_type = normalize_instance_type(instance_type)
+        current_account_id = self.store.current_account_id()
+        selected_key = self.store.get_key(key_id) if key_id else None
+        if key_id and not selected_key:
+            raise RhCliError("KEY_NOT_FOUND", "指定的 API Key 不存在。")
+        selected_key_account_id = str(selected_key.get("account_id") or "").strip() if selected_key else ""
+        account_restricted = current_account_id not in {"", GENERAL_ACCOUNT_ID}
+        if key_id and account_restricted and selected_key_account_id != current_account_id:
+            raise RhCliError("KEY_ACCOUNT_MISMATCH", "所选 API Key 不属于当前使用账号，请切换账号或重新选择 Key。")
+        bound_workflow_account_id = str(workflow_account_id or "").strip()
+        if not bound_workflow_account_id:
+            bound_workflow_account_id = self.store.workflow_account_id(workflow_id)
+        if not bound_workflow_account_id:
+            metadata = workflow.get(WORKFLOW_META_KEY)
+            if isinstance(metadata, dict):
+                bound_workflow_account_id = str(metadata.get("accountId") or metadata.get("account_id") or "").strip()
+        if bound_workflow_account_id and account_restricted and bound_workflow_account_id != current_account_id:
+            raise RhCliError("WORKFLOW_ACCOUNT_MISMATCH", "当前工作流属于其他账号，请切换到对应账号后再提交。")
+        library_record = None
+        try:
+            library_record = self.store.workflow_record(workflow_id)
+        except RhCliError:
+            library_record = None
+        saved_input_config = workflow_input_config
+        if saved_input_config is None and library_record:
+            saved_input_config = library_record.get("input_config")
+        # A raw task-page import has no library record, so it always stays in automatic mode.
+        normalized_input_config = normalize_workflow_input_config(workflow, saved_input_config) if library_record else None
+        analysis = configured_workflow_analysis(workflow, normalized_input_config)
+        normalized_custom_inputs = normalize_custom_input_values(workflow, analysis, custom_inputs)
         remote_id = str(remote_workflow_id or "").strip() or analysis.get("remote_workflow_id", "")
         if not remote_id:
             raise RhCliError("MISSING_WORKFLOW_ID", "请填写 RunningHub workflowId 后再提交。")
-        normalized_bypassed_inputs = normalize_bypassed_inputs(workflow, bypassed_inputs)
-        bypassed_set = set(normalized_bypassed_inputs)
+        normalized_bypassed_nodes = normalize_bypassed_nodes(workflow, bypassed_nodes)
+        bypassed_set = set(normalized_bypassed_nodes)
         normalized_random_noise = normalize_random_noise_inputs(workflow, random_noise)
         active_random_noise = {
             node_id: config
             for node_id, config in normalized_random_noise.items()
+            if node_id not in bypassed_set
+        }
+        normalized_resolution = normalize_resolution_inputs(workflow, resolution)
+        active_resolution = {
+            node_id: config
+            for node_id, config in normalized_resolution.items()
             if node_id not in bypassed_set
         }
         if workflow_data is not None:
@@ -1342,11 +2156,12 @@ class TaskManager:
             workflow_id, workflow_path, _ = self.store.save_workflow(
                 source_name,
                 json.dumps(workflow_data, ensure_ascii=False),
+                register=False,
             )
         required = {
             item["id"]
             for item in analysis["file_inputs"]
-            if item["id"] not in bypassed_set
+            if item["node_id"] not in bypassed_set and item.get("required", True)
         }
         missing = sorted(item for item in required if not str(files.get(item, "")).strip())
         if missing:
@@ -1364,19 +2179,24 @@ class TaskManager:
             "id": task_id,
             "created_at": now_ms(),
             "workflow_path": str(workflow_path),
-            "workflow_name": workflow_path.name.split("_", 1)[-1],
+            "workflow_name": workflow_name_from_path(workflow_path, workflow_id),
             "remote_workflow_id": remote_id,
             "files": files,
             "prompts": prompts,
-            "bypassed_inputs": normalized_bypassed_inputs,
+            "custom_inputs": normalized_custom_inputs,
+            "input_config": normalized_input_config or {"mode": "auto", "items": []},
+            "bypassed_nodes": normalized_bypassed_nodes,
             "random_noise": normalized_random_noise,
+            "resolution": normalized_resolution,
             "key_id": key_id or None,
+            "account_id": current_account_id or selected_key_account_id or bound_workflow_account_id,
+            "instance_type": instance_type,
             "output_dir": str(root),
         }
         snapshot_workflow = json.loads(json.dumps(workflow, ensure_ascii=False))
         for values in (files, prompts):
             for input_id, value in values.items():
-                if input_id in bypassed_set:
+                if str(input_id).split(":", 1)[0] in bypassed_set:
                     continue
                 separator = str(input_id).find(":")
                 if separator <= 0:
@@ -1387,7 +2207,14 @@ class TaskManager:
                 inputs = node.setdefault("inputs", {})
                 if isinstance(inputs, dict):
                     inputs[str(input_id)[separator + 1 :]] = value
+        apply_custom_input_values(snapshot_workflow, normalized_custom_inputs)
         apply_random_noise_inputs(snapshot_workflow, active_random_noise)
+        apply_resolution_inputs(snapshot_workflow, active_resolution)
+        if task.get("account_id") and task.get("account_id") != GENERAL_ACCOUNT_ID:
+            metadata = snapshot_workflow.get(WORKFLOW_META_KEY)
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            metadata["accountId"] = str(task["account_id"])
+            snapshot_workflow[WORKFLOW_META_KEY] = metadata
         snapshot_path = self.store.save_task_workflow_snapshot(task, snapshot_workflow)
         task["workflow_snapshot_path"] = str(snapshot_path)
         self.store.create_task(task)
@@ -1429,9 +2256,10 @@ class TaskManager:
             if task["status"] not in {"queued", "recovering"} or task["id"] in self._claimed:
                 continue
             recovery = task["status"] == "recovering"
-            record = self._select_key(task, keys, records)
+            scoped_keys = self._keys_for_task(task, keys)
+            record = self._select_key(task, scoped_keys, records)
             if not record:
-                wait_message = self._queue_wait_message(task, keys, records)
+                wait_message = self._queue_wait_message(task, scoped_keys, records)
                 if task.get("progress") != wait_message:
                     self.store.update_task(task["id"], progress=wait_message)
                 continue
@@ -1454,6 +2282,15 @@ class TaskManager:
             )
             self._log_stage(task["id"], "dispatch", f"已选择 {record['name']}，开始{'恢复轮询' if recovery else '执行'}")
             self._executor.submit(self._run_task, task["id"], record, event, recovery)
+
+    @staticmethod
+    def _keys_for_task(task: dict[str, Any], keys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        account_id = str(task.get("account_id") or "").strip()
+        if account_id == GENERAL_ACCOUNT_ID:
+            return keys
+        if not account_id:
+            return keys
+        return [item for item in keys if str(item.get("account_id") or "").strip() == account_id]
 
     def _queue_wait_message(
         self,
@@ -1487,6 +2324,9 @@ class TaskManager:
             if task.get("key_id"):
                 candidate = records.get(task["key_id"])
                 if not candidate or candidate.get("status") != "ready":
+                    return None
+                account_id = str(task.get("account_id") or "").strip()
+                if account_id and str(candidate.get("account_id") or "").strip() != account_id:
                     return None
                 if self._active_by_key.get(candidate["id"], 0) >= int(candidate.get("capacity") or 3):
                     return None
@@ -1568,17 +2408,7 @@ class TaskManager:
             if recovery:
                 self._recover_task(task, key, cancel_event)
                 return
-            bypassed_inputs = {str(item) for item in task.get("bypassed_inputs") or []}
-            file_args = [
-                f"{item_id}={path}"
-                for item_id, path in task["files"].items()
-                if item_id not in bypassed_inputs
-            ]
-            set_args = [
-                f"{item_id}={value}"
-                for item_id, value in task["prompts"].items()
-                if item_id not in bypassed_inputs
-            ]
+            bypassed_values = task.get("bypassed_nodes") or task.get("bypassed_inputs") or []
             task_output_dir = Path(task["output_dir"]) / task_id
             task_output_dir.mkdir(parents=True, exist_ok=True)
             site_upload, site_create, site_outputs = _site_urls(key["site"])
@@ -1588,7 +2418,20 @@ class TaskManager:
                 workflow_path = self.store.task_workflow_path(task)
                 workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
                 workflow = workflow_nodes(workflow)
-                file_args.extend(bypassed_local_file_args(workflow, bypassed_inputs))
+                bypassed_nodes = set(normalize_bypassed_nodes(workflow, bypassed_values))
+                file_args = [
+                    f"{item_id}={path}"
+                    for item_id, path in task["files"].items()
+                    if str(item_id).split(":", 1)[0] not in bypassed_nodes
+                ]
+                set_args = [
+                    f"{item_id}={value}"
+                    for item_id, value in task["prompts"].items()
+                    if str(item_id).split(":", 1)[0] not in bypassed_nodes
+                ]
+                removed_nodes = apply_bypassed_nodes(workflow, bypassed_nodes)
+                if removed_nodes:
+                    self._log_stage(task_id, "prepare", f"已旁路 {len(removed_nodes)} 个节点")
                 remote_id_value = str(task.get("remote_workflow_id") or "").strip()
                 if not remote_id_value:
                     raise RhCliError("MISSING_WORKFLOW_ID", "任务缺少 RunningHub workflowId，请重新提交。")
@@ -1598,13 +2441,21 @@ class TaskManager:
                 random_noise_values = {
                     node_id: config
                     for node_id, config in (task.get("random_noise") or {}).items()
-                    if node_id not in bypassed_inputs
+                    if node_id not in bypassed_nodes
                 }
                 random_noise_changes = apply_random_noise_inputs(workflow, random_noise_values)
                 if random_noise_changes:
                     self._log_stage(task_id, "prepare", f"已应用 {len(random_noise_changes) // 2} 个 RandomNoise 配置")
-                if bypassed_inputs:
-                    self._log_stage(task_id, "prepare", f"已忽略 {len(bypassed_inputs)} 个输入覆盖")
+                resolution_values = {
+                    node_id: config
+                    for node_id, config in (task.get("resolution") or {}).items()
+                    if node_id not in bypassed_nodes
+                }
+                resolution_changes = apply_resolution_inputs(workflow, resolution_values)
+                if resolution_changes:
+                    self._log_stage(task_id, "prepare", f"已应用 {len(resolution_changes) // 2} 个尺寸节点配置")
+                if bypassed_nodes and not removed_nodes:
+                    self._log_stage(task_id, "prepare", f"已请求旁路 {len(bypassed_nodes)} 个节点")
                 self._log_stage(task_id, "upload", f"开始上传 {len(file_args)} 个输入文件")
                 changes = _apply_file_args(client, workflow, file_args, f"{get_site_config(key['site'])['api_host']}/task/openapi/upload")
                 self._log_stage(task_id, "upload", f"输入文件上传完成：{len(changes)} 个")
@@ -1615,6 +2466,7 @@ class TaskManager:
                     key["api_key"],
                     remote_id_value,
                     json.dumps(workflow, ensure_ascii=False),
+                    instance_type=str(task.get("instance_type") or "default"),
                     create_url=site_create,
                     add_metadata=True,
                 )
@@ -1725,14 +2577,19 @@ class TaskManager:
 
 
 def public_state(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
+    current_account_id = store.current_account_id()
+    current_account = store.get_account(current_account_id) if current_account_id else None
     return {
         "settings": {
             "output_dir": store.output_dir(),
             "personal_capacity": store.personal_capacity(),
+            "current_account_id": current_account_id,
+            "current_mode": "general" if current_account_id == GENERAL_ACCOUNT_ID else "account",
             "data_dir": str(DATA_ROOT),
             "native_file_picker": native_file_picker_available(),
         },
-        "keys": manager.public_keys(),
+        "current_account": public_account(current_account) if current_account else None,
+        "keys": manager.public_keys(current_account_id),
         "accounts": [public_account(item) for item in store.accounts()],
         "tasks": manager.public_tasks(),
     }

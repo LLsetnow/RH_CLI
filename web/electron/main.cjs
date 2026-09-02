@@ -368,6 +368,7 @@ function createWindow(port) {
     minWidth: 1040,
     minHeight: 720,
     title: "RH Workflow Desk",
+    icon: path.join(webRoot, "static", "assets", "rh-workflow-desk-icon.png"),
     backgroundColor: "#090e1b",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -386,6 +387,9 @@ function createWindow(port) {
 
 async function boot() {
   try {
+    if (process.platform === "darwin" && app.dock) {
+      try { app.dock.setIcon(path.join(webRoot, "static", "assets", "rh-workflow-desk-icon.png")); } catch (_) {}
+    }
     const port = await startBackend();
     await createWindow(port);
   } catch (error) {

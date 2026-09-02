@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/png" href="/static/assets/rh-workflow-desk-icon.png" />
+    <title>工作流 · RH Workflow Desk</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/workflows.css" />
+    <script>
+      (function () {
+        try {
+          var storedTheme = localStorage.getItem("rh-workflow-theme");
+          document.documentElement.dataset.theme = storedTheme === "dark" ? "dark" : "light";
+        } catch (error) {}
+      }());
+    </script>
+    <script src="/static/motion.js"></script>
+  </head>
+  <body>
+    <div class="app-shell workflows-shell">
+      <header class="topbar">
+        <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
+          <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
+          <span>
+            <span class="brand-name">RH Workflow Desk</span>
+            <span class="brand-subtitle">本地工作流提交台</span>
+          </span>
+        </a>
+        <nav class="top-nav" aria-label="主导航">
+          <a class="top-nav-link" href="/">任务提交</a>
+          <a class="top-nav-link" href="/prompt">提示词工坊</a>
+          <a class="top-nav-link" href="/outputs">成片</a>
+          <a class="top-nav-link active" href="/workflows" aria-current="page">工作流</a>
+        </nav>
+        <div class="topbar-actions">
+          <div class="local-badge"><span class="status-dot"></span>仅本机运行</div>
+          <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
+            <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
+          </button>
+          <a class="settings-button settings-access settings-link" href="/?openSettings=1" aria-label="打开本地设置" title="打开本地设置">
+            <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
+          </a>
+        </div>
+      </header>
+
+      <main class="workflows-main">
+        <section class="workflows-hero">
+          <div>
+            <div class="eyebrow">WORKFLOW LIBRARY / LOCAL JSON</div>
+            <h1>把工作流，<br /><em>整理成自己的库。</em></h1>
+            <p>按账号保存 API 工作流和 RunningHub workflowId。打开提交时会恢复对应的 JSON 与输入配置；API Key 始终留在本机凭据管理中。</p>
+          </div>
+          <div class="workflows-hero-stats">
+            <div class="workflow-hero-stat"><span>工作流</span><strong id="workflowTotal">0</strong></div>
+            <div class="workflow-hero-stat"><span>已绑定账号</span><strong id="workflowBound">0</strong></div>
+            <div class="workflow-hero-stat"><span>账号</span><strong id="accountTotal">0</strong></div>
+          </div>
+        </section>
+
+        <section class="panel workflows-toolbar" aria-label="工作流管理工具">
+          <div class="workflows-toolbar-heading">
+            <div>
+              <div class="section-kicker">LOCAL WORKFLOWS</div>
+              <h2>工作流库 <span id="workflowCount" class="workflows-count">0</span></h2>
+            </div>
+            <button id="refreshWorkflows" class="secondary-button" type="button"><span aria-hidden="true">↻</span> 刷新</button>
+          </div>
+          <div class="workflows-toolbar-controls">
+            <label class="workflows-search">
+              <span class="sr-only">搜索工作流</span>
+              <input id="workflowSearch" type="search" placeholder="搜索名称、workflowId 或账号" autocomplete="off" />
+            </label>
+            <label class="workflow-account-filter">
+              <span>账号</span>
+              <select id="workflowAccountFilter">
+                <option value="all">全部账号</option>
+              </select>
+            </label>
+            <button id="importWorkflowButton" class="primary-button workflow-import-button" type="button"><span class="button-glyph">+</span><span>导入工作流</span></button>
+          </div>
+          <label id="workflowImportDropzone" class="workflow-import-dropzone" for="workflowImportFile">
+            <input id="workflowImportFile" type="file" accept=".json,application/json" />
+            <span class="workflow-import-mark" aria-hidden="true">＋</span>
+            <span><strong>拖入 API JSON 到这里</strong><small>导入后可指定所属账号和 workflowId；只保存工作流副本，不会保存 API Key。</small></span>
+          </label>
+        </section>
+
+        <section id="workflowGroups" class="workflow-groups" aria-live="polite"></section>
+      </main>
+    </div>
+
+    <div id="workflowToast" class="toast" role="status" aria-live="polite"></div>
+
+    <div id="workflowEditorModal" class="modal-backdrop" hidden>
+      <section class="workflow-modal-panel" role="dialog" aria-modal="true" aria-labelledby="workflowEditorTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">WORKFLOW RECORD</div>
+            <h2 id="workflowEditorTitle">保存工作流</h2>
+          </div>
+          <button id="closeWorkflowEditor" class="close-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <p id="workflowEditorHint" class="workflow-editor-hint"></p>
+        <form id="workflowEditorForm" class="workflow-editor-form">
+          <label class="field-group">
+            <span class="field-label">工作流名称</span>
+            <input id="workflowRecordName" type="text" required maxlength="160" placeholder="例如：人物修复 API" />
+          </label>
+          <div class="workflow-editor-grid">
+            <label class="field-group">
+              <span class="field-label">所属账号</span>
+              <select id="workflowRecordAccount">
+                <option value="">未绑定账号</option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span class="field-label">RunningHub workflowId</span>
+              <input id="workflowRecordRemoteId" type="text" inputmode="numeric" autocomplete="off" placeholder="可稍后补充" />
+            </label>
+          </div>
+          <div class="workflow-editor-note">工作流与账号绑定后，提交页可以明确识别归属；API Key 不会写入工作流文件。</div>
+          <div class="dialog-actions">
+            <button id="cancelWorkflowEditor" class="secondary-button" type="button">取消</button>
+            <button id="saveWorkflowRecord" class="primary-button" type="submit"><span class="button-glyph">✓</span><span>保存工作流</span></button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div id="workflowJsonModal" class="modal-backdrop" hidden>
+      <section class="workflow-json-panel" role="dialog" aria-modal="true" aria-labelledby="workflowJsonTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">API WORKFLOW JSON</div>
+            <h2 id="workflowJsonTitle">工作流内容</h2>
+          </div>
+          <button id="closeWorkflowJson" class="close-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <pre id="workflowJsonContent" class="workflow-json-content"></pre>
+        <div class="dialog-actions">
+          <button id="copyWorkflowJson" class="secondary-button" type="button">复制 JSON</button>
+          <button id="closeWorkflowJsonBottom" class="primary-button" type="button">完成</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="workflowConfigModal" class="modal-backdrop" hidden>
+      <section class="workflow-config-panel" role="dialog" aria-modal="true" aria-labelledby="workflowConfigTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">INPUT CONFIGURATION</div>
+            <h2 id="workflowConfigTitle">配置输入节点</h2>
+          </div>
+          <button id="closeWorkflowConfig" class="close-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <p id="workflowConfigHint" class="workflow-editor-hint">只保存这份工作流的输入配置，不会修改 API JSON 文件，也不会影响历史任务。</p>
+        <label class="workflow-config-mode field-group">
+          <span class="field-label">输入识别模式</span>
+          <select id="workflowConfigMode">
+            <option value="auto">自动识别文件、提示词、尺寸和 RandomNoise</option>
+            <option value="manual">手动选择需要在任务提交页显示的输入</option>
+          </select>
+        </label>
+        <div id="workflowConfigBuilder" class="workflow-config-builder">
+          <div class="workflow-config-builder-heading">
+            <div><strong>添加输入字段</strong><span>可以把任意标量节点字段加入任务提交面板。</span></div>
+          </div>
+          <div class="workflow-config-add-grid">
+            <label class="field-group"><span class="field-label">节点</span><select id="workflowConfigNode"></select></label>
+            <label class="field-group"><span class="field-label">字段</span><select id="workflowConfigField"></select></label>
+            <button id="addWorkflowConfigItem" class="secondary-button" type="button">＋ 添加</button>
+          </div>
+        </div>
+        <div id="workflowConfigItems" class="workflow-config-items"></div>
+        <div class="dialog-actions">
+          <button id="cancelWorkflowConfig" class="secondary-button" type="button">取消</button>
+          <button id="saveWorkflowConfig" class="primary-button" type="button"><span class="button-glyph">✓</span><span>保存输入配置</span></button>
+        </div>
+      </section>
+    </div>
+
+    <script>window.RHMotion.startPageEnter();</script>
+    <script src="/static/workflows.js"></script>
+  </body>
+</html>

@@ -12,7 +12,8 @@ from typing import Any
 from urllib.parse import quote
 
 
-VERSION = 1
+VERSION = 3
+DEFAULT_POSE_RESOURCES_PATH = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.md")
 DEFAULT_RESOURCES_PATH = Path("/Users/apple/Documents/VideoMake/ref/Resources.md")
 
 
@@ -20,6 +21,14 @@ def _action_id(image_path: str, title: str) -> str:
     source = image_path or title
     digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:12]
     return f"pose-{digest}"
+
+
+def _pair_key(path: str, kind: str) -> str:
+    """Return the stable basename used to pair a color image and its depth map."""
+    stem = Path(path).stem
+    if kind == "depth" and stem.endswith("_depth"):
+        stem = stem[:-6]
+    return stem
 
 
 def _category(value: str) -> str:
@@ -32,7 +41,8 @@ def _normalise_action(value: Any) -> dict[str, Any] | None:
     action_id = str(value.get("id") or "").strip()
     title = str(value.get("title") or "").strip()
     text = str(value.get("text") or "").strip()
-    image_path = str(value.get("image_path") or "").strip()
+    color_image_path = str(value.get("color_image_path") or value.get("image_path") or "").strip()
+    depth_image_path = str(value.get("depth_image_path") or "").strip()
     if not action_id or not title or not text:
         return None
     raw_tags = value.get("tags", [])
@@ -45,39 +55,64 @@ def _normalise_action(value: Any) -> dict[str, Any] | None:
         "tags": [str(tag).strip() for tag in raw_tags if str(tag).strip()],
         "title": title,
         "text": text,
-        "image_path": image_path,
+        # image_path remains as a compatibility alias for older callers/cache files.
+        "image_path": color_image_path,
+        "color_image_path": color_image_path,
+        "depth_image_path": depth_image_path,
+        "pair_key": str(value.get("pair_key") or _pair_key(color_image_path or depth_image_path, "color")).strip(),
     }
 
 
 class ActionStore:
-    """Build and serve a local action library from the pose section of Resources.md."""
+    """Build and serve a local action library from a configured pose Markdown file."""
 
     def __init__(self, data_root: str | Path, source_path: str | Path | None = None) -> None:
         self.root = Path(data_root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.path = self.root / "prompt-actions.json"
+        self.prompt_root = self.root / "prompt"
+        self.prompt_root.mkdir(parents=True, exist_ok=True)
+        self.path = self.prompt_root / "actions.json"
         self.source_path = (
             Path(source_path).expanduser().resolve()
             if source_path is not None
             else self._resolve_source_path()
         )
         self._lock = threading.RLock()
+        self._migrate_legacy_cache()
         self._actions: list[dict[str, Any]] = []
         self.refresh()
+
+    def _migrate_legacy_cache(self) -> None:
+        """Move the legacy flat cache into the prompt data directory once."""
+        legacy_path = self.root / "prompt-actions.json"
+        if not self.path.exists() and legacy_path.is_file():
+            legacy_path.replace(self.path)
 
     @staticmethod
     def _resolve_source_path() -> Path:
         configured = os.environ.get("RH_PROMPT_RESOURCES_PATH", "").strip()
         candidates = [
             Path(configured).expanduser() if configured else None,
+            DEFAULT_POSE_RESOURCES_PATH,
             DEFAULT_RESOURCES_PATH,
+            Path.home() / "Documents" / "VideoMake" / "ref" / "pose" / "pose.md",
             Path.home() / "Documents" / "VideoMake" / "ref" / "Resources.md",
+            Path(__file__).resolve().parents[2] / "VideoMake" / "ref" / "pose" / "pose.md",
             Path(__file__).resolve().parents[2] / "VideoMake" / "ref" / "Resources.md",
         ]
         for candidate in candidates:
             if candidate and candidate.is_file():
                 return candidate.resolve()
         return (Path(configured).expanduser() if configured else DEFAULT_RESOURCES_PATH).resolve()
+
+    def set_source_path(self, value: str | Path) -> Path:
+        path = Path(value).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"动作库文件不存在：{path}")
+        with self._lock:
+            self.source_path = path
+            self.refresh(force=True)
+        return path
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -110,7 +145,11 @@ class ActionStore:
             if not prompt:
                 return
             title = current["title"]
-            image_path = current["image_path"]
+            color_image_path = current["color_image_path"]
+            depth_image_path = current["depth_image_path"]
+            # Keep the legacy alias color-only. A depth-only placeholder must
+            # never be served or counted as an original image.
+            image_path = color_image_path
             tags = ["pose"]
             if current_category:
                 tags.insert(0, current_category)
@@ -120,6 +159,9 @@ class ActionStore:
                 "title": title,
                 "text": prompt,
                 "image_path": image_path,
+                "color_image_path": color_image_path,
+                "depth_image_path": depth_image_path,
+                "pair_key": _pair_key(color_image_path or depth_image_path, "color"),
             })
 
         for raw_line in lines:
@@ -138,13 +180,21 @@ class ActionStore:
                 finish()
                 title = re.sub(r"（[^）]*）$", "", line[5:]).strip()
                 title = Path(title).stem
-                current = {"title": title, "image_path": "", "prompt_lines": []}
+                current = {
+                    "title": title,
+                    "color_image_path": "",
+                    "depth_image_path": "",
+                    "prompt_lines": [],
+                }
                 continue
             if not current:
                 continue
-            image_match = re.search(r"!\[[^\]]*\]\((pose/(?:color|depth)/[^)]+)\)", line)
-            if image_match and not current["image_path"]:
-                current["image_path"] = image_match.group(1)
+            for image_match in re.finditer(r"!\[[^\]]*\]\((pose/(color|depth)/[^)]+)\)", line):
+                image_path, kind = image_match.groups()
+                if kind == "color" and not current["color_image_path"]:
+                    current["color_image_path"] = image_path
+                elif kind == "depth" and not current["depth_image_path"]:
+                    current["depth_image_path"] = image_path
             if raw_line.lstrip().startswith(">"):
                 prompt_line = raw_line.lstrip()[1:].strip()
                 current["prompt_lines"].append(prompt_line)
@@ -153,11 +203,20 @@ class ActionStore:
         finish()
         return actions
 
-    def refresh(self) -> None:
+    def _source_signature(self) -> tuple[int, str]:
+        if not self.source_path.is_file():
+            return 0, ""
+        digest = hashlib.sha256()
+        with self.source_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return self.source_path.stat().st_mtime_ns, digest.hexdigest()
+
+    def refresh(self, force: bool = False) -> None:
         with self._lock:
-            source_mtime = self.source_path.stat().st_mtime_ns if self.source_path.is_file() else 0
+            source_mtime, source_sha256 = self._source_signature()
             document = self._read()
-            if source_mtime and document.get("source_mtime_ns") == source_mtime and isinstance(document.get("actions"), list):
+            if not force and source_sha256 and document.get("source_sha256") == source_sha256 and isinstance(document.get("actions"), list):
                 actions = [_normalise_action(value) for value in document["actions"]]
                 self._actions = [value for value in actions if value]
                 return
@@ -167,6 +226,7 @@ class ActionStore:
                     "version": VERSION,
                     "source": str(self.source_path),
                     "source_mtime_ns": source_mtime,
+                    "source_sha256": source_sha256,
                     "actions": self._actions,
                 })
                 return
@@ -180,28 +240,84 @@ class ActionStore:
     def _find(self, action_id: str) -> dict[str, Any] | None:
         return next((action for action in self._actions if action["id"] == action_id), None)
 
-    def image_path(self, action_id: str) -> Path | None:
+    def image_path(self, action_id: str, kind: str = "color") -> Path | None:
         with self._lock:
             action = self._find(action_id)
             if not action:
                 return None
-            relative = Path(action.get("image_path") or "")
-            source_root = self.source_path.parent.resolve()
+            if kind not in {"color", "depth"}:
+                return None
+            if kind == "color":
+                raw_path = action.get("color_image_path")
+                if raw_path is None:  # legacy cache without the new field
+                    raw_path = action.get("image_path")
+            else:
+                raw_path = action.get("depth_image_path")
+            relative = Path(str(raw_path or ""))
             if not relative.parts or relative.is_absolute() or ".." in relative.parts:
                 return None
-            path = (source_root / relative).resolve()
-            if source_root not in path.parents or not path.is_file():
-                return None
-            return path
+            source_roots = [self.source_path.parent.resolve()]
+            # pose/pose.md stores links as pose/color/... relative to ref/.
+            if source_roots[0].name == "pose":
+                source_roots.append(source_roots[0].parent)
+            for source_root in source_roots:
+                path = (source_root / relative).resolve()
+                if source_root in path.parents and path.is_file():
+                    return path
+            return None
+
+    def _pair_status(self, action: dict[str, Any]) -> tuple[str, str, bool, bool]:
+        color_path = self.image_path(action["id"], "color")
+        depth_path = self.image_path(action["id"], "depth")
+        color_exists = color_path is not None
+        depth_exists = depth_path is not None
+        color_key = _pair_key(str(action.get("color_image_path") or action.get("image_path") or ""), "color")
+        depth_key = _pair_key(str(action.get("depth_image_path") or ""), "depth")
+        if not color_exists and not depth_exists:
+            return "missing_both", "原图和深度图都不存在", False, False
+        if not color_exists:
+            return "missing_color", "缺少原图", False, depth_exists
+        if not depth_exists:
+            return "missing_depth", "缺少深度图", True, False
+        if color_key != depth_key:
+            return "mismatched", "原图与深度图文件名不匹配", True, True
+        return "paired", "原图与深度图已配对", True, True
 
     def public_actions(self) -> list[dict[str, Any]]:
         with self._lock:
             result = []
             for action in self._actions:
                 item = copy.deepcopy(action)
-                available = self.image_path(action["id"]) is not None
+                status, message, color_available, depth_available = self._pair_status(action)
                 item.pop("image_path", None)
-                item["image_available"] = available
-                item["image_url"] = f"/api/prompt/actions/{quote(action['id'], safe='')}/image" if available else ""
+                item.pop("color_image_path", None)
+                item.pop("depth_image_path", None)
+                item["image_available"] = color_available
+                item["image_url"] = f"/api/prompt/actions/{quote(action['id'], safe='')}/image" if color_available else ""
+                item["color_image_available"] = color_available
+                item["color_image_url"] = item["image_url"]
+                item["depth_image_available"] = depth_available
+                item["depth_image_url"] = f"/api/prompt/actions/{quote(action['id'], safe='')}/depth" if depth_available else ""
+                item["pair_status"] = status
+                item["pair_message"] = message
                 result.append(item)
             return result
+
+    def source_status(self) -> dict[str, Any]:
+        with self._lock:
+            _, source_sha256 = self._source_signature()
+            public_actions = self.public_actions()
+            paired = sum(1 for action in public_actions if action["pair_status"] == "paired")
+            issues = [
+                {"id": action["id"], "title": action["title"], "status": action["pair_status"], "message": action["pair_message"]}
+                for action in public_actions
+                if action["pair_status"] != "paired"
+            ]
+            return {
+                "source": self.source_path.name,
+                "source_sha256": source_sha256,
+                "action_count": len(public_actions),
+                "paired_count": paired,
+                "issue_count": len(issues),
+                "issues": issues,
+            }

@@ -1,6 +1,6 @@
 {
   "name": "rh-workflow-desk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "author": "LLsetnow",
   "description": "RH Workflow Desk 的 macOS 桌面版",
@@ -34,6 +34,7 @@
     "artifactName": "RH-Workflow-Desk-${version}-${arch}.${ext}",
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "static/assets/rh-workflow-desk.icns",
       "identity": null,
       "target": [
         {

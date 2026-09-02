@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" href="data:," />
+    <link rel="icon" type="image/png" href="/static/assets/rh-workflow-desk-icon.png" />
     <title>提示词工坊 · RH Workflow Desk</title>
     <link rel="stylesheet" href="/static/app.css" />
     <link rel="stylesheet" href="/static/prompt.css" />
@@ -16,12 +16,13 @@
         } catch (error) {}
       }());
     </script>
+    <script src="/static/motion.js"></script>
   </head>
   <body>
     <div class="app-shell prompt-shell">
       <header class="topbar">
         <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
-          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
           <span>
             <span class="brand-name">RH Workflow Desk</span>
             <span class="brand-subtitle">本地工作流提交台</span>
@@ -31,12 +32,16 @@
           <a class="top-nav-link" href="/">任务提交</a>
           <a class="top-nav-link active" href="/prompt" aria-current="page">提示词工坊</a>
           <a class="top-nav-link" href="/outputs">成片</a>
+          <a class="top-nav-link" href="/workflows">工作流</a>
         </nav>
         <div class="topbar-actions">
           <div class="local-badge"><span class="status-dot"></span>本地积木</div>
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button settings-access settings-link" href="/?openSettings=1" aria-label="打开本地设置" title="打开本地设置">
+            <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
+          </a>
         </div>
       </header>
 
@@ -47,13 +52,13 @@
             <h1>把提示词，<br /><em>拼成一条可复用的思路。</em></h1>
             <p>把常用表达做成固定积木，把姿势参考放进动作库，把每次变化留给自由文本。按顺序加入、调整，右侧会实时生成一份可以直接复制的提示词。</p>
           </div>
-          <div class="prompt-intro-note" aria-label="使用方式">
-            <span class="note-index">01—03</span>
-            <span>挑选积木</span>
-            <span class="note-arrow">→</span>
-            <span>组装顺序</span>
-            <span class="note-arrow">→</span>
-            <span>复制交付</span>
+          <div class="prompt-intro-note process-nav" aria-label="使用方式">
+            <span class="process-index">01—03</span>
+            <span class="process-step active">挑选积木</span>
+            <span class="process-arrow" aria-hidden="true">→</span>
+            <span class="process-step">组装顺序</span>
+            <span class="process-arrow" aria-hidden="true">→</span>
+            <span class="process-step">复制交付</span>
           </div>
         </section>
 
@@ -66,10 +71,14 @@
               </div>
               <button id="openCustomBlock" class="icon-button" type="button" aria-label="添加自定义固定积木" title="添加自定义固定积木">＋</button>
             </div>
-            <p class="panel-description">固定积木是可反复使用的句子片段；动作库提供 pose 图片和对应提示词。</p>
+            <p class="panel-description">基础积木来自本机 JSON；动作、人物、音频、背景和服装来自 ref Markdown 索引。</p>
             <div class="library-mode-tabs" role="tablist" aria-label="积木库类型">
-              <button id="libraryModeBlocks" class="library-mode-tab active" type="button" role="tab" aria-selected="true">基础积木</button>
-              <button id="libraryModeActions" class="library-mode-tab" type="button" role="tab" aria-selected="false">动作库 <span id="actionModeCount">0</span></button>
+              <button id="libraryModeBlocks" class="library-mode-tab active" data-library-mode="blocks" type="button" role="tab" aria-selected="true">基础积木</button>
+              <button id="libraryModeActions" class="library-mode-tab" data-library-mode="pose" type="button" role="tab" aria-selected="false">动作库 <span id="actionModeCount">0</span></button>
+              <button id="libraryModeCharacter" class="library-mode-tab" data-library-mode="character" type="button" role="tab" aria-selected="false">人物 <span id="characterModeCount">0</span></button>
+              <button id="libraryModeAudio" class="library-mode-tab" data-library-mode="audio" type="button" role="tab" aria-selected="false">音频 <span id="audioModeCount">0</span></button>
+              <button id="libraryModeBackground" class="library-mode-tab" data-library-mode="background" type="button" role="tab" aria-selected="false">背景 <span id="backgroundModeCount">0</span></button>
+              <button id="libraryModeClothes" class="library-mode-tab" data-library-mode="clothes" type="button" role="tab" aria-selected="false">服装 <span id="clothesModeCount">0</span></button>
             </div>
             <label class="prompt-search">
               <span class="sr-only">搜索积木</span>
@@ -78,8 +87,11 @@
             </label>
             <div id="tagFilters" class="tag-filters" aria-label="按标签筛选"></div>
             <div id="libraryList" class="library-list"></div>
-            <div class="library-footer"><span id="libraryCount">0 个固定积木</span><span>点击或拖动加入</span></div>
+            <div class="library-footer"><span id="libraryCount">0 个固定积木</span><span id="libraryFooterHint">点击或拖动加入</span><button id="refreshActions" class="library-refresh-button" type="button" hidden>重新扫描</button></div>
+            <div class="library-drop-hint" aria-hidden="true"><span class="library-drop-hint-mark">×</span><strong>松开以移除当前积木</strong><span>积木库里的原始内容不会被删除</span></div>
           </aside>
+
+          <div id="promptGridSplitter" class="prompt-grid-splitter" role="separator" aria-orientation="vertical" aria-label="调整积木库与提示词工作台宽度" aria-valuemin="300" aria-valuemax="640" aria-valuenow="420" tabindex="0" title="拖动调整两侧宽度"></div>
 
           <div class="prompt-main-stack">
             <section class="panel assembly-panel">
@@ -103,7 +115,7 @@
                   </div>
                 </div>
                 <div id="stageList" class="stage-list" aria-live="polite"></div>
-                <div class="assembly-hint"><span class="hint-mark">⋮⋮</span><span>抓住左侧手柄或卡片空白处上下拖动，也可以用右侧箭头。</span></div>
+                <div class="assembly-hint"><span class="hint-mark">⋮⋮</span><span>抓住左侧手柄或卡片空白处上下拖动排序；拖到左侧积木库即可移除当前积木。</span></div>
               </div>
               <div id="assemblyGroupView" class="assembly-view" role="tabpanel" aria-labelledby="assemblyViewGroups" hidden>
                 <div class="group-view-heading">
@@ -115,11 +127,11 @@
                     <div><span class="group-kicker">CURRENT ARRANGEMENT</span><strong>当前组装台</strong></div>
                     <button id="newGroup" class="text-button" type="button">＋新建</button>
                   </div>
-                  <div class="group-save-row">
+                  <form id="groupForm" class="group-save-row">
                     <label class="sr-only" for="groupName">组状态名称</label>
                     <input id="groupName" type="text" maxlength="48" placeholder="给当前组装顺序命名" />
-                    <button id="saveGroup" class="secondary-button" type="button">保存组状态</button>
-                  </div>
+                    <button id="saveGroup" class="secondary-button" type="submit">新建并保存</button>
+                  </form>
                   <div id="groupList" class="group-list" aria-live="polite"></div>
                 </div>
               </div>
@@ -135,7 +147,8 @@
               </div>
               <div class="output-actions">
                 <button id="copyPrompt" class="secondary-button" type="button">复制文本</button>
-                <button id="downloadPrompt" class="primary-button" type="button"><span class="button-glyph">↓</span><span>导出 TXT</span></button>
+                <button id="importPrompt" class="secondary-button import-prompt-button" type="button">导入任务提交</button>
+                <button id="downloadPrompt" class="primary-button" type="button">导出 TXT</button>
               </div>
               <div class="output-preview-wrap">
                 <textarea id="promptOutput" readonly spellcheck="false" placeholder="加入积木后，组合文本会在这里出现"></textarea>
@@ -157,7 +170,7 @@
           </div>
           <button id="closeCustomBlock" class="close-button" type="button" aria-label="关闭">×</button>
         </div>
-        <p class="modal-description">把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。</p>
+        <p id="customBlockDescription" class="modal-description">把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。</p>
         <form id="customBlockForm">
           <label class="field-group">
             <span class="field-label">积木名称</span>
@@ -178,7 +191,39 @@
         </form>
       </section>
     </div>
+    <div id="imagePreviewModal" class="modal-backdrop" hidden>
+      <section class="image-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">IMAGE PREVIEW</div>
+            <h2 id="imagePreviewTitle">动作图片</h2>
+          </div>
+          <button id="closeImagePreview" class="close-button" type="button" aria-label="关闭图片预览">×</button>
+        </div>
+        <div class="image-preview-frame"><img id="imagePreviewImage" src="data:," alt="" /></div>
+        <p id="imagePreviewCaption" class="image-preview-caption">点击图片外区域、右上角或按 Esc 关闭</p>
+      </section>
+    </div>
+    <div id="depthImportModal" class="modal-backdrop" hidden>
+      <section class="depth-import-dialog" role="dialog" aria-modal="true" aria-labelledby="depthImportTitle">
+        <div class="modal-heading">
+          <div>
+            <div id="depthImportKicker" class="section-kicker">IMPORT DEPTH MAP</div>
+            <h2 id="depthImportTitle">导入深度图</h2>
+          </div>
+          <button id="closeDepthImport" class="close-button" type="button" aria-label="关闭工作流导入">×</button>
+        </div>
+        <p id="depthImportDescription" class="modal-description">选择任务提交页当前工作流中的 LoadImage 节点，深度图会作为该节点的本机输入。</p>
+        <div id="depthImportStatus" class="depth-import-status"></div>
+        <div id="depthImportTargets" class="depth-import-targets" role="radiogroup" aria-label="LoadImage 节点"></div>
+        <div class="dialog-actions">
+          <button id="cancelDepthImport" class="secondary-button" type="button">取消</button>
+          <button id="confirmDepthImport" class="primary-button" type="button" disabled>导入到选中节点</button>
+        </div>
+      </section>
+    </div>
     <div id="promptToast" class="toast" role="status" aria-live="polite"></div>
+    <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/prompt.js"></script>
   </body>
 </html>
