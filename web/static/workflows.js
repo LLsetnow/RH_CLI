@@ -1,8 +1,9 @@
 (function () {
   "use strict";
 
-  var state = { workflows: [], accounts: [], search: "", accountFilter: "all", editor: null, jsonWorkflow: null, configEditor: null };
+  var state = { workflows: [], accounts: [], search: "", accountFilter: "all", selectedWorkflowId: "", loadingWorkflowId: "", editor: null, jsonWorkflow: null, configEditor: null };
   var toastTimer = 0;
+  var draftStorageKey = "rh-workflow-desk-draft-v1";
 
   function $(id) { return document.getElementById(id); }
   function esc(value) {
@@ -84,7 +85,8 @@
   }
   function workflowCard(record) {
     var bound = Boolean(record.account_id);
-    var submitUrl = "/?workflow=" + encodeURIComponent(record.id);
+    var selected = state.selectedWorkflowId === record.id;
+    var loading = state.loadingWorkflowId === record.id;
     var summary = [
       ["节点", record.node_count],
       ["文件", record.file_count],
@@ -97,14 +99,14 @@
     var status = record.analysis_error ? "JSON 异常" : (bound ? "已绑定账号" : "待绑定账号");
     return '<article class="workflow-card' + (bound ? "" : " is-unbound") + '">' +
       '<div class="workflow-card-top"><button class="workflow-card-title workflow-card-title-button" type="button" data-action="edit-workflow" data-workflow-id="' + esc(record.id) + '" aria-label="编辑工作流：' + esc(record.name) + '" title="编辑工作流"><strong title="' + esc(record.name) + '">' + esc(record.name) + '</strong><small title="' + esc(record.id) + '">' + esc(record.id) + '</small></button><span class="workflow-status' + (bound ? "" : " unbound") + '">' + status + '</span></div>' +
-      '<a class="workflow-card-body" href="' + esc(submitUrl) + '" aria-label="提交工作流：' + esc(record.name) + '">' +
+      '<button class="workflow-card-body' + (selected ? " is-selected" : "") + '" type="button" data-action="select-workflow" data-workflow-id="' + esc(record.id) + '" aria-pressed="' + (selected ? "true" : "false") + '" aria-busy="' + (loading ? "true" : "false") + '"' + (loading ? " disabled" : "") + ' aria-label="选择并加载工作流：' + esc(record.name) + '" title="覆盖任务提交页的当前工作流">' +
       '<div class="workflow-card-meta">' +
       '<div class="workflow-meta-row"><span>所属账号</span><span title="' + esc(accountLabel(record)) + '">' + esc(accountLabel(record)) + '</span></div>' +
       '<div class="workflow-meta-row"><span>workflowId</span><span><code>' + esc(record.remote_workflow_id || "未设置") + '</code></span></div>' +
       '<div class="workflow-meta-row"><span>文件大小</span><span>' + esc(formatSize(record.file_size)) + '</span></div>' +
       '</div>' +
       (summary ? '<div class="workflow-node-summary">' + summary + "</div>" : "") +
-      '</a>' +
+      '</button>' +
       '<div class="workflow-card-footer"><span class="workflow-card-time">更新于 ' + esc(formatTime(record.updated_at)) + '</span><span class="workflow-card-actions">' +
       '<button class="workflow-card-action primary" type="button" data-action="configure-workflow" data-workflow-id="' + esc(record.id) + '">配置输入</button>' +
       '<button class="workflow-card-action" type="button" data-action="view-workflow" data-workflow-id="' + esc(record.id) + '">查看 JSON</button>' +
@@ -211,6 +213,59 @@
   }
   function fetchWorkflow(id) {
     return request("/api/workflows/" + encodeURIComponent(id));
+  }
+
+  function workflowDraftFromDetail(data) {
+    var record = data && data.record && typeof data.record === "object" ? data.record : {};
+    var workflow = data && data.workflow && typeof data.workflow === "object" ? data.workflow : null;
+    var analysis = data && data.analysis && typeof data.analysis === "object" ? data.analysis : null;
+    if (!record.id || !workflow || !analysis) throw new Error("工作流详情不完整，无法加载");
+    var bypassedNodes = Array.isArray(analysis.bypassed_nodes) ? analysis.bypassed_nodes.slice() : [];
+    return {
+      version: 1,
+      // Leave the credential untouched on the task page; only replace the workflow.
+      credential: { selectedKeyId: "" },
+      workflow: {
+        id: String(record.id),
+        remoteWorkflowId: String(record.remote_workflow_id || analysis.remote_workflow_id || "").trim(),
+        name: String(record.name || "workflow_api.json").trim() || "workflow_api.json",
+        sourceDir: String(record.source_dir || ""),
+        accountId: String(record.account_id || "").trim(),
+        data: workflow,
+        analysis: analysis,
+        inputConfig: record.input_config && typeof record.input_config === "object" ? record.input_config : null,
+        values: {
+          files: {},
+          prompts: {},
+          customInputs: {},
+          randomNoise: {},
+          resolution: {},
+          bypassedNodes: bypassedNodes
+        },
+        savedAt: Date.now()
+      }
+    };
+  }
+
+  function loadWorkflowIntoSubmit(id) {
+    var recordId = String(id || "").trim();
+    if (!recordId || state.loadingWorkflowId === recordId) return;
+    state.selectedWorkflowId = recordId;
+    state.loadingWorkflowId = recordId;
+    renderWorkflows();
+    fetchWorkflow(recordId).then(function (data) {
+      var draft = workflowDraftFromDetail(data);
+      window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+      showToast("已覆盖任务提交页工作流：" + draft.workflow.name);
+      window.location.href = "/";
+    }).catch(function (error) {
+      showToast("加载工作流失败：" + error.message, true);
+    }).finally(function () {
+      if (state.loadingWorkflowId === recordId) {
+        state.loadingWorkflowId = "";
+        renderWorkflows();
+      }
+    });
   }
 
   var configKinds = [
@@ -352,7 +407,10 @@
     if (!button) return;
     var id = button.dataset.workflowId;
     var action = button.dataset.action;
-    if (action === "open-workflow") window.location.href = "/?workflow=" + encodeURIComponent(id);
+    if (action === "select-workflow") {
+      loadWorkflowIntoSubmit(id);
+      return;
+    }
     if (action === "configure-workflow") openConfig(id);
     if (action === "view-workflow") viewWorkflow(id);
     if (action === "export-workflow") exportWorkflow(id);

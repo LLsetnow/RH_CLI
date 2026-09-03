@@ -39,11 +39,12 @@ def _block(value: Any, fallback_id: str | None = None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     block_id = str(value.get("id") or fallback_id or _new_id("block")).strip()
+    category = str(value.get("category") or "未分类").strip() or "未分类"
     title = str(value.get("title") or "").strip()
     text = str(value.get("text") or "").strip()
     if not block_id or not title or not text:
         return None
-    return {"id": block_id, "tags": _tags(value.get("tags")), "title": title, "text": text}
+    return {"id": block_id, "category": category, "tags": _tags(value.get("tags")), "title": title, "text": text}
 
 
 def _stable_block_id(title: str, category: str = "") -> str:
@@ -82,7 +83,13 @@ def _parse_markdown_library(path: Path) -> list[dict[str, Any]]:
             current = None
             return
         tags = _tags(current.get("tags"))
-        blocks.append({"id": block_id, "tags": tags, "title": title, "text": text})
+        blocks.append({
+            "id": block_id,
+            "category": str(current.get("category") or "未分类").strip() or "未分类",
+            "tags": tags,
+            "title": title,
+            "text": text,
+        })
         seen_ids.add(block_id)
         current = None
 
@@ -138,21 +145,31 @@ def _markdown_library_text(blocks: list[dict[str, Any]]) -> str:
     lines = [
         "# MiniMax H3 基础提示词积木",
         "",
-        "> 每个 #### 条目是一块可拖入提示词工作台的积木。字段和正文建议使用英文；对白与画面可见文字按 H3 规则保留原文。",
+        "> 每个 ### 标题是一级分类，每个 #### 条目是一块可拖入提示词工作台的积木。字段和正文建议使用英文；对白与画面可见文字按 H3 规则保留原文。",
         "> 修改本文件后刷新提示词工坊即可重新抽取；id 用于保持组装台和组状态中的引用稳定。",
         "",
         "## blocks",
         "",
     ]
+    categories: dict[str, list[dict[str, Any]]] = {}
+    category_order: list[str] = []
     for block in blocks:
-        lines.extend([
-            f"#### {block['title']}",
-            f"id: {block['id']}",
-            f"tags: {', '.join(block.get('tags') or [])}",
-        ])
-        for text_line in str(block.get("text") or "").splitlines() or [""]:
-            lines.append(f"> {text_line}" if text_line else ">")
-        lines.append("")
+        category = str(block.get("category") or "未分类").strip() or "未分类"
+        if category not in categories:
+            categories[category] = []
+            category_order.append(category)
+        categories[category].append(block)
+    for category in category_order:
+        lines.extend([f"### {category}", ""])
+        for block in categories[category]:
+            lines.extend([
+                f"#### {block['title']}",
+                f"id: {block['id']}",
+                f"tags: {', '.join(block.get('tags') or [])}",
+            ])
+            for text_line in str(block.get("text") or "").splitlines() or [""]:
+                lines.append(f"> {text_line}" if text_line else ">")
+            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -164,7 +181,10 @@ def _item(value: Any) -> dict[str, Any] | None:
     if not instance_id or kind not in {"fixed", "action", "reference", "text"}:
         return None
     if kind == "text":
-        return {"instance_id": instance_id, "kind": "text", "text": str(value.get("text") or "")}
+        result = {"instance_id": instance_id, "kind": "text", "text": str(value.get("text") or "")}
+        if "translated_text" in value or "translatedText" in value:
+            result["translated_text"] = str(value.get("translated_text") or value.get("translatedText") or "")
+        return result
     if kind == "action":
         reference_id = value.get("action_id") or value.get("actionId") or value.get("block_id") or value.get("blockId") or value.get("sourceId")
     elif kind == "reference":
@@ -395,14 +415,16 @@ class PromptStore:
     def update_block(self, block_id: str, value: dict[str, Any]) -> dict[str, Any]:
         payload = dict(value)
         payload["id"] = block_id
-        block = _block(payload)
-        if not block:
-            raise RhCliError("INVALID_BLOCK", "积木必须包含标题和文本内容。")
         with self._lock:
             library = self._library()
             index = next((index for index, item in enumerate(library["blocks"]) if item["id"] == block_id), None)
             if index is None:
                 raise RhCliError("BLOCK_NOT_FOUND", "找不到这块积木。")
+            if "category" not in payload:
+                payload["category"] = library["blocks"][index].get("category") or "未分类"
+            block = _block(payload)
+            if not block:
+                raise RhCliError("INVALID_BLOCK", "积木必须包含标题和文本内容。")
             library["blocks"][index] = block
             state = self._state()
             state["items"] = _refresh_item_snapshots(state["items"], block_id, block)

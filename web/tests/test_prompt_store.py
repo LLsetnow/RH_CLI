@@ -27,6 +27,27 @@ def test_prompt_store_creates_markdown_library_and_json_state_documents(tmp_path
     assert len(reloaded["groups"]["groups"][0]["items"]) == 2
 
 
+def test_prompt_store_persists_translated_free_text(tmp_path):
+    store = PromptStore(tmp_path)
+
+    state = store.save_state([
+        {
+            "instanceId": "text-item",
+            "kind": "text",
+            "text": "一个电影感镜头",
+            "translated_text": "A cinematic shot.",
+        }
+    ])
+
+    assert state["items"] == [{
+        "instance_id": "text-item",
+        "kind": "text",
+        "text": "一个电影感镜头",
+        "translated_text": "A cinematic shot.",
+    }]
+    assert PromptStore(tmp_path).snapshot()["state"]["items"] == state["items"]
+
+
 def test_deleted_library_block_keeps_group_order_and_snapshot(tmp_path):
     store = PromptStore(tmp_path)
     block = store.add_block({"title": "光线", "text": "柔和自然光", "tags": ["风格"]})
@@ -51,9 +72,22 @@ def test_update_library_block_preserves_id_and_refreshes_references(tmp_path):
     updated = store.update_block(block["id"], {"title": "新标题", "text": "新文本", "tags": ["新标签"]})
     snapshot = store.snapshot()
     expected_snapshot = {"title": "新标题", "text": "新文本", "tags": ["新标签"]}
-    assert updated == {"id": block["id"], **expected_snapshot}
+    assert updated == {"id": block["id"], "category": "未分类", **expected_snapshot}
     assert snapshot["state"]["items"][0]["snapshot"] == expected_snapshot
     assert snapshot["groups"]["groups"][0]["items"][0]["snapshot"] == expected_snapshot
+
+
+def test_save_group_with_id_overwrites_items_without_creating_a_second_group(tmp_path):
+    store = PromptStore(tmp_path)
+    first = store.save_group("首帧恢复", [{"instanceId": "old", "kind": "text", "text": "旧顺序"}])
+
+    updated = store.save_group("首帧恢复", [{"instanceId": "new", "kind": "text", "text": "新顺序"}], first["id"])
+    snapshot = store.snapshot()
+
+    assert updated["id"] == first["id"]
+    assert updated["updated_at"] >= first["updated_at"]
+    assert len(snapshot["groups"]["groups"]) == 1
+    assert snapshot["groups"]["groups"][0]["items"][0]["text"] == "新顺序"
 
 
 def test_migrate_legacy_browser_state_once(tmp_path):
@@ -96,10 +130,36 @@ def test_prompt_store_parses_markdown_blocks_with_stable_metadata(tmp_path):
 
     assert store.snapshot()["library"]["blocks"] == [{
         "id": "camera-motion",
+        "category": "镜头",
         "tags": ["摄影机", "运镜"],
         "title": "摄影机运动",
         "text": "The camera pushes in slowly.\nKeep the subject centered.",
     }]
+
+
+def test_prompt_store_preserves_markdown_categories_when_writing_library(tmp_path):
+    library = tmp_path / "library.md"
+    library.write_text(
+        "# 基础积木\n\n## blocks\n\n### 镜头\n\n"
+        "#### 固定镜头\n"
+        "id: fixed-camera\n"
+        "tags: 镜头\n"
+        "> The camera stays still.\n\n"
+        "### 风格\n\n"
+        "#### 写实\n"
+        "id: photoreal\n"
+        "tags: 风格\n"
+        "> Photorealistic.\n",
+        encoding="utf-8",
+    )
+
+    store = PromptStore(tmp_path / "data", library_path=library)
+    store.delete_block("fixed-camera")
+    rewritten = library.read_text(encoding="utf-8")
+
+    assert "### 镜头" not in rewritten
+    assert "### 风格" in rewritten
+    assert "#### 写实" in rewritten
 
 
 def test_prompt_store_supports_a_configured_library_path(tmp_path):

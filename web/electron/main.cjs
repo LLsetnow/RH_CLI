@@ -19,7 +19,7 @@ const accountWindows = new Map();
 function normaliseAccount(value) {
   const account = value && typeof value === "object" ? value : {};
   const id = String(account.id || "").trim();
-  if (!id) throw new Error("托管账号缺少本地 ID");
+  if (!id) throw new Error("账号管理记录缺少本地 ID");
   return {
     id,
     name: String(account.name || "RunningHub 账号"),

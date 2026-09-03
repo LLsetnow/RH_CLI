@@ -1,9 +1,10 @@
 (function () {
   "use strict";
 
-  var state = { outputs: [], summary: {}, type: "all", search: "", sort: "newest" };
+  var state = { outputs: [], summary: {}, type: "all", rating: 0, search: "", sort: "newest" };
   var outputImport = { item: null, path: "" };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
+  var ratingBusy = {};
   var toastTimer = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -66,6 +67,8 @@
     var query = state.search.trim().toLowerCase();
     var result = state.outputs.filter(function (item) {
       if (state.type !== "all" && item.display_type !== state.type) return false;
+      if (state.rating === "unrated" && normalizedRating(item.rating) !== 0) return false;
+      if (typeof state.rating === "number" && state.rating && normalizedRating(item.rating) !== state.rating) return false;
       if (!query) return true;
       return String(item.name || "").toLowerCase().indexOf(query) !== -1 || String(item.task_name || "").toLowerCase().indexOf(query) !== -1;
     });
@@ -79,6 +82,8 @@
   }
   function renderSummary() {
     var summary = state.summary || {};
+    var ratingCounts = summary.rating_counts || {};
+    var oneStarCount = Number(ratingCounts["1"] || 0);
     $("heroTotal").textContent = String(summary.total || 0);
     $("outputCount").textContent = String(filteredOutputs().length);
     $("heroUpdated").textContent = summary.total ? "来自 " + String(summary.tasks || 0) + " 个本地任务" : "暂无可浏览产物";
@@ -89,15 +94,34 @@
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
     });
+    document.querySelectorAll(".output-rating-filter").forEach(function (button) {
+      var ratingValue = button.dataset.outputRating || "0";
+      var rating = ratingValue === "unrated" ? "unrated" : Number(ratingValue);
+      var active = rating === state.rating;
+      var count = rating === "unrated" ? (ratingCounts.unrated || 0) : (rating ? (ratingCounts[String(rating)] || 0) : (summary.total || 0));
+      var countNode = button.querySelector("[data-rating-count]");
+      if (countNode) countNode.textContent = rating === 0 ? "全部" : String(count);
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    var deleteOneStarButton = $("deleteOneStarOutputs");
+    if (deleteOneStarButton) {
+      deleteOneStarButton.disabled = !oneStarCount;
+      $("oneStarOutputCount").textContent = String(oneStarCount);
+      deleteOneStarButton.title = oneStarCount ? "删除全部 " + oneStarCount + " 个一星成片" : "没有一星成片可删除";
+    }
     updateFilterSlider();
   }
   function rebuildSummary() {
-    var summary = { total: state.outputs.length, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0 };
+    var summary = { total: state.outputs.length, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 } };
     var taskIds = {};
     state.outputs.forEach(function (item) {
       var type = String(item.display_type || "other");
       if (summary[type] == null) type = "other";
       summary[type] += 1;
+      var rating = Number(item.rating || 0);
+      if (rating >= 1 && rating <= 5) summary.rating_counts[String(rating)] += 1;
+      else summary.rating_counts.unrated += 1;
       taskIds[String(item.task_id || "")] = true;
     });
     summary.tasks = Object.keys(taskIds).filter(function (taskId) { return taskId; }).length;
@@ -148,6 +172,117 @@
     $("outputPreviewContent").innerHTML = previewMediaMarkup(item);
     window.RHMotion.bindVideoLoopControls($("outputPreviewContent"));
     window.RHMotion.openModal("outputPreviewModal", "closeOutputPreview");
+  }
+  function normalizedRating(value) {
+    var rating = Number(value || 0);
+    return rating >= 1 && rating <= 5 ? Math.floor(rating) : 0;
+  }
+  function ratingStarsMarkup(item) {
+    var rating = normalizedRating(item && item.rating);
+    var stars = "";
+    for (var index = 1; index <= 5; index += 1) {
+      stars += '<button class="rating-star' + (index <= rating ? ' is-filled' : '') + '" type="button" data-rate-output="' + esc(item && item.id) + '" data-rating="' + index + '" aria-label="评分 ' + index + ' 星">' + (index <= rating ? '★' : '☆') + '</button>';
+    }
+    return '<div class="artifact-rating" aria-label="' + esc(rating ? "评分 " + rating + " 星" : "未评分") + '"><span class="rating-stars rating-stars-' + rating + '">' + stars + '</span><span class="rating-value">' + (rating ? rating + " / 5" : "未评分") + '</span></div>';
+  }
+  function refreshRatedArtifact(item) {
+    var card = null;
+    document.querySelectorAll(".artifact-card").forEach(function (candidate) {
+      if (String(candidate.dataset.artifactId) === String(item && item.id)) card = candidate;
+    });
+    if (!card) return;
+    var stillVisible = filteredOutputs().some(function (output) { return String(output.id) === String(item.id); });
+    if (!stillVisible) {
+      card.remove();
+      if (!filteredOutputs().length) {
+        var message = state.outputs.length ? "没有符合筛选条件的产物" : "还没有可浏览的产物";
+        var hint = state.outputs.length ? "换一个类型或关键词试试。" : "完成任务并保存产物后，它们会自动出现在这里。";
+        $("outputGrid").innerHTML = '<div class="outputs-empty"><strong>' + message + '</strong><span>' + hint + "</span></div>";
+      }
+      return;
+    }
+    var ratingNode = card.querySelector(".artifact-rating");
+    if (ratingNode) ratingNode.outerHTML = ratingStarsMarkup(item);
+  }
+  function setOutputRating(item, rating) {
+    if (!item) return;
+    var nextRating = normalizedRating(rating);
+    var key = String(item.id || item.task_id + ":" + item.output_index);
+    if (ratingBusy[key] || normalizedRating(item.rating) === nextRating) return;
+    ratingBusy[key] = true;
+    request("/api/tasks/" + encodeURIComponent(item.task_id) + "/outputs/" + encodeURIComponent(item.output_index), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rating: nextRating })
+    }).then(function (data) {
+      item.rating = normalizedRating(data.output && data.output.rating);
+      rebuildSummary();
+      renderSummary();
+      refreshRatedArtifact(item);
+      showToast(item.rating ? "已评分 " + item.rating + " 星" : "已清除评分");
+    }).catch(function (error) {
+      showToast("保存评分失败：" + error.message, true);
+    }).finally(function () {
+      delete ratingBusy[key];
+    });
+  }
+  function taskWorkflowLabel(item) {
+    var taskName = String(item && item.task_name || "未命名任务").trim() || "未命名任务";
+    var taskId = String(item && item.task_id || "").trim();
+    if (!taskId || (item && item.workflow_available === false)) return esc(taskName);
+    return '<button class="artifact-workflow-link" type="button" data-load-task-workflow="' + esc(taskId) + '" title="加载此次工作流草稿" aria-label="加载工作流 ' + esc(taskName) + '">' + esc(taskName) + '</button>';
+  }
+  function taskDraftFromLoadData(data) {
+    var task = data && data.task && typeof data.task === "object" ? data.task : {};
+    var workflow = data && data.workflow && typeof data.workflow === "object" ? data.workflow : null;
+    if (!workflow) throw new Error("任务中没有可加载的 API 工作流");
+    var metadata = workflow.__rh_meta__ && typeof workflow.__rh_meta__ === "object" ? workflow.__rh_meta__ : {};
+    var accountId = String(task.account_id || "").trim();
+    if (accountId === "__general__") accountId = String(metadata.accountId || metadata.account_id || "").trim();
+    return {
+      version: 1,
+      credential: { selectedKeyId: String(task.key_id || "").trim() },
+      workflow: {
+        id: String(data.workflow_id || "").trim(),
+        remoteWorkflowId: String(task.remote_workflow_id || (data.analysis && data.analysis.remote_workflow_id) || "").trim(),
+        name: String(task.workflow_name || data.filename || "workflow_api.json").trim() || "workflow_api.json",
+        sourceDir: "",
+        accountId: accountId,
+        data: workflow,
+        analysis: data.analysis && typeof data.analysis === "object" ? data.analysis : {},
+        inputConfig: data.input_config && typeof data.input_config === "object" ? data.input_config : (task.input_config || null),
+        values: {
+          files: task.files && typeof task.files === "object" ? task.files : {},
+          prompts: task.prompts && typeof task.prompts === "object" ? task.prompts : {},
+          customInputs: task.custom_inputs && typeof task.custom_inputs === "object" ? task.custom_inputs : {},
+          randomNoise: task.random_noise && typeof task.random_noise === "object" ? task.random_noise : {},
+          resolution: task.resolution && typeof task.resolution === "object" ? task.resolution : {},
+          bypassedNodes: Array.isArray(task.bypassed_nodes) ? task.bypassed_nodes : (Array.isArray(task.bypassed_inputs) ? task.bypassed_inputs : [])
+        },
+        savedAt: Date.now()
+      }
+    };
+  }
+  function loadTaskWorkflowToSubmit(taskId, button) {
+    var original = button ? button.textContent : "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "读取中…";
+    }
+    request("/api/tasks/" + encodeURIComponent(taskId) + "/load").then(function (data) {
+      var draft = taskDraftFromLoadData(data);
+      if (!draft.workflow.id) throw new Error("任务中缺少本地工作流标识");
+      window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+      showToast("已加载工作流「" + draft.workflow.name + "」，正在打开任务提交页");
+      window.location.href = "/";
+    }).catch(function (error) {
+      showToast("加载工作流失败：" + error.message, true);
+    }).finally(function () {
+      if (button) {
+        button.disabled = false;
+        button.textContent = original;
+      }
+    });
   }
   function readTaskDraft() {
     try {
@@ -245,7 +380,7 @@
   }
   function openOutputImport(item, button) {
     if (!item || item.kind !== "file") return showToast("只有本地文件产物可以导入任务节点", true);
-    var original = button ? button.textContent : "导入到任务节点";
+    var original = button ? button.textContent : "导入任务";
     if (button) {
       button.disabled = true;
       button.textContent = "读取中…";
@@ -299,7 +434,7 @@
       showToast("保存导入结果失败：" + error.message, true);
     } finally {
       button.disabled = false;
-      button.textContent = "导入到选中节点";
+      button.textContent = "导入任务";
     }
   }
   function render() {
@@ -313,10 +448,11 @@
       var cost = costLabel(item);
       var size = item.kind === "file" ? formatSize(item.size) : "文本";
       var taskLabel = "删除任务「" + String(item.task_name || item.task_id || "当前任务") + "」";
-      return '<article class="artifact-card" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" tabindex="0" role="button" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
+      var canCompare = item.display_type === "image" || item.display_type === "video";
+      return '<article class="artifact-card' + (canCompare ? ' is-compare-draggable' : '') + '" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" data-compare-draggable="' + (canCompare ? 'true' : 'false') + '" draggable="' + (canCompare ? 'true' : 'false') + '" tabindex="0" role="button" aria-roledescription="' + (canCompare ? '可拖拽到内容对比' : '产物卡片') + '" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
         '<div class="artifact-card-head"><span class="artifact-type ' + esc(item.display_type) + '">' + typeLabel(item.display_type) + '</span><span class="artifact-size">' + size + '</span></div>' +
         mediaMarkup(item) +
-        '<div class="artifact-body"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div><div class="artifact-task" title="' + esc(item.task_name) + '">任务 · ' + esc(item.task_name) + '</div><div class="artifact-foot"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span><span class="artifact-foot-actions">' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + (item.kind === "file" ? '<button class="artifact-import-task" type="button" data-import-output="' + esc(item.id) + '">导入到任务节点</button>' : '') + '<button class="artifact-delete-task" type="button" data-delete-task="' + esc(item.task_id) + '" aria-label="' + esc(taskLabel) + '" title="' + esc(taskLabel) + '">删除任务</button></span></div></div>' +
+        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页">任务 · ' + taskWorkflowLabel(item) + '</div><div class="artifact-foot"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span><span class="artifact-foot-actions">' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + (item.kind === "file" ? '<button class="artifact-import-task" type="button" data-import-output="' + esc(item.id) + '">导入任务</button>' : '') + '<button class="artifact-delete-task" type="button" data-delete-task="' + esc(item.task_id) + '" aria-label="' + esc(taskLabel) + '" title="' + esc(taskLabel) + '">删除任务</button></span></div></div>' +
         '</article>';
     }).join("");
     window.RHMotion.bindVideoLoopControls($("outputGrid"));
@@ -333,6 +469,30 @@
       showToast(error.message, true);
     }).finally(function () { $("refreshOutputs").disabled = false; });
   }
+  function deleteOneStarOutputs() {
+    var ratingCounts = (state.summary && state.summary.rating_counts) || {};
+    var count = Number(ratingCounts["1"] || 0);
+    if (!count) return;
+    if (!window.confirm("将删除全部 " + count + " 个一星成片，仅删除成片文件和产物记录，不删除任务记录。此操作不可恢复。")) return;
+    var button = $("deleteOneStarOutputs");
+    button.disabled = true;
+    button.classList.add("is-busy");
+    var originalLabel = button.innerHTML;
+    button.textContent = "删除中…";
+    request("/api/outputs/rating/1", { method: "DELETE" }).then(function (data) {
+      var deleted = Number(data.deleted || 0);
+      state.outputs = state.outputs.filter(function (item) { return normalizedRating(item.rating) !== 1; });
+      rebuildSummary();
+      render();
+      showToast("已删除 " + deleted + " 个一星成片");
+    }).catch(function (error) {
+      showToast("删除一星成片失败：" + error.message, true);
+    }).finally(function () {
+      button.innerHTML = originalLabel;
+      button.classList.remove("is-busy");
+      renderSummary();
+    });
+  }
   function bindEvents() {
     var themeButton = $("themeToggle");
     themeButton.addEventListener("click", function () {
@@ -346,7 +506,42 @@
       themeButton.title = light ? "切换到夜间模式" : "切换到日间模式";
     });
     $("refreshOutputs").addEventListener("click", function () { loadOutputs(true); });
+    $("deleteOneStarOutputs").addEventListener("click", deleteOneStarOutputs);
+    $("outputGrid").addEventListener("dragstart", function (event) {
+      var card = event.target.closest('.artifact-card[data-compare-draggable="true"]');
+      if (!card || !event.dataTransfer) return;
+      var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
+      if (!item) return;
+      var payload = JSON.stringify({
+        id: String(item.id),
+        name: String(item.name || ""),
+        display_type: String(item.display_type || ""),
+        mime: String(item.mime || ""),
+        url: outputUrl(item),
+        task_name: String(item.task_name || ""),
+        source: "output"
+      });
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("application/x-rh-compare-asset", payload);
+      event.dataTransfer.setData("text/plain", payload);
+      card.classList.add("is-dragging");
+    });
+    $("outputGrid").addEventListener("dragend", function (event) {
+      var card = event.target.closest(".artifact-card");
+      if (card) card.classList.remove("is-dragging");
+    });
     $("outputGrid").addEventListener("click", function (event) {
+      var ratingButton = event.target.closest("[data-rate-output]");
+      if (ratingButton) {
+        var ratedItem = state.outputs.find(function (output) { return String(output.id) === String(ratingButton.dataset.rateOutput); });
+        setOutputRating(ratedItem, ratingButton.dataset.rating);
+        return;
+      }
+      var loadTaskButton = event.target.closest("[data-load-task-workflow]");
+      if (loadTaskButton) {
+        if (!loadTaskButton.disabled) loadTaskWorkflowToSubmit(loadTaskButton.dataset.loadTaskWorkflow, loadTaskButton);
+        return;
+      }
       var importButton = event.target.closest("[data-import-output]");
       if (importButton) {
         var importItem = state.outputs.find(function (output) { return String(output.id) === String(importButton.dataset.importOutput); });
@@ -357,7 +552,7 @@
       if (button) {
         if (button.disabled) return;
         var taskId = String(button.dataset.deleteTask || "").trim();
-        if (!taskId || !window.confirm("删除这条本地任务记录吗？已下载产物不会被删除。")) return;
+        if (!taskId || !window.confirm("删除这条本地任务记录及其 output 文件夹中的全部产物吗？此操作不可恢复。")) return;
         button.disabled = true;
         request("/api/tasks/" + encodeURIComponent(taskId), { method: "DELETE" }).then(function () {
           state.outputs = state.outputs.filter(function (item) { return String(item.task_id || "") !== taskId; });
@@ -394,6 +589,12 @@
       state.type = button.dataset.outputType;
       render();
     });
+    $("outputRatingFilters").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-output-rating]");
+      if (!button) return;
+      state.rating = button.dataset.outputRating === "unrated" ? "unrated" : normalizedRating(button.dataset.outputRating);
+      render();
+    });
     $("closeOutputPreview").addEventListener("click", closeOutputPreview);
     $("outputPreviewModal").addEventListener("click", function (event) { if (event.target === $("outputPreviewModal")) closeOutputPreview(); });
     $("closeOutputImport").addEventListener("click", closeOutputImport);
@@ -408,6 +609,15 @@
         closeOutputPreview();
         closeOutputImport();
       }
+      if (!/^[0-5]$/.test(event.key) || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.target.closest && event.target.closest("input, select, textarea, video, audio")) return;
+      if (document.querySelector(".modal-backdrop.is-open:not([hidden])")) return;
+      var card = document.querySelector(".artifact-card:hover");
+      if (!card) return;
+      var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
+      if (!item) return;
+      event.preventDefault();
+      setOutputRating(item, event.key);
     });
     window.addEventListener("resize", updateFilterSlider);
   }

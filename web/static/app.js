@@ -7,6 +7,8 @@
   var draggedPreviewInputId = "";
   var credentialBusy = {};
   var accountBusy = {};
+  var taskStatusSnapshot = null;
+  var completedTaskNotices = {};
   var toastTimer = 0;
   var draftSaveTimer = 0;
   var submitButtonLabel = "";
@@ -93,6 +95,64 @@
       method: method,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
+    });
+  }
+
+  var chinesePromptSegmentPattern = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff](?:[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]*[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])?/g;
+
+  function chinesePromptSegments(text) {
+    var segments = [];
+    var source = String(text || "");
+    var match;
+    chinesePromptSegmentPattern.lastIndex = 0;
+    while ((match = chinesePromptSegmentPattern.exec(source))) {
+      segments.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+    }
+    chinesePromptSegmentPattern.lastIndex = 0;
+    return segments;
+  }
+
+  function translatePromptNode(inputId, button) {
+    var textarea = document.querySelector('.prompt-value[data-input-id="' + CSS.escape(String(inputId || "")) + '"]');
+    if (!textarea || !button || button.disabled) return;
+    var sourceText = textarea.value;
+    var segments = chinesePromptSegments(sourceText);
+    if (!segments.length) {
+      showToast("当前提示词没有可翻译的中文内容", true);
+      return;
+    }
+    button.disabled = true;
+    button.classList.add("is-loading");
+    var label = button.querySelector("span");
+    if (label) label.textContent = "翻译中…";
+    Promise.all(segments.map(function (segment) {
+      return jsonRequest("/api/prompt/translate", "POST", { text: segment.text }).then(function (data) {
+        var translated = String(data.translated_text || "").trim();
+        if (!translated) throw new Error("阿里云没有返回翻译结果");
+        return translated;
+      });
+    })).then(function (translations) {
+      if (textarea.value !== sourceText) {
+        showToast("提示词已被修改，未覆盖最新内容", true);
+        return;
+      }
+      var translatedText = sourceText;
+      for (var index = segments.length - 1; index >= 0; index -= 1) {
+        var segment = segments[index];
+        translatedText = translatedText.slice(0, segment.start) + translations[index] + translatedText.slice(segment.end);
+      }
+      textarea.value = translatedText;
+      scheduleDraftSave();
+      var meta = textarea.closest(".input-card").querySelector("[data-prompt-meta-id]");
+      if (meta) meta.textContent = "已翻译 " + segments.length + " 处中文，可继续编辑";
+      showToast("已翻译 " + segments.length + " 处中文并回填");
+    }).catch(function (error) {
+      showToast("翻译失败：" + error.message, true);
+    }).finally(function () {
+      var card = textarea.closest(".input-card");
+      button.disabled = Boolean(card && card.classList.contains("is-bypassed"));
+      button.classList.remove("is-loading");
+      if (label) label.textContent = "翻译中文";
     });
   }
 
@@ -219,7 +279,6 @@
     var meta = card && card.querySelector("[data-prompt-meta-id]");
     if (meta) meta.textContent = "已从提示词工坊导入，可继续编辑";
     try { localStorage.removeItem(pendingPromptStorageKey); } catch (error) {}
-    prompt.scrollIntoView({ behavior: "smooth", block: "center" });
     showToast("已导入成品提示词到「" + title + "」");
     return true;
   }
@@ -280,7 +339,7 @@
     var select = $("keySelect");
     var current = select.value;
     if (!appState.keys.length) {
-      list.innerHTML = '<div class="credential-empty">还没有保存凭据。添加后会先验证站点、余额和账户类型。</div>';
+      list.innerHTML = '<div class="credential-empty">还没有保存 API Key。添加后会先验证站点、余额和账户类型。</div>';
     } else {
       list.innerHTML = appState.keys.map(function (key) {
         var active = key.status === "ready";
@@ -298,7 +357,7 @@
           credentialActionButton(key, "delete-key", "删除", "credential-action-delete") + '</span></div></div>';
       }).join("");
     }
-    var options = '<option value="">自动选择可用 Key</option>';
+    var options = '<option value="">自动选择可用 API Key</option>';
     appState.keys.filter(function (key) { return key.status === "ready"; }).forEach(function (key) {
       options += '<option value="' + esc(key.id) + '">' + esc(key.name) + ' · ' + esc(key.capacity) + '并发 · ' + esc(key.site) + '</option>';
     });
@@ -346,7 +405,7 @@
     };
     list.innerHTML = [generalAccount].concat(appState.accounts).map(function (account) {
       var status = String(account.status || "login_required");
-      var siteLabel = account.general ? "全部已绑定 Key" : (account.site === "cn" ? "runninghub.cn" : "runninghub.ai");
+      var siteLabel = account.general ? "全部已绑定 API Key" : (account.site === "cn" ? "runninghub.cn" : "runninghub.ai");
       var current = account.id === appState.currentAccountId;
       var accountDescription = account.general ? "不绑定账号，可调度所有已绑定的 API Key" : "登录凭证保存在 Electron 本地会话";
       var actions = account.general ? "" :
@@ -400,6 +459,38 @@
     return instanceTypeLabels[String(task && task.instance_type || "default").toLowerCase()] || instanceTypeLabels.default;
   }
 
+  function taskCompletionNotice(tasks) {
+    if (!tasks.length) return;
+    if (tasks.length === 1) {
+      var taskName = String(tasks[0].workflow_name || "工作流").trim() || "工作流";
+      showToast("任务完成：" + taskName);
+      return;
+    }
+    showToast(tasks.length + " 个任务已完成");
+  }
+
+  function detectCompletedTasks(tasks) {
+    var completed = [];
+    if (taskStatusSnapshot) {
+      tasks.forEach(function (task) {
+        var taskId = String(task && task.id || "").trim();
+        if (!taskId || task.status !== "completed" || completedTaskNotices[taskId]) return;
+        var previousStatus = taskStatusSnapshot[taskId];
+        if (previousStatus !== "completed") {
+          completed.push(task);
+          completedTaskNotices[taskId] = true;
+        }
+      });
+    }
+    var nextSnapshot = {};
+    tasks.forEach(function (task) {
+      var taskId = String(task && task.id || "").trim();
+      if (taskId) nextSnapshot[taskId] = task.status;
+    });
+    taskStatusSnapshot = nextSnapshot;
+    return completed;
+  }
+
   function renderTasks() {
     var list = $("queueList");
     var tasks = appState.tasks || [];
@@ -421,7 +512,7 @@
         '<div class="task-top"><button class="task-name task-name-button" type="button" data-action="open-task" title="打开任务详情" aria-label="打开任务 ' + esc(task.workflow_name) + '">' + esc(task.workflow_name) + '</button>' +
         '<span class="task-status ' + statusClass + '">' + statusLabel(task.status) + '</span></div>' +
         '<div class="task-meta"><span>' + esc(taskCredentialLabel(task)) + '</span><span>·</span><span>机型 ' + esc(taskInstanceLabel(task)) + '</span><span>·</span>' + queueLabel + '<span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
-        '<div class="task-progress">' + esc(task.progress || "等待调度…") + (task.error ? '<br /><span style="color:var(--danger)">' + esc(task.error) + '</span>' : "") + '</div>' +
+        '<div class="task-progress">' + esc(task.progress || "等待调度…") + (task.error ? '<br /><span class="task-error">' + esc(task.error) + '</span>' : "") + '</div>' +
         '<div class="task-footer"><span class="task-footer-info"><span class="task-output-count">' + esc(outputLabel) + '</span>' + (costLabel ? '<span class="task-cost">' + esc(costLabel) + '</span>' : '') + '<span class="task-duration">' + esc(durationLabel) + '</span></span>' +
         '<span class="task-actions"><button class="task-load-button" type="button" data-action="load-task">加载</button>' +
         (canCancel ? '<button type="button" data-action="cancel-task">取消</button>' : "") +
@@ -436,16 +527,44 @@
     card.classList.remove("task-arrival");
     void card.offsetWidth;
     card.classList.add("task-arrival");
-    window.setTimeout(function () { card.classList.remove("task-arrival"); }, 420);
+    window.setTimeout(function () { card.classList.remove("task-arrival"); }, 620);
+  }
+
+  function animateTaskInsertion(taskId) {
+    var card = document.querySelector('.task-card[data-task-id="' + CSS.escape(String(taskId || "")) + '"]');
+    if (!card) return;
+    var list = card.closest(".queue-list");
+    var cards = list ? Array.prototype.slice.call(list.querySelectorAll(".task-card")) : [];
+    var cardIndex = cards.indexOf(card);
+    if (list && cardIndex !== -1) {
+      var listStyle = window.getComputedStyle(list);
+      var gap = parseFloat(listStyle.rowGap || listStyle.gap || "0") || 0;
+      var shift = card.getBoundingClientRect().height + gap;
+      cards.forEach(function (oldCard, index) {
+        if (index <= cardIndex) return;
+        oldCard.style.setProperty("--task-insertion-shift", "-" + shift + "px");
+        oldCard.classList.remove("task-shift-down");
+        void oldCard.offsetWidth;
+        oldCard.classList.add("task-shift-down");
+        window.setTimeout(function () {
+          oldCard.classList.remove("task-shift-down");
+          oldCard.style.removeProperty("--task-insertion-shift");
+        }, 620);
+      });
+    }
+    animateTaskCard(taskId);
   }
 
   function renderState(data) {
     appState.keys = data.keys || [];
     appState.accounts = data.accounts || [];
     appState.currentAccountId = String((data.settings && data.settings.current_account_id) || "").trim();
-    appState.tasks = data.tasks || [];
+    var tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    var completedTasks = detectCompletedTasks(tasks);
+    appState.tasks = tasks;
     appState.settings = data.settings || {};
     if (document.activeElement !== $("outputDir")) $("outputDir").value = appState.settings.output_dir || "";
+    if (document.activeElement !== $("douyinCookiePath")) $("douyinCookiePath").value = appState.settings.douyin_cookie_path || "";
     if (document.activeElement !== $("promptLibraryPath")) $("promptLibraryPath").value = appState.settings.prompt_library_path || "";
     if (document.activeElement !== $("actionResourcesPath")) $("actionResourcesPath").value = appState.settings.action_resources_path || "";
     var referencePaths = appState.settings.reference_resources_paths || {};
@@ -454,10 +573,32 @@
       if (input && document.activeElement !== input) input.value = referencePaths[kind] || "";
     });
     if (document.activeElement !== $("personalCapacity")) $("personalCapacity").value = appState.settings.personal_capacity || 3;
+    var translationSettings = appState.settings.aliyun_translation || {};
+    if ($("aliyunTranslationAccessKeyId") && document.activeElement !== $("aliyunTranslationAccessKeyId")) {
+      $("aliyunTranslationAccessKeyId").value = translationSettings.access_key_id || "";
+    }
+    if ($("aliyunTranslationAccessKeySecret") && document.activeElement !== $("aliyunTranslationAccessKeySecret")) {
+      $("aliyunTranslationAccessKeySecret").value = "";
+    }
+    if ($("aliyunTranslationStatus")) {
+      var translationStatus = translationSettings.configured ? "已配置 · " + (translationSettings.source === "environment" ? "环境变量" : "本机") : "未配置";
+      $("aliyunTranslationStatus").textContent = translationStatus;
+      $("aliyunTranslationStatus").classList.toggle("ready", Boolean(translationSettings.configured));
+    }
+    var telegramSettings = appState.settings.telegram || {};
+    if ($("telegramBotToken") && document.activeElement !== $("telegramBotToken")) $("telegramBotToken").value = "";
+    if ($("telegramChatId") && document.activeElement !== $("telegramChatId")) $("telegramChatId").value = telegramSettings.chat_id || "";
+    if ($("telegramEnabled")) $("telegramEnabled").checked = Boolean(telegramSettings.enabled);
+    if ($("telegramStatus")) {
+      var telegramStatus = telegramSettings.configured ? (telegramSettings.enabled ? "已启用 · " + (telegramSettings.source === "environment" ? "环境变量" : "本机") : "已配置 · 未启用") : "未配置";
+      $("telegramStatus").textContent = telegramStatus;
+      $("telegramStatus").classList.toggle("ready", Boolean(telegramSettings.configured && telegramSettings.enabled));
+    }
     syncCurrentAccountSite();
     renderKeys();
     renderAccounts();
     renderTasks();
+    taskCompletionNotice(completedTasks);
   }
 
   function refresh(silent) {
@@ -485,7 +626,7 @@
     if (!card) return;
     jumpToInput(inputId);
     var path = card.querySelector(".file-path");
-    if (path) path.focus();
+    if (path) path.focus({ preventScroll: true });
     showToast("已定位到「" + (card.querySelector(".input-title") ? card.querySelector(".input-title").textContent : inputId) + "」");
     if (window.history && window.history.replaceState) window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
   }
@@ -518,7 +659,6 @@
   function jumpToInput(inputId) {
     var card = document.querySelector('.input-card[data-input-id="' + CSS.escape(inputId) + '"]');
     if (!card) return;
-    card.scrollIntoView({ behavior: "smooth", block: "center" });
     card.classList.remove("input-target");
     void card.offsetWidth;
     card.classList.add("input-target");
@@ -538,7 +678,6 @@
     if (step === "inputs" && (!target || target.hidden)) target = document.querySelector(".workflow-panel");
     if (!target) return;
     setProcessStep(step);
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
     target.classList.remove("process-target");
     void target.offsetWidth;
     target.classList.add("process-target");
@@ -598,7 +737,7 @@
         var label = toggle.querySelector(".input-bypass-label");
         if (label) label.textContent = active ? "已旁路" : "旁路";
       }
-      card.querySelectorAll("input, textarea, select, button[data-action='pick-file'], button[data-action='pick-native-file'], button[data-action='pick-prompt']").forEach(function (control) {
+      card.querySelectorAll("input, textarea, select, button[data-action='pick-file'], button[data-action='pick-native-file'], button[data-action='pick-prompt'], button[data-action='translate-prompt']").forEach(function (control) {
         control.disabled = active;
       });
       var dropzone = card.querySelector(".file-dropzone");
@@ -807,6 +946,46 @@
     showToast("已添加 RandomNoise 节点 " + nodeId);
   }
 
+  function isVideoFileInput(item) {
+    var classType = String(item && item.class_type || "").toLowerCase();
+    var field = String(item && item.field || "").toLowerCase();
+    var value = String(item && item.default || "");
+    return classType.indexOf("loadvideo") !== -1 || classType.indexOf("vhs_loadvideo") !== -1 ||
+      (field === "video" && classType.indexOf("load") !== -1) || /\.(mp4|mov|m4v|webm|avi|mkv|wmv|flv)$/i.test(value);
+  }
+
+  function expectedPreviewKind(inputId) {
+    var preview = document.querySelector('.file-preview[data-preview-id="' + CSS.escape(inputId) + '"]');
+    var kind = String(preview && preview.dataset.expectedPreviewKind || "").toLowerCase();
+    return kind === "video" || kind === "image" ? kind : "";
+  }
+
+  function mediaKindFromFile(file) {
+    var filename = String(file && file.name || "");
+    var mime = String(file && file.type || "").toLowerCase();
+    if (mime.indexOf("image/") === 0 || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(filename)) return "image";
+    if (mime.indexOf("video/") === 0 || /\.(mp4|mov|m4v|webm|avi|mkv|wmv|flv)$/i.test(filename)) return "video";
+    return "";
+  }
+
+  function filePreviewMarkup(item) {
+    var isVideo = isVideoFileInput(item);
+    var kind = isVideo ? "video" : "image";
+    var label = isVideo ? "视频预览" : "图片预览";
+    var accept = isVideo ? "video/*" : "image/*";
+    var mediaMarkup = isVideo ? '<video controls preload="metadata" playsinline></video>' : '<img alt="" draggable="false" />';
+    var pasteButton = isVideo ? "" : '<button class="file-button paste-file-button" data-action="paste-file" data-input-id="' + esc(item.id) + '" type="button">粘贴图片</button>';
+    var hint = isVideo ? "拖入、选择或输入路径后预览视频" : "拖入、⌘V 粘贴或点击“预览”查看图片";
+    var douyinSource = isVideo ? '<div class="video-source-row"><label class="video-url-field"><span class="sr-only">抖音视频链接</span><input class="douyin-url" data-input-id="' + esc(item.id) + '" type="url" placeholder="粘贴抖音视频链接（可选）" autocomplete="off" /></label><button class="file-button douyin-download-button" data-action="download-douyin" data-input-id="' + esc(item.id) + '" type="button">下载抖音</button></div>' : "";
+    return '<div class="file-input-layout"><div class="file-input-controls">' +
+      '<div class="file-dropzone" data-action="pick-file" data-input-id="' + esc(item.id) + '" tabindex="0" role="group" aria-label="文件拖放区域">' +
+      '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">' + hint + '</small></span>' +
+      '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" accept="' + accept + '" hidden />' + pasteButton + '<button class="file-button" data-action="pick-file" data-input-id="' + esc(item.id) + '" type="button">预览</button></div>' +
+      '<div class="input-control-row"><input class="file-path" data-input-id="' + esc(item.id) + '" data-original-value="' + esc(String(item.default || "")) + '" type="text" placeholder="输入本机绝对路径（不会复制文件）" value="' + esc(/^(\/|[A-Za-z]:[\\/])/.test(String(item.default || "")) ? String(item.default || "") : "") + '" /><button class="file-button native-file-button" data-action="pick-native-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button></div>' + douyinSource +
+      '<div class="file-meta" data-meta-id="' + esc(item.id) + '">点击“选择文件”后，这里会显示本机绝对路径；输入文件不会复制到项目目录。</div></div>' +
+      '<figure class="file-preview" data-preview-id="' + esc(item.id) + '" data-expected-preview-kind="' + kind + '" draggable="true" title="拖动此预览到其他文件输入以替换" aria-label="' + label + '，可拖动到其他文件输入替换" hidden><figcaption>' + label + '</figcaption><div class="file-preview-frame">' + mediaMarkup + '</div><div class="file-preview-name"></div></figure></div></div>';
+  }
+
   function renderAnalysis(analysis) {
     var summary = $("workflowSummary");
     var inputs = $("workflowInputs");
@@ -840,13 +1019,7 @@
         var originalFileValue = String(item.default || "");
         var visibleFileValue = /^(\/|[A-Za-z]:[\\/])/.test(originalFileValue) ? originalFileValue : "";
         html += '<div class="input-card file-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.title) + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
-          '<div class="file-input-layout"><div class="file-input-controls">' +
-          '<div class="file-dropzone" data-action="pick-file" data-input-id="' + esc(item.id) + '" tabindex="0" role="group" aria-label="文件拖放区域">' +
-          '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">拖入、⌘V 粘贴或点击“预览”查看图片</small></span>' +
-          '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" hidden /><button class="file-button paste-file-button" data-action="paste-file" data-input-id="' + esc(item.id) + '" type="button">粘贴图片</button><button class="file-button" data-action="pick-file" data-input-id="' + esc(item.id) + '" type="button">预览</button></div>' +
-          '<div class="input-control-row"><input class="file-path" data-input-id="' + esc(item.id) + '" data-original-value="' + esc(originalFileValue) + '" type="text" placeholder="输入本机绝对路径（不会复制文件）" value="' + esc(visibleFileValue) + '" /><button class="file-button native-file-button" data-action="pick-native-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button></div>' +
-          '<div class="file-meta" data-meta-id="' + esc(item.id) + '">点击“选择文件”后，这里会显示本机绝对路径；输入文件不会复制到项目目录。</div></div>' +
-          '<figure class="file-preview" data-preview-id="' + esc(item.id) + '" draggable="true" title="拖动此预览到其他文件输入以替换" aria-label="图片预览，可拖动到其他文件输入替换" hidden><figcaption>图片预览</figcaption><div class="file-preview-frame"><img alt="" draggable="false" /></div><div class="file-preview-name"></div></figure></div></div>';
+          filePreviewMarkup({ id: item.id, default: originalFileValue, field: item.field, class_type: item.class_type });
       });
     }
     if (prompts.length) {
@@ -854,7 +1027,7 @@
       prompts.forEach(function (item) {
         html += '<div class="input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.title) + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           '<textarea class="prompt-value" data-input-id="' + esc(item.id) + '" placeholder="可以直接输入，也可以从下方加载 .txt">' + esc(item.default || "") + '</textarea>' +
-          '<div class="prompt-tools"><input class="prompt-picker" data-input-id="' + esc(item.id) + '" type="file" accept=".txt,text/plain" hidden /><button class="file-button" data-action="pick-prompt" data-input-id="' + esc(item.id) + '" type="button">加载 TXT</button><span class="file-meta" data-prompt-meta-id="' + esc(item.id) + '">读取内容后仍可继续编辑</span></div></div>';
+          '<div class="prompt-tools"><input class="prompt-picker" data-input-id="' + esc(item.id) + '" type="file" accept=".txt,text/plain" hidden /><button class="file-button" data-action="pick-prompt" data-input-id="' + esc(item.id) + '" type="button">加载 TXT</button><button class="file-button translate-prompt-button" data-action="translate-prompt" data-input-id="' + esc(item.id) + '" type="button"><span>翻译中文</span></button><span class="file-meta" data-prompt-meta-id="' + esc(item.id) + '">读取内容后仍可继续编辑</span></div></div>';
       });
     }
     if (resolutions.length) {
@@ -902,7 +1075,7 @@
           '<div class="custom-input-control">' + control + '</div><div class="file-meta">节点字段：' + esc(item.node_id + ":" + item.field) + '</div></div>';
       });
     }
-    if (!files.length && !prompts.length && !resolutions.length && !randomNoise.length && !customInputs.length) html += '<div class="empty-queue" style="min-height:130px"><strong>没有识别到可填写输入</strong><span>当前工作流没有需要在这里配置的输入节点。</span></div>';
+    if (!files.length && !prompts.length && !resolutions.length && !randomNoise.length && !customInputs.length) html += '<div class="empty-queue compact-empty"><strong>没有识别到可填写输入</strong><span>当前工作流没有需要在这里配置的输入节点。</span></div>';
     inputs.innerHTML = html;
     inputs.hidden = false;
     $("submitStrip").hidden = false;
@@ -1003,7 +1176,6 @@
       $("exportWorkflowButton").hidden = false;
       setAnalysisStatus("已加载任务数据，可以继续修改后提交。", false);
       var panel = document.querySelector(".workflow-panel");
-      if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
       saveDraftNow();
       showToast("已加载任务：" + appState.workflowName);
     });
@@ -1099,6 +1271,9 @@
     inputId = String(inputId || "").trim();
     if (!inputId || !file || String(file.type || "").indexOf("image/") !== 0) {
       return Promise.reject(new Error("剪贴板中没有图片"));
+    }
+    if (expectedPreviewKind(inputId) === "video") {
+      return Promise.reject(new Error("视频节点不能粘贴图片，请选择视频文件"));
     }
     if (isNodeBypassed(String(inputId).split(":", 1)[0])) return Promise.reject(new Error("该输入节点已旁路"));
     rememberFileInput(inputId);
@@ -1224,9 +1399,21 @@
     if (!preview) return;
     if (previewUrls[inputId] && previewUrls[inputId].indexOf("blob:") === 0) URL.revokeObjectURL(previewUrls[inputId]);
     delete previewUrls[inputId];
-    preview.querySelector("img").removeAttribute("src");
-    preview.querySelector("img").removeAttribute("alt");
+    var image = preview.querySelector("img");
+    var video = preview.querySelector("video");
+    if (image) {
+      image.removeAttribute("src");
+      image.removeAttribute("alt");
+      image.hidden = true;
+    }
+    if (video) {
+      try { video.pause(); } catch (error) {}
+      video.removeAttribute("src");
+      video.hidden = true;
+      try { video.load(); } catch (error) {}
+    }
     preview.querySelector(".file-preview-name").textContent = "";
+    preview.dataset.previewKind = "";
     preview.hidden = true;
     delete previewFiles[inputId];
   }
@@ -1262,6 +1449,54 @@
     });
   }
 
+  function downloadDouyinVideo(inputId, button) {
+    if (isNodeBypassed(String(inputId).split(":", 1)[0])) return;
+    var urlInput = document.querySelector('.douyin-url[data-input-id="' + CSS.escape(inputId) + '"]');
+    var url = urlInput ? urlInput.value.trim() : "";
+    if (!url) {
+      if (urlInput) urlInput.focus();
+      showToast("请先粘贴抖音视频链接", true);
+      return;
+    }
+    var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
+    var meta = document.querySelector('[data-meta-id="' + CSS.escape(inputId) + '"]');
+    var zone = document.querySelector('.file-dropzone[data-input-id="' + CSS.escape(inputId) + '"]');
+    var card = zone && zone.closest(".file-input-card");
+    var original = button.textContent;
+    button.disabled = true;
+    button.textContent = "下载中…";
+    if (card) card.classList.add("is-loading");
+    if (zone) {
+      zone.classList.add("is-loading");
+      zone.querySelector(".file-drop-title").textContent = "正在下载抖音视频";
+      zone.querySelector(".file-drop-hint").textContent = "下载完成后会自动写入当前节点";
+    }
+    jsonRequest("/api/download-douyin", "POST", { url: url }).then(function (selected) {
+      if (path) path.value = selected.path || "";
+      setPathPreview(inputId, selected);
+      if (zone) {
+        zone.classList.remove("is-loading");
+        zone.classList.add("is-ready");
+        zone.querySelector(".file-drop-title").textContent = "已下载 " + selected.name;
+        zone.querySelector(".file-drop-hint").textContent = "视频已保存，可重新下载替换";
+      }
+      if (card) {
+        card.classList.remove("is-loading");
+        card.classList.add("is-ready");
+      }
+      if (meta) meta.textContent = selected.name + " · 已从抖音下载到本机";
+      scheduleDraftSave();
+      showToast("抖音视频已下载并载入当前节点");
+    }).catch(function (error) {
+      if (card) card.classList.remove("is-loading");
+      if (zone) zone.classList.remove("is-loading");
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = original;
+    });
+  }
+
   function chooseOutputDirectory() {
     if (window.rhElectron && typeof window.rhElectron.selectDirectory === "function") {
       return Promise.resolve(window.rhElectron.selectDirectory()).then(function (path) {
@@ -1286,6 +1521,34 @@
     }).finally(function () {
       button.disabled = false;
       button.textContent = original;
+    });
+  }
+
+  function pickDouyinCookie(button) {
+    var original = button.textContent;
+    button.disabled = true;
+    button.textContent = "选择中…";
+    jsonRequest("/api/pick-douyin-cookie", "POST", {}).then(function (selected) {
+      $("douyinCookiePath").value = selected.path || "";
+      showToast("已选择 Cookie 文件，请点击“保存路径”确认");
+    }).catch(function (error) {
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = original;
+    });
+  }
+
+  function saveDouyinCookie() {
+    var button = $("saveDouyinCookie");
+    button.disabled = true;
+    jsonRequest("/api/settings", "PATCH", { douyin_cookie_path: $("douyinCookiePath").value.trim() }).then(function (data) {
+      $("douyinCookiePath").value = data.douyin_cookie_path || "";
+      showToast(data.douyin_cookie_path ? "抖音 Cookie 路径已保存" : "抖音 Cookie 路径已清除");
+    }).catch(function (error) {
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
     });
   }
 
@@ -1369,9 +1632,32 @@
     if (!preview) return;
     clearImagePreview(inputId);
     if (!selected || !selected.preview_url) return;
+    var expectedKind = expectedPreviewKind(inputId);
+    var kind = String(selected.preview_kind || "").toLowerCase();
+    if (kind !== "video" && kind !== "image") {
+      kind = String(selected.mime || "").toLowerCase().indexOf("video/") === 0 ? "video" : "image";
+    }
+    if (expectedKind && kind && expectedKind !== kind) return;
+    kind = expectedKind || kind;
+    var image = preview.querySelector("img");
+    var video = preview.querySelector("video");
     previewUrls[inputId] = selected.preview_url;
-    preview.querySelector("img").src = selected.preview_url;
-    preview.querySelector("img").alt = selected.name || "输入图片预览";
+    preview.dataset.previewKind = kind;
+    if (image) {
+      image.hidden = kind !== "image";
+      if (kind === "image") {
+        image.src = selected.preview_url;
+        image.alt = selected.name || "输入图片预览";
+      }
+    }
+    if (video) {
+      video.hidden = kind !== "video";
+      if (kind === "video") {
+        video.src = selected.preview_url;
+        video.setAttribute("aria-label", selected.name || "输入视频预览");
+        video.load();
+      }
+    }
     preview.querySelector(".file-preview-name").textContent = selected.name || "";
     preview.hidden = false;
   }
@@ -1387,14 +1673,14 @@
 
   function getPreviewSource(inputId) {
     var preview = document.querySelector('.file-preview[data-preview-id="' + CSS.escape(inputId) + '"]');
-    var image = preview && preview.querySelector("img");
-    var url = String(previewUrls[inputId] || (image && image.src) || "").trim();
+    var media = preview && preview.querySelector("video:not([hidden]), img:not([hidden])");
+    var url = String(previewUrls[inputId] || (media && media.src) || "").trim();
     if (!preview || preview.hidden || !url) return null;
     var pathInput = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
     var file = previewFiles[inputId] || null;
     var path = String(pathInput && pathInput.value || "").trim();
     if (!path && file) path = droppedFilePath(null, file);
-    return { url: url, name: String(preview.querySelector(".file-preview-name").textContent || (file && file.name) || "").trim(), path: path, file: file };
+    return { url: url, name: String(preview.querySelector(".file-preview-name").textContent || (file && file.name) || "").trim(), path: path, file: file, kind: preview.dataset.previewKind || preview.dataset.expectedPreviewKind || "" };
   }
 
   function copyPreviewToInput(sourceId, targetId) {
@@ -1413,7 +1699,7 @@
       previewFiles[targetId] = source.file;
       updateImagePreview(targetId, source.file);
     } else {
-      setPathPreview(targetId, { preview_url: source.url, name: source.name });
+      setPathPreview(targetId, { preview_url: source.url, name: source.name, preview_kind: source.kind });
     }
     if (card) card.classList.add("is-ready");
     if (zone) {
@@ -1467,15 +1753,34 @@
     if (previewUrls[inputId] && previewUrls[inputId].indexOf("blob:") === 0) URL.revokeObjectURL(previewUrls[inputId]);
     previewUrls[inputId] = "";
     var filename = String(file && file.name || "");
-    var isImage = Boolean(file && ((String(file.type || "").indexOf("image/") === 0) || (/\.(png|jpe?g|gif|webp|bmp|avif)$/i).test(filename)));
-    if (!isImage) {
+    var expectedKind = expectedPreviewKind(inputId);
+    var detectedKind = mediaKindFromFile(file);
+    if (!detectedKind || (expectedKind && expectedKind !== detectedKind)) {
+      clearImagePreview(inputId);
       preview.hidden = true;
       return;
     }
     var url = URL.createObjectURL(file);
     previewUrls[inputId] = url;
-    preview.querySelector("img").src = url;
-    preview.querySelector("img").alt = filename || "输入图片预览";
+    var kind = expectedKind || detectedKind;
+    var image = preview.querySelector("img");
+    var video = preview.querySelector("video");
+    preview.dataset.previewKind = kind;
+    if (image) {
+      image.hidden = kind !== "image";
+      if (kind === "image") {
+        image.src = url;
+        image.alt = filename || "输入图片预览";
+      }
+    }
+    if (video) {
+      video.hidden = kind !== "video";
+      if (kind === "video") {
+        video.src = url;
+        video.setAttribute("aria-label", filename || "输入视频预览");
+        video.load();
+      }
+    }
     preview.querySelector(".file-preview-name").textContent = filename;
     preview.hidden = false;
   }
@@ -1649,7 +1954,7 @@
       showToast("任务已加入本地队列");
       return refresh(true).then(function () {
         jumpToProcessStep("queue");
-        animateTaskCard(data && data.task && data.task.id);
+        animateTaskInsertion(data && data.task && data.task.id);
       });
     }).catch(function (error) { showToast(error.message, true); }).finally(function () {
       button.disabled = false;
@@ -1721,7 +2026,7 @@
     $("modalTitle").textContent = task.workflow_name || "任务详情";
     var meta = $("modalMeta");
     var costLabel = formatTaskCost(task);
-    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>凭据：' + esc(taskCredentialLabel(task)) + '</span><span>机型：' + esc(taskInstanceLabel(task)) + '</span><span>workflowId：' + esc(task.remote_workflow_id || "未记录") + '</span><span>taskId：' + esc(task.remote_task_id || "尚未返回") + '</span>' + (costLabel ? '<span>' + esc(costLabel) + '</span>' : '') + '<span>' + esc(formatTaskDuration(task)) + '</span><span>' + formatTime(task.created_at) + '</span>';
+    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>API Key：' + esc(taskCredentialLabel(task)) + '</span><span>机型：' + esc(taskInstanceLabel(task)) + '</span><span>workflowId：' + esc(task.remote_workflow_id || "未记录") + '</span><span>taskId：' + esc(task.remote_task_id || "尚未返回") + '</span>' + (costLabel ? '<span>' + esc(costLabel) + '</span>' : '') + '<span>' + esc(formatTaskDuration(task)) + '</span><span>' + formatTime(task.created_at) + '</span>';
     renderDiagnostics(task);
     var outputs = $("modalOutputs");
     var items = task.outputs || [];
@@ -1782,7 +2087,7 @@
       var endpoint = action === "check-key" ? "/check" : "/balance";
       request("/api/keys/" + encodeURIComponent(keyId) + endpoint, { method: "POST" }).then(function (data) {
         if (action === "check-key") {
-          showToast(data.key.status === "ready" ? "凭据检测成功，余额已更新" : data.key.status_message, data.key.status !== "ready");
+          showToast(data.key.status === "ready" ? "API Key 检测成功，余额已更新" : data.key.status_message, data.key.status !== "ready");
         } else {
           showToast("余额已更新");
         }
@@ -1793,11 +2098,11 @@
       });
     }
     if (action === "delete-key") {
-      if (!window.confirm("确定删除这个本地凭据吗？")) return;
+      if (!window.confirm("确定删除这个本地 API Key 吗？")) return;
       credentialBusy[keyId] = action;
       renderKeys();
       request("/api/keys/" + encodeURIComponent(keyId), { method: "DELETE" }).then(function () {
-        showToast("凭据已删除");
+        showToast("API Key 已删除");
         refresh(true);
       }).catch(function (error) { showToast(error.message, true); }).finally(function () {
         delete credentialBusy[keyId];
@@ -1920,13 +2225,15 @@
         return;
       }
       var inputCard = trigger.closest(".input-card");
-      if (inputCard && inputCard.classList.contains("is-bypassed") && ["pick-file", "pick-native-file", "pick-prompt", "paste-file"].indexOf(action) !== -1) return;
+      if (inputCard && inputCard.classList.contains("is-bypassed") && ["pick-file", "pick-native-file", "pick-prompt", "paste-file", "download-douyin", "translate-prompt"].indexOf(action) !== -1) return;
       if (action === "jump-input") jumpToInput(inputId);
       if (action === "add-random-noise") addRandomNoiseNode();
       if (action === "pick-file") document.querySelector('.file-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
       if (action === "paste-file") armClipboardPaste(inputId);
       if (action === "pick-native-file") pickNativeInput(inputId, trigger);
+      if (action === "download-douyin") downloadDouyinVideo(inputId, trigger);
       if (action === "pick-prompt") document.querySelector('.prompt-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
+      if (action === "translate-prompt") translatePromptNode(inputId, trigger);
     });
     $("workflowInputs").addEventListener("input", function (event) {
       if (event.target.classList.contains("random-noise-seed") || event.target.classList.contains("resolution-megapixels")) appState.workflowDirty = true;
@@ -2078,7 +2385,7 @@
       jsonRequest("/api/keys", "POST", { name: $("keyName").value.trim(), site: $("keySite").value, api_key: apiKey }).then(function (data) {
         $("keyValue").value = "";
         $("keyName").value = "";
-        showToast(data.key.status === "ready" ? "当前账号凭据已验证并保存，余额已更新" : data.key.status_message, data.key.status !== "ready");
+        showToast(data.key.status === "ready" ? "当前账号 API Key 已验证并保存，余额已更新" : data.key.status_message, data.key.status !== "ready");
         refresh(true);
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
     });
@@ -2086,7 +2393,7 @@
       var button = this;
       button.disabled = true;
       Promise.all(appState.keys.map(function (key) { return request("/api/keys/" + encodeURIComponent(key.id) + "/check", { method: "POST" }); }))
-        .then(function () { showToast("凭据已刷新"); return refresh(true); })
+        .then(function () { showToast("API Key 已刷新"); return refresh(true); })
         .catch(function (error) { showToast(error.message, true); })
         .finally(function () { button.disabled = false; });
     });
@@ -2097,6 +2404,8 @@
         showToast("默认产物目录已保存");
       }).catch(function (error) { showToast(error.message, true); });
     });
+    $("chooseDouyinCookie").addEventListener("click", function () { pickDouyinCookie(this); });
+    $("saveDouyinCookie").addEventListener("click", saveDouyinCookie);
     $("saveActionResources").addEventListener("click", function () {
       var value = $("actionResourcesPath").value.trim();
       var button = this;
@@ -2118,11 +2427,64 @@
         showToast("个人并发数已保存");
       }).catch(function (error) { showToast(error.message, true); });
     });
+    $("saveAliyunTranslation").addEventListener("click", function () {
+      var button = this;
+      var accessKeyId = $("aliyunTranslationAccessKeyId").value.trim();
+      var accessKeySecret = $("aliyunTranslationAccessKeySecret").value.trim();
+      if (!accessKeyId || !accessKeySecret) return showToast("请输入阿里云 AccessKey ID 和 AccessKey Secret", true);
+      button.disabled = true;
+      jsonRequest("/api/settings", "PATCH", {
+        aliyun_translation_access_key_id: accessKeyId,
+        aliyun_translation_access_key_secret: accessKeySecret,
+      }).then(function (data) {
+        var settings = data.aliyun_translation || {};
+        $("aliyunTranslationAccessKeyId").value = settings.access_key_id || accessKeyId;
+        $("aliyunTranslationAccessKeySecret").value = "";
+        $("aliyunTranslationStatus").textContent = settings.configured ? "已配置 · 本机" : "未配置";
+        $("aliyunTranslationStatus").classList.toggle("ready", Boolean(settings.configured));
+        showToast("阿里云翻译配置已保存");
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
+    });
+    $("saveTelegram").addEventListener("click", function () {
+      var button = this;
+      button.disabled = true;
+      jsonRequest("/api/settings", "PATCH", {
+        telegram_bot_token: $("telegramBotToken").value.trim(),
+        telegram_chat_id: $("telegramChatId").value.trim(),
+        telegram_enabled: $("telegramEnabled").checked,
+      }).then(function (data) {
+        var settings = data.telegram || {};
+        $("telegramBotToken").value = "";
+        $("telegramChatId").value = settings.chat_id || "";
+        $("telegramEnabled").checked = Boolean(settings.enabled);
+        $("telegramStatus").textContent = settings.configured ? (settings.enabled ? "已启用 · 本机" : "已配置 · 未启用") : "未配置";
+        $("telegramStatus").classList.toggle("ready", Boolean(settings.configured && settings.enabled));
+        showToast("Telegram 推送配置已保存");
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
+    });
+    $("testTelegram").addEventListener("click", function () {
+      var button = this;
+      button.disabled = true;
+      jsonRequest("/api/telegram/test", "POST", {}).then(function (data) {
+        showToast(data.message || "Telegram 测试消息已发送");
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
+    });
+    $("clearTelegram").addEventListener("click", function () {
+      if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？")) return;
+      var button = this;
+      button.disabled = true;
+      jsonRequest("/api/settings", "PATCH", { telegram_clear: true }).then(function (data) {
+        var settings = data.telegram || {};
+        $("telegramBotToken").value = "";
+        $("telegramChatId").value = settings.chat_id || "";
+        $("telegramEnabled").checked = false;
+        $("telegramStatus").textContent = settings.configured ? "已配置 · 未启用" : "未配置";
+        $("telegramStatus").classList.remove("ready");
+        showToast("Telegram 本机配置已清除");
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
+    });
     $("chooseOutputDir").addEventListener("click", function () { pickOutputDirectory(this); });
     $("chooseActionResources").addEventListener("click", function () { pickActionResources(this); });
-    $("openSettings").addEventListener("click", function () {
-      window.RHMotion.openModal("settingsModal", "outputDir");
-    });
     $("closeSettings").addEventListener("click", function () { window.RHMotion.closeModal("settingsModal"); });
     $("settingsModal").addEventListener("click", function (event) { if (event.target === $("settingsModal")) window.RHMotion.closeModal("settingsModal"); });
     $("credentialForm").addEventListener("submit", function (event) { event.preventDefault(); });

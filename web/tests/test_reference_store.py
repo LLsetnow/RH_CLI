@@ -50,7 +50,11 @@ def test_reference_store_parses_all_resource_kinds_and_serves_media(tmp_path):
     assert {item["kind"] for item in public} == {"character", "audio", "background", "clothes"}
     character = next(item for item in public if item["kind"] == "character")
     audio = next(item for item in public if item["kind"] == "audio")
-    assert character["tags"] == ["人物", "二次元", "主角"]
+    background = next(item for item in public if item["kind"] == "background")
+    assert character["category"] == "二次元"
+    assert character["tags"] == ["人物", "主角"]
+    assert background["category"] == "室内"
+    assert background["tags"] == ["背景"]
     assert character["image_url"].endswith("/image")
     assert store.media_path(character["id"], "image").name == "hero.png"
     assert audio["audio_url"].endswith("/audio")
@@ -72,7 +76,29 @@ def test_reference_store_keeps_legacy_nested_character_variants_readable(tmp_pat
 
     item = next(item for item in store.references() if item["kind"] == "character")
     assert item["title"] == "主角 · 三视图"
-    assert item["tags"] == ["人物", "二次元", "主角"]
+    assert item["category"] == "二次元"
+    assert item["tags"] == ["人物", "主角"]
+
+
+def test_reference_store_unwraps_angle_bracket_paths_and_keeps_same_titles_distinct(tmp_path):
+    root = _reference_root(tmp_path)
+    (root / "character" / "千夏").mkdir()
+    (root / "character" / "樱井宁宁").mkdir()
+    (root / "character" / "千夏" / "4.jpg").write_bytes(b"first")
+    (root / "character" / "樱井宁宁" / "4.jpg").write_bytes(b"second")
+    (root / "character" / "character.md").write_text(
+        "## character\n\n"
+        "### 千夏\n\n#### 4.jpg\n\n![200](<千夏/4.jpg>)\n\n> 千夏参考。\n\n"
+        "### 樱井宁宁\n\n#### 4.jpg\n\n![200](<樱井宁宁/4.jpg>)\n\n> 樱井宁宁参考。\n",
+        encoding="utf-8",
+    )
+    store = ReferenceStore(tmp_path / "data", root)
+
+    items = [item for item in store.references() if item["kind"] == "character"]
+    assert len(items) == 2
+    assert len({item["id"] for item in items}) == 2
+    assert {item["image_path"] for item in items} == {"千夏/4.jpg", "樱井宁宁/4.jpg"}
+    assert {store.media_path(item["id"], "image").parent.name for item in items} == {"千夏", "樱井宁宁"}
 
 
 def test_reference_api_exposes_library_and_local_image(tmp_path, monkeypatch):
@@ -98,7 +124,7 @@ def test_reference_api_exposes_library_and_local_image(tmp_path, monkeypatch):
         response = connection.getresponse()
         payload = json.loads(response.read())
         assert response.status == 200
-        assert payload["kind_counts"] == {"character": 72, "audio": 6, "background": 14, "clothes": 6}
+        assert payload["kind_counts"] == {"character": 162, "audio": 6, "background": 14, "clothes": 6}
         background = next(item for item in payload["references"] if item["kind"] == "background" and item["image_available"])
 
         connection.request("GET", background["image_url"])

@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from rh_cli.workflow.client import (
     _upload_file,
     _validate_api_workflow,
 )
+from .telegram import TelegramNotifier
 
 
 WEB_ROOT = Path(__file__).resolve().parent
@@ -83,6 +85,7 @@ MIN_PERSONAL_CAPACITY = 1
 MAX_PERSONAL_CAPACITY = 3
 WORKFLOW_META_KEY = "__rh_meta__"
 GENERAL_ACCOUNT_ID = "__general__"
+UNBOUND_ACCOUNT_ID = "__unbound__"
 INSTANCE_TYPES = {"default", "plus", "ultra"}
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 
@@ -890,9 +893,39 @@ class LocalStore:
             )
             """
         )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_records (
+              task_id TEXT PRIMARY KEY,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              account_id TEXT NOT NULL DEFAULT '',
+              started_at INTEGER,
+              completed_at INTEGER,
+              status TEXT NOT NULL,
+              workflow_name TEXT NOT NULL DEFAULT '',
+              cost_type TEXT,
+              cost TEXT,
+              duration TEXT,
+              elapsed_ms INTEGER,
+              output_count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_deliveries (
+              task_id TEXT NOT NULL,
+              delivery_key TEXT NOT NULL,
+              sent_at INTEGER NOT NULL,
+              PRIMARY KEY (task_id, delivery_key)
+            )
+            """
+        )
         self._migrate_schema()
         self._db.commit()
         self._interrupt_incomplete()
+        self._backfill_usage_records()
 
     def _migrate_schema(self) -> None:
         """Add fields introduced by newer web builds to an existing local database."""
@@ -925,6 +958,9 @@ class LocalStore:
             self._db.execute("ALTER TABLE tasks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
         if "instance_type" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN instance_type TEXT NOT NULL DEFAULT 'default'")
+        usage_columns = {str(row[1]) for row in self._db.execute("PRAGMA table_info(usage_records)").fetchall()}
+        if "account_id" not in usage_columns:
+            self._db.execute("ALTER TABLE usage_records ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
         self._backfill_dispatch_credential_snapshots()
 
     def _infer_key_account_id(self, key: dict[str, Any], accounts: list[dict[str, Any]]) -> str:
@@ -1259,6 +1295,24 @@ class LocalStore:
         value = self._read_json_file().get("output_dir")
         return str(value).strip() if isinstance(value, str) and value.strip() else str(default_local_output_dir())
 
+    def douyin_cookie_path(self) -> str:
+        value = self._read_json_file().get("douyin_cookie_path")
+        return str(Path(value).expanduser().resolve()) if isinstance(value, str) and value.strip() else ""
+
+    def set_douyin_cookie_path(self, value: str) -> str:
+        raw_path = str(value or "").strip()
+        data = self._read_json_file()
+        if not raw_path:
+            data.pop("douyin_cookie_path", None)
+            self._write_json_file(data)
+            return ""
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_file():
+            raise RhCliError("INVALID_DOUYIN_COOKIE_PATH", f"抖音 Cookie 文件不存在：{path}")
+        data["douyin_cookie_path"] = str(path)
+        self._write_json_file(data)
+        return str(path)
+
     def set_output_dir(self, value: str) -> str:
         path = str(Path(value).expanduser()).strip()
         if not path:
@@ -1356,6 +1410,73 @@ class LocalStore:
         data.setdefault("output_dir", str(default_local_output_dir()))
         self._write_json_file(data)
         return capacity
+
+    def aliyun_translation_credentials(self) -> tuple[str, str]:
+        """Return local Aliyun translation credentials, falling back to env vars."""
+        data = self._read_json_file()
+        local_id = str(data.get("aliyun_translation_access_key_id") or "").strip()
+        local_secret = str(data.get("aliyun_translation_access_key_secret") or "").strip()
+        if local_id and local_secret:
+            return local_id, local_secret
+        env_id = str(os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID") or os.environ.get("ALIYUN_ACCESS_KEY_ID") or "").strip()
+        env_secret = str(os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET") or os.environ.get("ALIYUN_ACCESS_KEY_SECRET") or "").strip()
+        return env_id, env_secret
+
+    def aliyun_translation_settings(self) -> dict[str, Any]:
+        access_key_id, access_key_secret = self.aliyun_translation_credentials()
+        data = self._read_json_file()
+        has_local = bool(str(data.get("aliyun_translation_access_key_id") or "").strip() and str(data.get("aliyun_translation_access_key_secret") or "").strip())
+        has_environment = bool(
+            str(os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID") or os.environ.get("ALIYUN_ACCESS_KEY_ID") or "").strip()
+            and str(os.environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET") or os.environ.get("ALIYUN_ACCESS_KEY_SECRET") or "").strip()
+        )
+        return {
+            "configured": bool(access_key_id and access_key_secret),
+            "access_key_id": access_key_id,
+            "access_key_id_hint": mask_key(access_key_id) if access_key_id else "",
+            "source": "local" if has_local else "environment" if has_environment else "",
+        }
+
+    def set_aliyun_translation_credentials(self, access_key_id: str, access_key_secret: str) -> dict[str, Any]:
+        access_key_id = str(access_key_id or "").strip()
+        access_key_secret = str(access_key_secret or "").strip()
+        if not access_key_id or not access_key_secret:
+            raise RhCliError("INVALID_TRANSLATION_CREDENTIALS", "AccessKey ID 和 AccessKey Secret 不能为空。")
+        data = self._read_json_file()
+        data["aliyun_translation_access_key_id"] = access_key_id
+        data["aliyun_translation_access_key_secret"] = access_key_secret
+        self._write_json_file(data)
+        return self.aliyun_translation_settings()
+
+    def telegram_settings(self) -> dict[str, Any]:
+        return TelegramNotifier(self).settings()
+
+    def set_telegram_settings(self, bot_token: str, chat_id: str, enabled: Any) -> dict[str, Any]:
+        data = self._read_json_file()
+        bot_token = str(bot_token or "").strip()
+        chat_id = str(chat_id or "").strip()
+        if bot_token:
+            data["telegram_bot_token"] = bot_token
+        if chat_id:
+            data["telegram_chat_id"] = chat_id
+        effective_token = str(data.get("telegram_bot_token") or os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
+        effective_chat_id = str(data.get("telegram_chat_id") or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
+        enabled_value = str(enabled or "").strip().lower() in {"1", "true", "yes", "on"} if isinstance(enabled, str) else bool(enabled)
+        if enabled_value and not effective_token:
+            raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用 Telegram 前请填写 Bot Token。")
+        if enabled_value and not effective_chat_id:
+            raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用 Telegram 前请填写 Chat ID。")
+        data["telegram_enabled"] = enabled_value
+        self._write_json_file(data)
+        return self.telegram_settings()
+
+    def clear_telegram_settings(self) -> dict[str, Any]:
+        data = self._read_json_file()
+        data.pop("telegram_bot_token", None)
+        data.pop("telegram_chat_id", None)
+        data["telegram_enabled"] = False
+        self._write_json_file(data)
+        return self.telegram_settings()
 
     def _workflow_registry_path(self) -> Path:
         return WORKFLOW_ROOT.parent / "workflow-registry.json"
@@ -1776,6 +1897,7 @@ class LocalStore:
                 ":input_json,:prompt_json,:custom_json,:input_config_json,:bypass_json,:random_noise_json,:resolution_json,:workflow_snapshot_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
                 fields,
             )
+            self._sync_usage_record_locked(task["id"])
             self._db.commit()
 
     def update_task(self, task_id: str, **changes: Any) -> None:
@@ -1791,7 +1913,190 @@ class LocalStore:
         changes["task_id"] = task_id
         with self._lock:
             self._db.execute(f"UPDATE tasks SET {assignments} WHERE id=:task_id", changes)
+            self._sync_usage_record_locked(task_id)
             self._db.commit()
+
+    def _sync_usage_record_locked(self, task_id: str) -> None:
+        row = self._db.execute(
+            "SELECT id, created_at, updated_at, account_id, started_at, completed_at, status, workflow_name, cost_type, cost, duration, outputs_json FROM tasks WHERE id=?",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return
+        try:
+            outputs = json.loads(row["outputs_json"] or "[]")
+        except (TypeError, ValueError):
+            outputs = []
+        output_count = len(outputs) if isinstance(outputs, list) else 0
+        task = dict(row)
+        elapsed_ms = task_elapsed_ms(task)
+        self._db.execute(
+            """
+            INSERT INTO usage_records (
+              task_id, created_at, updated_at, account_id, started_at, completed_at, status,
+              workflow_name, cost_type, cost, duration, elapsed_ms, output_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+              created_at=excluded.created_at,
+              updated_at=excluded.updated_at,
+              account_id=excluded.account_id,
+              started_at=excluded.started_at,
+              completed_at=excluded.completed_at,
+              status=excluded.status,
+              workflow_name=excluded.workflow_name,
+              cost_type=excluded.cost_type,
+              cost=excluded.cost,
+              duration=excluded.duration,
+              elapsed_ms=excluded.elapsed_ms,
+              output_count=excluded.output_count
+            """,
+            (
+                str(row["id"]),
+                int(row["created_at"] or 0),
+                int(row["updated_at"] or 0),
+                str(row["account_id"] or "").strip(),
+                row["started_at"],
+                row["completed_at"],
+                str(row["status"] or ""),
+                str(row["workflow_name"] or ""),
+                str(row["cost_type"] or ""),
+                str(row["cost"] or "") or None,
+                str(row["duration"] or "") or None,
+                elapsed_ms,
+                output_count,
+            ),
+        )
+
+    def _backfill_usage_records(self) -> None:
+        with self._lock:
+            task_ids = [str(row[0]) for row in self._db.execute("SELECT id FROM tasks").fetchall()]
+            for task_id in task_ids:
+                self._sync_usage_record_locked(task_id)
+            self._db.commit()
+
+    def update_output_rating(self, task_id: str, output_index: int, rating: Any) -> dict[str, Any]:
+        try:
+            index = int(output_index)
+        except (TypeError, ValueError) as exc:
+            raise RhCliError("INVALID_OUTPUT_RATING", "产物索引无效。") from exc
+        try:
+            score = int(rating)
+        except (TypeError, ValueError) as exc:
+            raise RhCliError("INVALID_OUTPUT_RATING", "评分必须是 0 到 5 星。") from exc
+        if score < 0 or score > 5:
+            raise RhCliError("INVALID_OUTPUT_RATING", "评分必须是 0 到 5 星。")
+        with self._lock:
+            row = self._db.execute("SELECT outputs_json FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                raise RhCliError("TASK_NOT_FOUND", "找不到任务。")
+            try:
+                outputs = json.loads(row["outputs_json"] or "[]")
+            except (TypeError, ValueError) as exc:
+                raise RhCliError("OUTPUT_NOT_FOUND", "任务产物记录无效。") from exc
+            if not isinstance(outputs, list) or index < 0 or index >= len(outputs) or not isinstance(outputs[index], dict):
+                raise RhCliError("OUTPUT_NOT_FOUND", "找不到这个产物。")
+            output = outputs[index]
+            if score == 0:
+                output.pop("rating", None)
+            else:
+                output["rating"] = score
+            self._db.execute(
+                "UPDATE tasks SET outputs_json=?, updated_at=? WHERE id=?",
+                (json.dumps(outputs, ensure_ascii=False), now_ms(), task_id),
+            )
+            self._db.commit()
+            return dict(output)
+
+    def telegram_delivery_sent(self, task_id: str, delivery_key: str) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM telegram_deliveries WHERE task_id=? AND delivery_key=?",
+                (str(task_id), str(delivery_key)),
+            ).fetchone()
+        return bool(row)
+
+    def mark_telegram_delivery_sent(self, task_id: str, delivery_key: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO telegram_deliveries (task_id, delivery_key, sent_at) VALUES (?, ?, ?)",
+                (str(task_id), str(delivery_key), now_ms()),
+            )
+            self._db.commit()
+
+    def delete_outputs_by_rating(self, rating: Any) -> dict[str, int]:
+        """Delete only rated output entries and their local files, preserving tasks."""
+        try:
+            score = int(rating)
+        except (TypeError, ValueError) as exc:
+            raise RhCliError("INVALID_OUTPUT_RATING", "评分必须是 1 到 5 星。") from exc
+        if score < 1 or score > 5:
+            raise RhCliError("INVALID_OUTPUT_RATING", "评分必须是 1 到 5 星。")
+
+        files_to_delete: set[Path] = set()
+        updates: list[tuple[str, int, str]] = []
+        deleted_count = 0
+        with self._lock:
+            rows = self._db.execute("SELECT id, output_dir, outputs_json FROM tasks").fetchall()
+            for row in rows:
+                try:
+                    outputs = json.loads(row["outputs_json"] or "[]")
+                except (TypeError, ValueError) as exc:
+                    raise RhCliError("OUTPUT_NOT_FOUND", "任务产物记录无效。") from exc
+                if not isinstance(outputs, list):
+                    continue
+                kept_outputs: list[dict[str, Any]] = []
+                removed_from_task = 0
+                task_id = str(row["id"] or "")
+                task_folder = (Path(str(row["output_dir"] or "")).expanduser() / task_id).resolve()
+                for output in outputs:
+                    if not isinstance(output, dict):
+                        kept_outputs.append(output)
+                        continue
+                    try:
+                        output_rating = int(output.get("rating") or 0)
+                    except (TypeError, ValueError):
+                        output_rating = 0
+                    if output_rating != score:
+                        kept_outputs.append(output)
+                        continue
+                    if str(output.get("kind") or "file") == "file":
+                        raw_path = str(output.get("path") or "").strip()
+                        if raw_path:
+                            file_path = Path(raw_path).expanduser()
+                            if file_path.is_symlink():
+                                raise RhCliError("OUTPUT_DELETE_FAILED", "产物文件是符号链接，拒绝删除。")
+                            resolved_path = file_path.resolve()
+                            if task_folder == resolved_path or task_folder not in resolved_path.parents:
+                                raise RhCliError("OUTPUT_DELETE_FAILED", "产物路径不在任务输出目录内，拒绝删除。")
+                            files_to_delete.add(resolved_path)
+                    removed_from_task += 1
+                if removed_from_task:
+                    deleted_count += removed_from_task
+                    updates.append(
+                        (
+                            json.dumps(kept_outputs, ensure_ascii=False),
+                            now_ms(),
+                            task_id,
+                        )
+                    )
+
+            try:
+                for file_path in files_to_delete:
+                    if file_path.is_file():
+                        file_path.unlink()
+                for outputs_json, updated_at, task_id in updates:
+                    self._db.execute(
+                        "UPDATE tasks SET outputs_json=?, updated_at=? WHERE id=?",
+                        (outputs_json, updated_at, task_id),
+                    )
+                self._db.commit()
+            except OSError as exc:
+                self._db.rollback()
+                raise RhCliError("OUTPUT_DELETE_FAILED", "删除一星产物文件失败。") from exc
+
+        # Keep usage_records.output_count unchanged: the independent ledger
+        # records what the task generated, even after library cleanup.
+        return {"deleted": deleted_count, "tasks_updated": len(updates)}
 
     def append_stage_log(
         self,
@@ -1864,6 +2169,14 @@ class LocalStore:
             rows = self._db.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
         return [self.row_to_task(row) for row in rows]
 
+    def usage_records(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT task_id, created_at, updated_at, account_id, started_at, completed_at, status, workflow_name, cost_type, cost, duration, elapsed_ms, output_count "
+                "FROM usage_records ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def delete_task(self, task_id: str) -> None:
         with self._lock:
             self._db.execute("DELETE FROM tasks WHERE id=?", (task_id,))
@@ -1880,6 +2193,8 @@ class TaskManager:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=100, thread_name_prefix="rh-web")
+        self._telegram_notifier = TelegramNotifier(store)
+        self._telegram_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rh-telegram")
         self._recover_tasks_on_startup()
         self._dispatcher = threading.Thread(target=self._dispatch_loop, name="rh-web-dispatcher", daemon=True)
         self._dispatcher.start()
@@ -1889,6 +2204,31 @@ class TaskManager:
         self._wake.set()
         self._dispatcher.join(timeout=1.5)
         self._executor.shutdown(wait=False, cancel_futures=False)
+        self._telegram_executor.shutdown(wait=False, cancel_futures=False)
+
+    def test_telegram_connection(self) -> dict[str, Any]:
+        return self._telegram_notifier.test_connection()
+
+    def _queue_telegram_delivery(self, task_id: str, outputs: list[dict[str, Any]]) -> None:
+        self._telegram_executor.submit(self._deliver_telegram_outputs, task_id, list(outputs))
+
+    def _deliver_telegram_outputs(self, task_id: str, outputs: list[dict[str, Any]]) -> None:
+        try:
+            result = self._telegram_notifier.notify_task(task_id, outputs)
+            if result.get("status") == "disabled":
+                return
+            if result.get("status") == "not_configured":
+                self._log_stage(task_id, "telegram", "Telegram 未配置，跳过成片推送")
+                return
+            failed = int(result.get("failed") or 0)
+            self._log_stage(
+                task_id,
+                "telegram",
+                f"Telegram 推送完成：成功 {int(result.get('sent') or 0)} 个，失败 {failed} 个",
+                level="warning" if failed else "info",
+            )
+        except Exception as exc:  # pragma: no cover - background safety net
+            self._log_stage(task_id, "telegram", f"Telegram 推送异常：{exc}", level="warning")
 
     def _recover_tasks_on_startup(self) -> None:
         """Resolve files left by a previous process before resuming remote polling."""
@@ -1900,7 +2240,7 @@ class TaskManager:
                 self.store.update_task(
                     task["id"],
                     status="completed",
-                    progress=f"已从本地产物恢复 · {len([item for item in existing if item.get('kind') == 'file'])} 个文件",
+                    progress=f"已从本地产物恢复 · 保存 {len([item for item in existing if item.get('kind') == 'file'])} 个产物",
                     completed_at=now_ms(),
                     outputs_json=json.dumps(existing, ensure_ascii=False),
                     error="",
@@ -1942,7 +2282,7 @@ class TaskManager:
             snapshot_name = str(task.get("dispatch_key_name") or "").strip()
             snapshot_site = str(task.get("dispatch_key_site") or "").strip()
             snapshot_api_type = str(task.get("dispatch_key_api_type") or "").strip()
-            task["key_name"] = snapshot_name or (key.get("name") if key else ("自动调度" if not task.get("key_id") else "已删除 Key"))
+            task["key_name"] = snapshot_name or (key.get("name") if key else ("自动调度" if not task.get("key_id") else "已删除 API Key"))
             task["key_site"] = snapshot_site or (key.get("site") if key else "")
             task["key_api_type"] = snapshot_api_type or (key.get("api_type") if key else "")
             task["dispatch_credential_recorded"] = bool(snapshot_name)
@@ -1981,7 +2321,7 @@ class TaskManager:
             raise RhCliError("DUPLICATE_API_KEY", "这个 API Key 已经保存。")
         record = {
             "id": f"key_{uuid.uuid4().hex[:12]}",
-            "name": str(name or "").strip() or f"{site.upper()} Key {len(records) + 1}",
+            "name": str(name or "").strip() or f"{site.upper()} API Key {len(records) + 1}",
             "account_id": account_id,
             "site": site,
             "api_key": api_key,
@@ -2037,7 +2377,7 @@ class TaskManager:
             record.update(
                 {
                     "status": "ready" if self._has_balance(data) else "no_balance",
-                    "status_message": "检测成功" if self._has_balance(data) else "Key 有效但余额为 0",
+                    "status_message": "检测成功" if self._has_balance(data) else "API Key 有效但余额为 0",
                     "api_type": api_type,
                     "capacity": key_capacity(api_type, self.store.personal_capacity()),
                     "checked_at": now_ms(),
@@ -2073,7 +2413,7 @@ class TaskManager:
     def remove_key(self, key_id: str) -> None:
         records = self.store.keys()
         if any(item["id"] == key_id and self._active_by_key.get(key_id, 0) for item in records):
-            raise RhCliError("KEY_IN_USE", "这个 Key 正在执行任务，暂时不能删除。")
+            raise RhCliError("KEY_IN_USE", "这个 API Key 正在执行任务，暂时不能删除。")
         remaining = [item for item in records if item["id"] != key_id]
         if len(remaining) == len(records):
             raise RhCliError("KEY_NOT_FOUND", "找不到这个 API Key。")
@@ -2112,7 +2452,7 @@ class TaskManager:
         selected_key_account_id = str(selected_key.get("account_id") or "").strip() if selected_key else ""
         account_restricted = current_account_id not in {"", GENERAL_ACCOUNT_ID}
         if key_id and account_restricted and selected_key_account_id != current_account_id:
-            raise RhCliError("KEY_ACCOUNT_MISMATCH", "所选 API Key 不属于当前使用账号，请切换账号或重新选择 Key。")
+            raise RhCliError("KEY_ACCOUNT_MISMATCH", "所选 API Key 不属于当前使用账号，请切换账号或重新选择 API Key。")
         bound_workflow_account_id = str(workflow_account_id or "").strip()
         if not bound_workflow_account_id:
             bound_workflow_account_id = self.store.workflow_account_id(workflow_id)
@@ -2241,6 +2581,22 @@ class TaskManager:
             raise RhCliError("TASK_NOT_FOUND", "找不到这个任务。")
         if task["status"] not in {"completed", "failed", "cancelled", "interrupted"}:
             raise RhCliError("TASK_IN_USE", "运行中的任务不能删除，请先取消。")
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_task_id or Path(normalized_task_id).name != normalized_task_id or normalized_task_id in {".", ".."}:
+            raise RhCliError("INVALID_TASK_ID", "任务 ID 无效，拒绝删除任务目录。")
+        output_root = Path(str(task.get("output_dir") or "")).expanduser().resolve()
+        task_folder = output_root / normalized_task_id
+        if task_folder == output_root or task_folder.parent != output_root:
+            raise RhCliError("INVALID_OUTPUT_DIR", "任务输出目录无效，拒绝删除任务目录。")
+        if task_folder.is_symlink():
+            raise RhCliError("TASK_DELETE_FAILED", "任务输出目录是符号链接，拒绝删除。")
+        if task_folder.exists() and not task_folder.is_dir():
+            raise RhCliError("TASK_DELETE_FAILED", "任务输出路径不是文件夹，拒绝删除。")
+        try:
+            if task_folder.is_dir():
+                shutil.rmtree(task_folder)
+        except OSError as exc:
+            raise RhCliError("TASK_DELETE_FAILED", f"删除任务产物失败：{task_folder}") from exc
         self.store.delete_task(task_id)
 
     def _dispatch_loop(self) -> None:
@@ -2304,7 +2660,7 @@ class TaskManager:
                 active = self._active_by_key.get(record["id"], 0)
                 capacity = int(record.get("capacity") or 3)
                 return f"本地等待队列 · {record['name']} 并发已满（{active}/{capacity}）"
-            return "本地等待队列 · 等待指定 Key 可用"
+            return "本地等待队列 · 等待指定 API Key 可用"
         ready = [item for item in keys if item.get("status") == "ready"]
         if ready:
             capacities = ", ".join(
@@ -2312,7 +2668,7 @@ class TaskManager:
                 for item in ready
             )
             return f"本地等待队列 · 等待并发槽位（{capacities}）"
-        return "本地等待队列 · 等待可用 Key"
+        return "本地等待队列 · 等待可用 API Key"
 
     def _select_key(
         self,
@@ -2378,12 +2734,12 @@ class TaskManager:
             )
             self._log_stage(task_id, "download", f"恢复后开始保存 {len(outputs)} 个远程产物")
             saved = self._download_outputs(client, outputs, task_output_dir)
-            self._log_stage(task_id, "download", f"恢复后产物保存完成：{len(saved)} 个")
+            self._log_stage(task_id, "download", f"恢复后保存 {len(saved)} 个产物")
         cost_type, cost, duration = self._task_cost(outputs)
         self.store.update_task(
             task_id,
             status="completed",
-            progress=f"已完成 · {len(saved)} 个产物（重启后恢复）",
+            progress=f"已完成 · 保存 {len(saved)} 个产物（重启后恢复）",
             completed_at=now_ms(),
             outputs_json=json.dumps(saved, ensure_ascii=False),
             cost_type=cost_type,
@@ -2391,6 +2747,7 @@ class TaskManager:
             duration=str(duration) if duration is not None else None,
         )
         self._log_stage(task_id, "complete", f"重启后恢复完成，共保存 {len(saved)} 个产物")
+        self._queue_telegram_delivery(task_id, saved)
 
     def _run_task(
         self,
@@ -2496,13 +2853,13 @@ class TaskManager:
                 )
                 self._log_stage(task_id, "download", f"开始保存 {len(outputs)} 个远程产物")
                 saved = self._download_outputs(client, outputs, task_output_dir)
-                self._log_stage(task_id, "download", f"产物保存完成：{len(saved)} 个")
+                self._log_stage(task_id, "download", f"保存 {len(saved)} 个产物")
 
             cost_type, cost, duration = self._task_cost(outputs)
             self.store.update_task(
                 task_id,
                 status="completed",
-                progress=f"已完成 · {len(saved)} 个文件",
+                progress=f"已完成 · 保存 {len(saved)} 个产物",
                 completed_at=now_ms(),
                 outputs_json=json.dumps(saved, ensure_ascii=False),
                 cost_type=cost_type,
@@ -2510,6 +2867,7 @@ class TaskManager:
                 duration=str(duration) if duration is not None else None,
             )
             self._log_stage(task_id, "complete", f"任务完成，共保存 {len(saved)} 个产物")
+            self._queue_telegram_delivery(task_id, saved)
         except RhCliError as exc:
             status = "cancelled" if exc.code == "TASK_CANCELLED" else "failed"
             error_detail = {"code": exc.code, "message": exc.message}
@@ -2582,11 +2940,14 @@ def public_state(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
     return {
         "settings": {
             "output_dir": store.output_dir(),
+            "douyin_cookie_path": store.douyin_cookie_path(),
             "personal_capacity": store.personal_capacity(),
             "current_account_id": current_account_id,
             "current_mode": "general" if current_account_id == GENERAL_ACCOUNT_ID else "account",
             "data_dir": str(DATA_ROOT),
             "native_file_picker": native_file_picker_available(),
+            "aliyun_translation": store.aliyun_translation_settings(),
+            "telegram": store.telegram_settings(),
         },
         "current_account": public_account(current_account) if current_account else None,
         "keys": manager.public_keys(current_account_id),
@@ -2595,10 +2956,314 @@ def public_state(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
     }
 
 
+def _decimal_value(value: Any) -> float | None:
+    try:
+        parsed = float(str(value or "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
+
+
+def _format_metric(value: float, decimals: int = 2) -> str:
+    if abs(value) < 0.0000001:
+        return "0"
+    formatted = f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
+def _usage_duration_seconds(record: dict[str, Any], current_time: int) -> float:
+    duration = _decimal_value(record.get("duration"))
+    if duration is not None and duration >= 0:
+        return duration
+    created_at = int(record.get("created_at") or 0)
+    completed_at = int(record.get("completed_at") or 0)
+    if completed_at and created_at:
+        return max(0.0, (completed_at - created_at) / 1000)
+    elapsed_ms = _decimal_value(record.get("elapsed_ms"))
+    if elapsed_ms is not None:
+        return max(0.0, elapsed_ms / 1000)
+    if created_at:
+        return max(0.0, (current_time - created_at) / 1000)
+    return 0.0
+
+
+def _balance_key_group(record: dict[str, Any]) -> str:
+    """Return the account bucket used when selecting one balance snapshot."""
+    account_id = str(record.get("account_id") or "").strip()
+    if account_id:
+        return f"account:{account_id}"
+    # Legacy keys without account metadata are grouped by site so they cannot
+    # accidentally inflate the balance just because several keys were imported.
+    site = "cn" if record.get("site") == "cn" else "ai"
+    return f"unbound:{site}"
+
+
+def _balance_key_priority(record: dict[str, Any]) -> tuple[int, int, int, str]:
+    """Prefer the key with the freshest successful balance snapshot."""
+    balance_checked_at = int(record.get("balance_checked_at") or 0)
+    checked_at = int(record.get("checked_at") or 0)
+    has_balance = int(
+        _decimal_value(record.get("coins")) is not None
+        or _decimal_value(record.get("balance")) is not None
+    )
+    has_snapshot = int(balance_checked_at > 0 and has_balance)
+    return has_snapshot, balance_checked_at, has_balance, str(record.get("id") or "")
+
+
+def _select_balance_keys(keys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select one API Key per account for current balance display."""
+    selected: dict[str, dict[str, Any]] = {}
+    for key in keys:
+        group = _balance_key_group(key)
+        previous = selected.get(group)
+        if previous is None or _balance_key_priority(key) > _balance_key_priority(previous):
+            selected[group] = key
+    return sorted(
+        selected.values(),
+        key=lambda item: (
+            str(item.get("account_id") or ""),
+            str(item.get("site") or ""),
+            str(item.get("name") or ""),
+        ),
+    )
+
+
+def _dashboard_records_in_range(
+    records: list[dict[str, Any]],
+    start_ms: int,
+    end_ms: int,
+    account_id: str,
+) -> list[dict[str, Any]]:
+    scoped = [
+        record for record in records
+        if start_ms <= int(record.get("created_at") or 0) < end_ms
+    ]
+    if account_id == UNBOUND_ACCOUNT_ID:
+        return [record for record in scoped if not str(record.get("account_id") or "").strip()]
+    if account_id:
+        return [record for record in scoped if str(record.get("account_id") or "").strip() == account_id]
+    return scoped
+
+
+def _dashboard_daily_buckets(
+    records: list[dict[str, Any]],
+    start_day: datetime,
+    days: int,
+    current_time: int,
+) -> list[dict[str, Any]]:
+    buckets: list[dict[str, Any]] = []
+    bucket_by_date: dict[str, dict[str, Any]] = {}
+    for offset in range(days):
+        day = start_day + timedelta(days=offset)
+        date_key = day.strftime("%Y-%m-%d")
+        bucket = {
+            "date": date_key,
+            "label": day.strftime("%m-%d"),
+            "coins": "0",
+            "submissions": 0,
+            "processing_seconds": "0",
+            "completed": 0,
+        }
+        buckets.append(bucket)
+        bucket_by_date[date_key] = bucket
+
+    for record in records:
+        created_at = int(record.get("created_at") or 0)
+        day = datetime.fromtimestamp(created_at / 1000).strftime("%Y-%m-%d")
+        bucket = bucket_by_date.get(day)
+        if not bucket:
+            continue
+        duration_seconds = _usage_duration_seconds(record, current_time)
+        bucket["submissions"] += 1
+        bucket["processing_seconds"] = _format_metric(
+            (_decimal_value(bucket["processing_seconds"]) or 0) + duration_seconds
+        )
+        cost = _decimal_value(record.get("cost"))
+        if str(record.get("cost_type") or "") == "coins" and cost is not None:
+            bucket["coins"] = _format_metric((_decimal_value(bucket["coins"]) or 0) + cost, 4)
+        if str(record.get("status") or "") == "completed":
+            bucket["completed"] += 1
+    return buckets
+
+
+def public_dashboard(
+    store: LocalStore,
+    manager: TaskManager,
+    days: int = 7,
+    account_id: str = "",
+    current_time: int | None = None,
+) -> dict[str, Any]:
+    """Return usage analytics from the independent local usage ledger."""
+    days = days if days in {1, 7, 30} else 7
+    account_id = str(account_id or "").strip()
+    now = int(current_time if current_time is not None else now_ms())
+    now_day = datetime.fromtimestamp(now / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_day = now_day - timedelta(days=days - 1)
+    start_ms = int(start_day.timestamp() * 1000)
+    end_ms = int((now_day + timedelta(days=1)).timestamp() * 1000)
+
+    records = store.usage_records()
+    active_records = _dashboard_records_in_range(records, start_ms, end_ms, account_id)
+    heatmap_days = 365
+    heatmap_start_day = now_day - timedelta(days=heatmap_days - 1)
+    heatmap_start_ms = int(heatmap_start_day.timestamp() * 1000)
+    heatmap_records = _dashboard_records_in_range(records, heatmap_start_ms, end_ms, account_id)
+    heatmap_daily = _dashboard_daily_buckets(heatmap_records, heatmap_start_day, heatmap_days, now)
+    account_records = {
+        str(record.get("account_id") or "").strip()
+        for record in records
+        if str(record.get("account_id") or "").strip()
+    }
+    accounts = store.accounts()
+    account_by_id = {
+        str(account.get("id") or "").strip(): account
+        for account in accounts
+        if str(account.get("id") or "").strip()
+    }
+    account_options = [
+        {
+            "id": str(account["id"]),
+            "name": str(account.get("name") or "未命名账号"),
+            "site": str(account.get("site") or ""),
+        }
+        for account in accounts
+        if str(account.get("id") or "").strip()
+    ]
+    for historical_account_id in sorted(account_records - set(account_by_id)):
+        account_options.append({"id": historical_account_id, "name": "账号已删除", "site": ""})
+    if any(not str(record.get("account_id") or "").strip() for record in records):
+        account_options.append({"id": UNBOUND_ACCOUNT_ID, "name": "未绑定账号", "site": ""})
+    account_filter_name = "全部账号"
+    if account_id == UNBOUND_ACCOUNT_ID:
+        account_filter_name = "未绑定账号"
+    elif account_id:
+        selected_account = account_by_id.get(account_id)
+        account_filter_name = str(selected_account.get("name") if selected_account else next((item["name"] for item in account_options if item["id"] == account_id), "账号已删除"))
+    current_tasks = manager.public_tasks()
+    current_task_ids = {str(task.get("id") or "") for task in current_tasks}
+    buckets = _dashboard_daily_buckets(active_records, start_day, days, now)
+
+    total_coins = 0.0
+    total_seconds = 0.0
+    completed = 0
+    failed = 0
+    output_count = 0
+    for record in active_records:
+        duration_seconds = _usage_duration_seconds(record, now)
+        total_seconds += duration_seconds
+        output_count += int(record.get("output_count") or 0)
+        cost = _decimal_value(record.get("cost"))
+        if str(record.get("cost_type") or "") == "coins" and cost is not None:
+            total_coins += cost
+        status = str(record.get("status") or "")
+        if status == "completed":
+            completed += 1
+        elif status in {"failed", "cancelled", "interrupted"}:
+            failed += 1
+
+    keys = manager.public_keys()
+    selected_balance_keys = _select_balance_keys(keys)
+    accounts = {
+        str(account.get("id") or ""): account
+        for account in store.accounts()
+        if str(account.get("id") or "").strip()
+    }
+    coin_balance = 0.0
+    money_balances: dict[str, dict[str, Any]] = {}
+    balances: list[dict[str, Any]] = []
+    latest_balance_checked_at = 0
+    for key in selected_balance_keys:
+        coins = _decimal_value(key.get("coins"))
+        if coins is not None:
+            coin_balance += coins
+        balance = _decimal_value(key.get("balance"))
+        site = "cn" if key.get("site") == "cn" else "ai"
+        symbol = str(key.get("symbol") or ("¥" if site == "cn" else "$"))
+        if balance is not None:
+            bucket = money_balances.setdefault(site, {"site": site, "symbol": symbol, "value": 0.0})
+            bucket["value"] += balance
+        checked_at = int(key.get("balance_checked_at") or 0)
+        latest_balance_checked_at = max(latest_balance_checked_at, checked_at)
+        account_id = str(key.get("account_id") or "").strip()
+        account = accounts.get(account_id)
+        balances.append({
+            "account_id": account_id,
+            "account_name": str(account.get("name") if account else ("未绑定账号" if not account_id else "账号已删除")),
+            "key_name": str(key.get("name") or "未命名 API Key"),
+            "name": str(key.get("name") or "未命名 API Key"),
+            "site": site,
+            "status": str(key.get("status") or "unchecked"),
+            "coins": str(key.get("coins") or ""),
+            "balance": str(key.get("balance") or ""),
+            "symbol": symbol,
+            "balance_checked_at": checked_at,
+            "api_type": str(key.get("api_type") or ""),
+        })
+
+    recent = []
+    for record in active_records[:12]:
+        recent.append({
+            "task_id": str(record.get("task_id") or ""),
+            "created_at": int(record.get("created_at") or 0),
+            "status": str(record.get("status") or ""),
+            "workflow_name": str(record.get("workflow_name") or "未命名工作流"),
+            "cost_type": str(record.get("cost_type") or ""),
+            "cost": str(record.get("cost") or ""),
+            "duration_seconds": _format_metric(_usage_duration_seconds(record, now)),
+            "output_count": int(record.get("output_count") or 0),
+            "task_available": str(record.get("task_id") or "") in current_task_ids,
+        })
+
+    return {
+        "range_days": days,
+        "heatmap": {
+            "days": heatmap_days,
+            "start": heatmap_start_ms,
+            "end": end_ms,
+            "daily": heatmap_daily,
+        },
+        "account_filter": account_id,
+        "account_filter_name": account_filter_name,
+        "accounts": account_options,
+        "range_start": start_ms,
+        "range_end": end_ms,
+        "source": {
+            "type": "usage_records",
+            "label": "独立用量记录",
+            "record_count": len(records),
+            "description": "首次启用时由现有任务初始化；后续删除任务不会删除统计记录。",
+        },
+        "summary": {
+            "coins_spent": _format_metric(total_coins, 4),
+            "submissions": len(active_records),
+            "processing_seconds": _format_metric(total_seconds),
+            "completed": completed,
+            "failed": failed,
+            "success_rate": round(completed / len(active_records) * 100, 1) if active_records else 0,
+            "outputs": output_count,
+        },
+        "daily": buckets,
+        "balances": {
+            "coins": _format_metric(coin_balance, 4),
+            "account_count": len(selected_balance_keys),
+            "key_count": len(keys),
+            "selection_note": "每个账号只取最近一次成功查询的一个 API Key；未绑定旧 Key 按站点合并。",
+            "money": [
+                {"site": value["site"], "symbol": value["symbol"], "value": _format_metric(value["value"], 4)}
+                for value in money_balances.values()
+            ],
+            "latest_checked_at": latest_balance_checked_at,
+            "keys": balances,
+        },
+        "recent": recent,
+    }
+
+
 def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
     """Return locally available task artifacts for the output library page."""
     artifacts: list[dict[str, Any]] = []
     type_counts = {"image": 0, "video": 0, "audio": 0, "other": 0, "text": 0}
+    rating_counts = {"unrated": 0, **{str(score): 0 for score in range(1, 6)}}
 
     for task in manager.public_tasks():
         task_id = str(task.get("id") or "").strip()
@@ -2606,9 +3271,18 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
             continue
         file_index = 0
         task_output_root = Path(str(task.get("output_dir") or "")).expanduser().resolve()
-        for output in task.get("outputs") or []:
+        task_workflow_path = Path(str(task.get("workflow_path") or "")).expanduser()
+        task_snapshot_path = LocalStore.task_snapshot_path(task)
+        workflow_available = task_snapshot_path.is_file() or task_workflow_path.is_file()
+        for output_index, output in enumerate(task.get("outputs") or []):
             if not isinstance(output, dict):
                 continue
+            try:
+                rating = int(output.get("rating") or 0)
+            except (TypeError, ValueError):
+                rating = 0
+            if rating not in range(1, 6):
+                rating = 0
             kind = str(output.get("kind") or "file")
             if kind == "text":
                 text = str(output.get("text") or "")
@@ -2624,6 +3298,9 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
                         "text": text,
                         "node_id": str(output.get("node_id") or ""),
                         "task_id": task_id,
+                        "workflow_available": workflow_available,
+                        "output_index": output_index,
+                        "rating": rating,
                         "task_name": str(task.get("workflow_name") or task_id),
                         "task_status": str(task.get("status") or ""),
                         "task_created_at": int(task.get("created_at") or 0),
@@ -2632,6 +3309,7 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
                         "cost": str(task.get("cost") or ""),
                     }
                 )
+                rating_counts[str(rating) if rating else "unrated"] += 1
                 continue
 
             if kind != "file":
@@ -2668,6 +3346,9 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
                     "file_type": str(output.get("file_type") or file_path.suffix.lstrip(".") or "file"),
                     "node_id": str(output.get("node_id") or ""),
                     "task_id": task_id,
+                    "workflow_available": workflow_available,
+                    "output_index": output_index,
+                    "rating": rating,
                     "task_name": str(task.get("workflow_name") or task_id),
                     "task_status": str(task.get("status") or ""),
                     "task_created_at": int(task.get("created_at") or 0),
@@ -2679,6 +3360,7 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
                     "modified_at": int(stat.st_mtime * 1000),
                 }
             )
+            rating_counts[str(rating) if rating else "unrated"] += 1
 
     artifacts.sort(key=lambda item: int(item.get("modified_at") or item.get("task_created_at") or 0), reverse=True)
     return {
@@ -2686,6 +3368,7 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
         "summary": {
             "total": len(artifacts),
             "tasks": len({item["task_id"] for item in artifacts}),
+            "rating_counts": rating_counts,
             **type_counts,
         },
     }

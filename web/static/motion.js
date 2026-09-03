@@ -77,7 +77,7 @@
   }
 
   function pageDirectionFor(link) {
-    var pageOrder = ["/", "/prompt", "/outputs", "/workflows"];
+    var pageOrder = ["/workflows", "/prompt", "/", "/outputs", "/dashboard", "/outputs/compare"];
     var currentIndex = pageOrder.indexOf(navigationPath(window.location.pathname));
     var targetIndex = pageOrder.indexOf(navigationPath(new URL(link.href, window.location.href).pathname));
     if (currentIndex === -1 || targetIndex === -1 || currentIndex === targetIndex) return "forward";

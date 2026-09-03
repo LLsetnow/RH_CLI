@@ -18,15 +18,19 @@ def test_action_store_parses_pose_library_and_local_images(tmp_path):
     actions = store.actions()
     public_actions = store.public_actions()
 
-    assert len(actions) == 58
+    assert len(actions) == 57
     assert len(public_actions) == len(actions)
     assert actions[0]["title"]
     assert actions[0]["text"]
-    assert actions[0]["tags"]
+    assert actions[0]["category"] == "站立"
+    assert actions[3]["tags"] == ["侧倾"]
+    assert actions[3]["category"] == "站立"
+    assert actions[4]["category"] == "坐姿"
+    assert all(action["category"] not in action["tags"] for action in actions)
     assert all(item["depth_image_available"] for item in public_actions)
     assert all(item["image_available"] == item["color_image_available"] for item in public_actions)
     assert all(item["image_url"].startswith("/api/prompt/actions/") for item in public_actions if item["color_image_available"])
-    assert any(item["pair_status"] == "missing_color" for item in public_actions)
+    assert all(item["pair_status"] == "paired" for item in public_actions)
     assert all(item["depth_image_url"].endswith("/depth") for item in public_actions)
     assert (tmp_path / "prompt" / "actions.json").is_file()
 
@@ -69,6 +73,7 @@ def test_action_store_reports_missing_and_mismatched_pairs(tmp_path):
 ### 一、站立
 
 #### paired.jpg
+tags: 站立, 侧倾
 ![200](pose/color/paired.jpg)![200](pose/depth/paired_depth.png)
 
 > Paired prompt.
@@ -94,6 +99,8 @@ def test_action_store_reports_missing_and_mismatched_pairs(tmp_path):
     store = ActionStore(tmp_path / "data", source_path=source)
     actions = {item["title"]: item for item in store.public_actions()}
 
+    assert actions["paired"]["category"] == "站立"
+    assert actions["paired"]["tags"] == ["侧倾"]
     assert actions["paired"]["pair_status"] == "paired"
     assert actions["missing-depth"]["pair_status"] == "missing_depth"
     assert actions["mismatched"]["pair_status"] == "mismatched"

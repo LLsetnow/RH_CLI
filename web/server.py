@@ -10,14 +10,16 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from rh_cli.errors import RhCliError
 
-from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_key, public_outputs, public_state, safe_name
+from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_dashboard, public_key, public_outputs, public_state, safe_name
 from .action_store import ActionStore
 from .prompt_store import PromptStore
 from .reference_store import ReferenceStore
+from .translation import AliyunTranslationClient
+from .video_downloader import download_douyin_video
 
 
 STATIC_ROOT = WEB_ROOT / "static"
@@ -33,7 +35,7 @@ PASTED_IMAGE_EXTENSIONS = {
 
 
 def local_file_preview(path_value: str) -> dict[str, object]:
-    """Read a local image into memory for preview; never copy it into web/data."""
+    """Return local media metadata; small images use a data URL, videos stay streamed."""
     path = Path(str(path_value or "")).expanduser().resolve()
     if not path.is_file():
         raise RhCliError("FILE_NOT_FOUND", f"本地文件不存在：{path}")
@@ -45,11 +47,13 @@ def local_file_preview(path_value: str) -> dict[str, object]:
             preview_url = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
         except OSError:
             preview_url = ""
+    preview_kind = "image" if mime.startswith("image/") else "video" if mime.startswith("video/") else ""
     return {
         "path": str(path),
         "name": path.name,
         "size": stat.st_size,
         "mime": mime,
+        "preview_kind": preview_kind,
         "preview_url": preview_url,
     }
 
@@ -141,6 +145,12 @@ class LocalHandler(BaseHTTPRequestHandler):
             return exc.to_dict()
         return {"code": "SERVER_ERROR", "message": str(exc)}
 
+    def _local_file_preview(self, path_value: str) -> dict[str, object]:
+        result = local_file_preview(path_value)
+        if result.get("preview_kind") == "video":
+            result["preview_url"] = self.server.register_local_preview(str(result["path"]))  # type: ignore[attr-defined]
+        return result
+
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self._headers(length=0)
@@ -149,7 +159,8 @@ class LocalHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        path = unquote(urlparse(self.path).path)
+        parsed_url = urlparse(self.path)
+        path = unquote(parsed_url.path)
         if path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self._headers(length=0)
@@ -166,6 +177,15 @@ class LocalHandler(BaseHTTPRequestHandler):
         if path == "/api/outputs":
             store, manager = self.state
             self._json(200, public_outputs(store, manager))
+            return
+        if path == "/api/dashboard":
+            store, manager = self.state
+            try:
+                days = int(parse_qs(parsed_url.query).get("days", ["7"])[0])
+            except (TypeError, ValueError):
+                days = 7
+            account_id = parse_qs(parsed_url.query).get("account_id", [""])[0]
+            self._json(200, public_dashboard(store, manager, days=days, account_id=account_id))
             return
         if path == "/api/workflows":
             store, _ = self.state
@@ -207,6 +227,9 @@ class LocalHandler(BaseHTTPRequestHandler):
             reference_store = self.server.reference_store  # type: ignore[attr-defined]
             reference_store.refresh()
             self._json(200, reference_store.source_status())
+            return
+        if path.startswith("/api/local-preview/"):
+            self._serve_local_preview(path.rsplit("/", 1)[-1])
             return
         if path.startswith("/api/prompt/actions/") and path.endswith("/depth-path"):
             self._serve_action_path(path, "depth")
@@ -259,14 +282,39 @@ class LocalHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/preview-file":
                 body = self._body()
-                self._json(200, local_file_preview(str(body.get("path") or "")))
+                self._json(200, self._local_file_preview(str(body.get("path") or "")))
                 return
             if path == "/api/pick-file":
                 selected = pick_local_file_on_macos()
-                self._json(200, local_file_preview(str(selected)))
+                self._json(200, self._local_file_preview(str(selected)))
+                return
+            if path == "/api/pick-douyin-cookie":
+                selected = pick_local_file_on_macos("选择抖音 Cookie 文件")
+                self._json(200, {"path": str(selected), "name": selected.name})
+                return
+            if path == "/api/download-douyin":
+                body = self._body()
+                store, _ = self.state
+                downloaded = download_douyin_video(
+                    str(body.get("url") or ""),
+                    store.douyin_cookie_path(),
+                    DATA_ROOT,
+                )
+                self._json(200, self._local_file_preview(str(downloaded)))
                 return
             if path == "/api/paste-file":
                 self._json(200, save_pasted_image(self._body()))
+                return
+            if path == "/api/prompt/translate":
+                body = self._body()
+                store, _ = self.state
+                access_key_id, access_key_secret = store.aliyun_translation_credentials()
+                result = AliyunTranslationClient(access_key_id, access_key_secret).translate(str(body.get("text") or ""))
+                self._json(200, result)
+                return
+            if path == "/api/telegram/test":
+                _, manager = self.state
+                self._json(200, manager.test_telegram_connection())
                 return
             if path == "/api/pick-action-resources":
                 selected = pick_local_file_on_macos("选择动作库 Markdown 文件")
@@ -412,22 +460,41 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:
         path = unquote(urlparse(self.path).path)
         try:
+            if path.startswith("/api/tasks/") and "/outputs/" in path:
+                parts = path.split("/")
+                if len(parts) != 6 or parts[4] != "outputs":
+                    self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
+                    return
+                task_id = parts[3]
+                try:
+                    output_index = int(parts[5])
+                except ValueError as exc:
+                    raise RhCliError("INVALID_OUTPUT_RATING", "产物索引无效。") from exc
+                store, _ = self.state
+                output = store.update_output_rating(task_id, output_index, self._body().get("rating"))
+                self._json(200, {"output": output})
+                return
             if path == "/api/settings":
                 body = self._body()
                 store, manager = self.state
                 result = {
                     "output_dir": store.output_dir(),
+                    "douyin_cookie_path": store.douyin_cookie_path(),
                     "personal_capacity": store.personal_capacity(),
                     "current_account_id": store.current_account_id(),
                     "prompt_library_path": str(self.server.prompt_store.library_path),  # type: ignore[attr-defined]
                     "action_resources_path": str(self.server.action_store.source_path),  # type: ignore[attr-defined]
                     "reference_resources_paths": self.server.reference_store.source_paths(),  # type: ignore[attr-defined]
+                    "aliyun_translation": store.aliyun_translation_settings(),
+                    "telegram": store.telegram_settings(),
                 }
                 if "current_account_id" in body:
                     result["current_account_id"] = store.set_current_account(str(body.get("current_account_id") or ""))["id"]
                     manager._wake.set()
                 if "output_dir" in body:
                     result["output_dir"] = store.set_output_dir(str(body.get("output_dir") or ""))
+                if "douyin_cookie_path" in body:
+                    result["douyin_cookie_path"] = store.set_douyin_cookie_path(str(body.get("douyin_cookie_path") or ""))
                 if "personal_capacity" in body:
                     result["personal_capacity"] = store.set_personal_capacity(body.get("personal_capacity"))
                     manager._wake.set()
@@ -443,6 +510,19 @@ class LocalHandler(BaseHTTPRequestHandler):
                     reference_paths = store.set_reference_resources_paths(body.get("reference_resources_paths"))
                     self.server.reference_store.set_source_paths(reference_paths)  # type: ignore[attr-defined]
                     result["reference_resources_paths"] = self.server.reference_store.source_paths()  # type: ignore[attr-defined]
+                if "aliyun_translation_access_key_id" in body or "aliyun_translation_access_key_secret" in body:
+                    result["aliyun_translation"] = store.set_aliyun_translation_credentials(
+                        str(body.get("aliyun_translation_access_key_id") or ""),
+                        str(body.get("aliyun_translation_access_key_secret") or ""),
+                    )
+                if body.get("telegram_clear"):
+                    result["telegram"] = store.clear_telegram_settings()
+                elif any(key in body for key in ("telegram_bot_token", "telegram_chat_id", "telegram_enabled")):
+                    result["telegram"] = store.set_telegram_settings(
+                        str(body.get("telegram_bot_token") or ""),
+                        str(body.get("telegram_chat_id") or ""),
+                        body.get("telegram_enabled"),
+                    )
                 self._json(200, result)
                 return
             if path.startswith("/api/workflows/"):
@@ -507,6 +587,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                 store.remove_account(account_id)
                 self._json(200, {"ok": True})
                 return
+            if path == "/api/outputs/rating/1":
+                store, _ = self.state
+                self._json(200, {"ok": True, **store.delete_outputs_by_rating(1)})
+                return
             if path.startswith("/api/tasks/"):
                 task_id = path.rsplit("/", 1)[-1]
                 _, manager = self.state
@@ -532,10 +616,29 @@ class LocalHandler(BaseHTTPRequestHandler):
             allowed = Path(task["output_dir"]).resolve()
             if allowed not in file_path.parents or not file_path.is_file():
                 raise FileNotFoundError
-            file_size = file_path.stat().st_size
-            content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         except (ValueError, IndexError, KeyError, OSError):
             self._json(404, {"code": "OUTPUT_NOT_FOUND", "message": "产物不存在"})
+            return
+
+        self._serve_file_with_ranges(file_path, "OUTPUT_NOT_FOUND", "产物不存在")
+
+    def _serve_local_preview(self, token: str) -> None:
+        file_path = self.server.local_preview_path(token)  # type: ignore[attr-defined]
+        if file_path is None or not file_path.is_file():
+            self._json(404, {"code": "PREVIEW_NOT_FOUND", "message": "视频预览不存在或已失效"})
+            return
+        mime = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        if not mime.startswith("video/"):
+            self._json(404, {"code": "PREVIEW_NOT_FOUND", "message": "该文件不是可预览的视频"})
+            return
+        self._serve_file_with_ranges(file_path, "PREVIEW_NOT_FOUND", "视频预览不存在或已失效")
+
+    def _serve_file_with_ranges(self, file_path: Path, error_code: str, error_message: str) -> None:
+        try:
+            file_size = file_path.stat().st_size
+            content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        except OSError:
+            self._json(404, {"code": error_code, "message": error_message})
             return
 
         start = 0
@@ -655,8 +758,12 @@ class LocalHandler(BaseHTTPRequestHandler):
             relative = "prompt.html"
         if relative in {"workflows", "workflows/"}:
             relative = "workflows.html"
+        if relative in {"outputs/compare", "outputs/compare/"}:
+            relative = "compare.html"
         if relative in {"outputs", "outputs/"}:
             relative = "outputs.html"
+        if relative in {"dashboard", "dashboard/"}:
+            relative = "dashboard.html"
         if relative.startswith("static/"):
             relative = relative[len("static/"):]
         file_path = (STATIC_ROOT / relative).resolve()
@@ -677,6 +784,8 @@ class AppServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address: tuple[str, int]) -> None:
+        self._local_preview_paths: dict[str, Path] = {}
+        self._local_preview_lock = threading.Lock()
         self.store = LocalStore()
         self.manager = TaskManager(self.store)
         configured_library_path = self.store.prompt_library_path()
@@ -685,6 +794,22 @@ class AppServer(ThreadingHTTPServer):
         self.action_store = ActionStore(DATA_ROOT, source_path=configured_action_path or None)
         self.reference_store = ReferenceStore(DATA_ROOT, source_paths=self.store.reference_resources_paths())
         super().__init__(address, LocalHandler)
+
+    def register_local_preview(self, path_value: str) -> str:
+        path = Path(path_value).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        token = uuid.uuid4().hex
+        with self._local_preview_lock:
+            while len(self._local_preview_paths) >= 256:
+                self._local_preview_paths.pop(next(iter(self._local_preview_paths)))
+            self._local_preview_paths[token] = path
+        return f"/api/local-preview/{token}"
+
+    def local_preview_path(self, token: str) -> Path | None:
+        with self._local_preview_lock:
+            path = self._local_preview_paths.get(str(token or "").strip())
+        return path
 
     def server_close(self) -> None:
         self.manager.close()

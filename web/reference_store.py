@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 
-VERSION = 1
+VERSION = 3
 DEFAULT_REFERENCE_ROOT = Path("/Users/apple/Documents/VideoMake/ref")
 
 REFERENCE_DEFINITIONS = (
@@ -39,8 +39,17 @@ def _tags(value: Any) -> list[str]:
     return result
 
 
-def _reference_id(kind: str, source: str, title: str) -> str:
-    digest = hashlib.sha1(f"{kind}:{source}:{title}".encode("utf-8")).hexdigest()[:12]
+def _reference_id(
+    kind: str,
+    source: str,
+    title: str,
+    *,
+    category: str = "",
+    image_path: str = "",
+    audio_path: str = "",
+) -> str:
+    identity = "|".join((kind, source, category, title, image_path, audio_path))
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:12]
     return f"{kind}-{digest}"
 
 
@@ -53,6 +62,7 @@ def _normalise_reference(value: Any) -> dict[str, Any] | None:
         return None
     reference_id = str(value.get("id") or "").strip()
     kind = str(value.get("kind") or "").strip()
+    category = str(value.get("category") or "未分类").strip() or "未分类"
     title = str(value.get("title") or "").strip()
     text = str(value.get("text") or "").strip()
     image_path = str(value.get("image_path") or "").strip()
@@ -64,6 +74,7 @@ def _normalise_reference(value: Any) -> dict[str, Any] | None:
         "id": reference_id,
         "kind": kind,
         "kind_label": kind_label,
+        "category": category,
         "tags": _tags(value.get("tags")),
         "title": title,
         "text": text,
@@ -191,7 +202,13 @@ class ReferenceStore:
             raw_path = str(match.group(1) or match.group(2) or "").strip()
             if not raw_path or raw_path.startswith(("http://", "https://", "data:")):
                 continue
+            if raw_path.startswith("<") and ">" in raw_path:
+                raw_path = raw_path[1:raw_path.find(">")].strip()
+            else:
+                raw_path = raw_path.split(None, 1)[0]
             path = unquote(raw_path.split("#", 1)[0].split("?", 1)[0].strip())
+            if path.startswith("<") and path.endswith(">"):
+                path = path[1:-1].strip()
             suffix = Path(path).suffix.lower()
             if suffix in IMAGE_EXTENSIONS and path not in images:
                 images.append(path)
@@ -219,18 +236,25 @@ class ReferenceStore:
                 current = None
                 return
             title = current["title"]
+            category = current_category or "未分类"
             tags = [kind_label]
-            if current_category:
-                tags.append(current_category)
             if kind == "character" and " · " in title:
                 tags.append(title.split(" · ", 1)[0].strip())
             elif current_parent and current_parent != title:
                 tags.append(current_parent)
             source_key = self._source_key(source_path)
             references.append({
-                "id": _reference_id(kind, source_key, title),
+                "id": _reference_id(
+                    kind,
+                    source_key,
+                    title,
+                    category=category,
+                    image_path=images[0] if images else "",
+                    audio_path=audio[0] if audio else "",
+                ),
                 "kind": kind,
                 "kind_label": kind_label,
+                "category": category,
                 "tags": _tags(tags),
                 "title": title,
                 "text": text,
@@ -301,7 +325,7 @@ class ReferenceStore:
         with self._lock:
             signatures, source_sha256 = self._source_signature()
             document = self._read()
-            if not force and document.get("source_sha256") == source_sha256 and isinstance(document.get("references"), list):
+            if not force and document.get("version") == VERSION and document.get("source_sha256") == source_sha256 and isinstance(document.get("references"), list):
                 values = [_normalise_reference(value) for value in document["references"]]
                 self._references = [value for value in values if value]
                 self._source_files = self._source_paths()

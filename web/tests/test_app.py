@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -185,6 +186,24 @@ def test_action_resources_path_setting_persists_and_validates(tmp_path, monkeypa
         store._db.close()
 
 
+def test_douyin_cookie_path_setting_persists_and_can_be_cleared(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    cookie = tmp_path / "douyin-cookies.txt"
+    cookie.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    store = web_app.LocalStore()
+    try:
+        assert store.douyin_cookie_path() == ""
+        assert store.set_douyin_cookie_path(str(cookie)) == str(cookie.resolve())
+        assert store.douyin_cookie_path() == str(cookie.resolve())
+        assert store.set_douyin_cookie_path("") == ""
+        assert store.douyin_cookie_path() == ""
+        with pytest.raises(RhCliError) as excinfo:
+            store.set_douyin_cookie_path(str(tmp_path / "missing-cookies.txt"))
+        assert excinfo.value.code == "INVALID_DOUYIN_COOKIE_PATH"
+    finally:
+        store._db.close()
+
+
 def test_prompt_resource_paths_setting_persists_all_library_sources(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     library = tmp_path / "library.json"
@@ -321,6 +340,79 @@ def test_new_key_is_bound_to_current_account_and_site(tmp_path, monkeypatch):
         assert record["site"] == "cn"
     finally:
         manager.close()
+        store._db.close()
+
+
+def test_dashboard_uses_one_balance_key_per_account(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account_cn = store.add_account("中文账号", "cn")
+        account_ai = store.add_account("AI 账号", "ai")
+        store.save_keys(
+            [
+                {**_saved_key(), "id": "key_cn_old", "name": "cn-old", "account_id": account_cn["id"], "balance": "1", "coins": "10", "balance_checked_at": 100},
+                {**_saved_key(), "id": "key_cn_new", "name": "cn-new", "account_id": account_cn["id"], "balance": "1", "coins": "20", "balance_checked_at": 200},
+                {**_saved_key(), "id": "key_ai", "name": "ai-main", "site": "ai", "account_id": account_ai["id"], "balance": "2", "coins": "30", "symbol": "$", "balance_checked_at": 150},
+            ]
+        )
+        manager = SimpleNamespace(public_tasks=lambda: [], public_keys=lambda: store.keys())
+
+        result = web_app.public_dashboard(store, manager, days=1, current_time=web_app.now_ms())
+
+        assert result["balances"]["account_count"] == 2
+        assert result["balances"]["key_count"] == 3
+        assert result["balances"]["coins"] == "50"
+        assert sorted(result["balances"]["money"], key=lambda item: item["site"]) == [
+            {"site": "ai", "symbol": "$", "value": "2"},
+            {"site": "cn", "symbol": "¥", "value": "1"},
+        ]
+        assert {item["key_name"] for item in result["balances"]["keys"]} == {"cn-new", "ai-main"}
+    finally:
+        store._db.close()
+
+
+def test_dashboard_can_filter_usage_ledger_by_account(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account_cn = store.add_account("中文账号", "cn")
+        account_ai = store.add_account("AI 账号", "ai")
+        now = web_app.now_ms()
+        day_start = datetime.fromtimestamp(now / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
+        created_at = int(day_start.timestamp() * 1000) + 1000
+        for task_id, account_id, cost in (
+            ("task_cn_usage", account_cn["id"], "5"),
+            ("task_ai_usage", account_ai["id"], "7"),
+        ):
+            store.create_task(
+                {
+                    "id": task_id,
+                    "created_at": created_at,
+                    "account_id": account_id,
+                    "workflow_path": str(tmp_path / f"{task_id}.json"),
+                    "workflow_name": f"{task_id}.json",
+                    "files": {},
+                    "prompts": {},
+                    "output_dir": str(tmp_path / "outputs"),
+                }
+            )
+            store.update_task(task_id, cost_type="coins", cost=cost, status="completed", duration="3")
+        manager = SimpleNamespace(public_tasks=lambda: [], public_keys=lambda: [])
+
+        all_accounts = web_app.public_dashboard(store, manager, days=1, current_time=now)
+        cn_only = web_app.public_dashboard(store, manager, days=1, account_id=account_cn["id"], current_time=now)
+
+        assert all_accounts["account_filter_name"] == "全部账号"
+        assert len(all_accounts["heatmap"]["daily"]) == 365
+        assert all_accounts["summary"]["coins_spent"] == "12"
+        assert all_accounts["summary"]["submissions"] == 2
+        assert {item["name"] for item in all_accounts["accounts"]} == {"中文账号", "AI 账号"}
+        assert cn_only["account_filter"] == account_cn["id"]
+        assert cn_only["account_filter_name"] == "中文账号"
+        assert cn_only["summary"]["coins_spent"] == "5"
+        assert cn_only["summary"]["submissions"] == 1
+    finally:
         store._db.close()
 
 
@@ -526,6 +618,98 @@ def test_local_store_persists_workflow_input_and_task(tmp_path, monkeypatch):
         assert diagnosed["stage_logs"][-1]["detail"]["apiKey"] == "[已脱敏]"
         assert "secret-key" not in json.dumps(diagnosed["error_detail"], ensure_ascii=False)
         assert not (tmp_path / "data" / "inputs").exists()
+    finally:
+        store._db.close()
+
+
+def test_local_store_persists_output_rating_and_can_clear_it(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    output_dir = tmp_path / "data" / "outputs" / "task_rating"
+    output_dir.mkdir(parents=True)
+    output_path = output_dir / "output.mp4"
+    output_path.write_bytes(b"video")
+    try:
+        store.create_task(
+            {
+                "id": "task_rating",
+                "created_at": 1,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "workflow.json",
+                "files": {},
+                "prompts": {},
+                "random_noise": {},
+                "remote_workflow_id": "123456",
+                "output_dir": str(output_dir),
+            }
+        )
+        store.update_task(
+            "task_rating",
+            outputs_json=json.dumps(
+                [
+                    {"kind": "file", "path": str(output_path), "mime": "video/mp4"},
+                    {"kind": "text", "text": "finished"},
+                ]
+            ),
+        )
+
+        rated = store.update_output_rating("task_rating", 0, 5)
+
+        assert rated["rating"] == 5
+        assert store.task("task_rating")["outputs"][0]["rating"] == 5
+
+        store.update_output_rating("task_rating", 0, 0)
+
+        assert "rating" not in store.task("task_rating")["outputs"][0]
+        with pytest.raises(RhCliError) as excinfo:
+            store.update_output_rating("task_rating", 0, 6)
+        assert excinfo.value.code == "INVALID_OUTPUT_RATING"
+    finally:
+        store._db.close()
+
+
+def test_delete_outputs_by_rating_removes_only_matching_outputs_and_preserves_ledger(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    output_dir = tmp_path / "data" / "outputs"
+    task_id = "task_bulk_rating_delete"
+    task_folder = output_dir / task_id
+    task_folder.mkdir(parents=True)
+    one_star_path = task_folder / "one-star.png"
+    two_star_path = task_folder / "two-star.png"
+    one_star_path.write_bytes(b"one")
+    two_star_path.write_bytes(b"two")
+    try:
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": 1,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "workflow.json",
+                "files": {},
+                "prompts": {},
+                "output_dir": str(output_dir),
+            }
+        )
+        store.update_task(
+            task_id,
+            status="completed",
+            outputs_json=json.dumps(
+                [
+                    {"kind": "file", "path": str(one_star_path), "rating": 1},
+                    {"kind": "file", "path": str(two_star_path), "rating": 2},
+                    {"kind": "text", "text": "keep", "rating": 1},
+                ]
+            ),
+        )
+
+        result = store.delete_outputs_by_rating(1)
+
+        assert result == {"deleted": 2, "tasks_updated": 1}
+        assert not one_star_path.exists()
+        assert two_star_path.exists()
+        assert store.task(task_id)["outputs"] == [{"kind": "file", "path": str(two_star_path), "rating": 2}]
+        assert store.usage_records()[0]["output_count"] == 3
     finally:
         store._db.close()
 
@@ -1042,9 +1226,95 @@ def test_public_outputs_lists_available_files_and_text(tmp_path, monkeypatch):
         assert result["summary"]["total"] == 2
         assert result["summary"]["image"] == 1
         assert result["summary"]["text"] == 1
+        assert result["summary"]["rating_counts"]["unrated"] == 2
         assert [item["name"] for item in result["outputs"]] == ["preview.png", "文本输出 · 3"]
         assert result["outputs"][0]["file_index"] == 0
     finally:
+        store._db.close()
+
+
+def test_usage_ledger_survives_task_deletion_and_dashboard_reads_it(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        now = web_app.now_ms()
+        day_start = datetime.fromtimestamp(now / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
+        created_at = int(day_start.timestamp() * 1000) + 1000
+        task_id = "task_usage_ledger"
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": created_at,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "usage.json",
+                "files": {},
+                "prompts": {},
+                "output_dir": str(tmp_path / "outputs"),
+            }
+        )
+        store.update_task(
+            task_id,
+            status="completed",
+            started_at=created_at + 1000,
+            completed_at=created_at + 9000,
+            cost_type="coins",
+            cost="12",
+            duration="8",
+            outputs_json=json.dumps([{"kind": "text", "text": "done"}], ensure_ascii=False),
+        )
+        manager = SimpleNamespace(public_tasks=lambda: [store.task(task_id)], public_keys=lambda: [])
+
+        result = web_app.public_dashboard(store, manager, days=1, current_time=now)
+
+        assert result["source"]["type"] == "usage_records"
+        assert result["summary"]["coins_spent"] == "12"
+        assert result["summary"]["submissions"] == 1
+        assert result["summary"]["processing_seconds"] == "8"
+        assert result["summary"]["outputs"] == 1
+        assert result["recent"][0]["task_available"] is True
+
+        store.delete_task(task_id)
+        manager.public_tasks = lambda: []
+        result_after_delete = web_app.public_dashboard(store, manager, days=1, current_time=now)
+
+        assert result_after_delete["summary"]["coins_spent"] == "12"
+        assert result_after_delete["summary"]["submissions"] == 1
+        assert result_after_delete["recent"][0]["task_available"] is False
+    finally:
+        store._db.close()
+
+
+def test_delete_task_removes_task_output_folder_and_database_record(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    task_id = "task_delete_outputs"
+    output_dir = tmp_path / "out"
+    task_folder = output_dir / task_id
+    try:
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": 1,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "demo.json",
+                "files": {},
+                "prompts": {},
+                "key_id": None,
+                "output_dir": str(output_dir),
+            }
+        )
+        store.update_task(task_id, status="completed", completed_at=2)
+        task_folder.mkdir(parents=True)
+        (task_folder / "output.mp4").write_bytes(b"video")
+        (task_folder / "workflow_api.json").write_text("{}", encoding="utf-8")
+
+        manager.delete_task(task_id)
+
+        assert not task_folder.exists()
+        assert store.task(task_id) is None
+    finally:
+        manager.close()
         store._db.close()
 
 

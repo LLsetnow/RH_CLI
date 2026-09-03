@@ -64,6 +64,68 @@ def test_output_supports_http_ranges_for_video_seek(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_local_video_preview_uses_a_streamed_range_endpoint(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"0123456789")
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        body = json.dumps({"path": str(source)}).encode("utf-8")
+        connection.request(
+            "POST",
+            "/api/preview-file",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["preview_kind"] == "video"
+        assert payload["preview_url"].startswith("/api/local-preview/")
+
+        connection.request("GET", payload["preview_url"], headers={"Range": "bytes=2-5"})
+        preview_response = connection.getresponse()
+        assert preview_response.status == 206
+        assert preview_response.getheader("Content-Type") == "video/mp4"
+        assert preview_response.getheader("Content-Range") == "bytes 2-5/10"
+        assert preview_response.read() == b"2345"
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_douyin_download_endpoint_returns_local_video_preview(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    source = tmp_path / "downloaded.mp4"
+    source.write_bytes(b"video-bytes")
+    monkeypatch.setattr(web_server, "download_douyin_video", lambda url, cookie_path, data_root: source)
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        body = json.dumps({"url": "https://v.douyin.com/example/"}).encode("utf-8")
+        connection.request("POST", "/api/download-douyin", body=body, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["path"] == str(source.resolve())
+        assert payload["preview_kind"] == "video"
+        assert payload["preview_url"].startswith("/api/local-preview/")
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
 def test_action_api_exposes_both_paired_assets(tmp_path, monkeypatch):
     resources = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.md")
     if not resources.is_file():
@@ -79,9 +141,11 @@ def test_action_api_exposes_both_paired_assets(tmp_path, monkeypatch):
         response = connection.getresponse()
         payload = json.loads(response.read())
         assert response.status == 200
-        assert payload["source_status"]["issue_count"] == 1
-        assert payload["source_status"]["paired_count"] == payload["source_status"]["action_count"] - 1
+        assert payload["source_status"]["issue_count"] == 0
+        assert payload["source_status"]["paired_count"] == payload["source_status"]["action_count"]
         action = payload["actions"][0]
+        assert action["category"] == "站立"
+        assert action["tags"] == []
         assert action["pair_status"] == "paired"
         assert action["color_image_url"].endswith("/image")
         assert action["depth_image_url"].endswith("/depth")

@@ -28,12 +28,6 @@
             <span class="brand-subtitle">本地工作流提交台</span>
           </span>
         </a>
-        <nav class="top-nav" aria-label="主导航">
-          <a class="top-nav-link" href="/">任务提交</a>
-          <a class="top-nav-link active" href="/prompt" aria-current="page">提示词工坊</a>
-          <a class="top-nav-link" href="/outputs">成片</a>
-          <a class="top-nav-link" href="/workflows">工作流</a>
-        </nav>
         <div class="topbar-actions">
           <div class="local-badge"><span class="status-dot"></span>本地积木</div>
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
@@ -44,6 +38,38 @@
           </a>
         </div>
       </header>
+      <nav class="top-nav" aria-label="主导航">
+        <a class="top-nav-link" href="/workflows">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /><path d="M10 6.5h4a2 2 0 0 1 2 2V14" /><path d="m13 12 3 3 3-3" /></svg>
+            <span class="top-nav-label">工作流</span>
+          </span>
+        </a>
+        <a class="top-nav-link active" href="/prompt" aria-current="page">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 4 5 5" /><path d="M4 20 14 10" /><path d="m13 6 5 5" /><path d="m4 20 4-1 11-11-3-3L5 16l-1 4Z" /></svg>
+            <span class="top-nav-label">提示词工坊</span>
+          </span>
+        </a>
+        <a class="top-nav-link" href="/">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>
+            <span class="top-nav-label">任务提交</span>
+          </span>
+        </a>
+        <a class="top-nav-link" href="/outputs">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m8 4 3 16" /><path d="m16 4-3 16" /></svg>
+            <span class="top-nav-label">成片</span>
+          </span>
+        </a>
+        <a class="top-nav-link" href="/dashboard">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19V5" /><path d="M4 19h16" /><path d="m7 15 3-4 3 2 4-6" /><path d="M17 7h2v2" /></svg>
+            <span class="top-nav-label">仪表盘</span>
+          </span>
+        </a>
+      </nav>
 
       <main>
         <section class="prompt-intro">
@@ -71,7 +97,7 @@
               </div>
               <button id="openCustomBlock" class="icon-button" type="button" aria-label="添加自定义固定积木" title="添加自定义固定积木">＋</button>
             </div>
-            <p class="panel-description">基础积木来自本机 JSON；动作、人物、音频、背景和服装来自 ref Markdown 索引。</p>
+            <p class="panel-description">基础积木来自本机 Markdown；动作、人物、音频、背景和服装来自 ref Markdown 索引。</p>
             <div class="library-mode-tabs" role="tablist" aria-label="积木库类型">
               <button id="libraryModeBlocks" class="library-mode-tab active" data-library-mode="blocks" type="button" role="tab" aria-selected="true">基础积木</button>
               <button id="libraryModeActions" class="library-mode-tab" data-library-mode="pose" type="button" role="tab" aria-selected="false">动作库 <span id="actionModeCount">0</span></button>
@@ -85,6 +111,9 @@
               <input id="blockSearch" type="search" placeholder="搜索标题、标签或提示词" autocomplete="off" />
               <span class="search-glyph" aria-hidden="true">⌕</span>
             </label>
+            <div class="library-filter-label">一级分类</div>
+            <div id="categoryFilters" class="category-filters" aria-label="按一级分类筛选"></div>
+            <div class="library-filter-label">二级标签</div>
             <div id="tagFilters" class="tag-filters" aria-label="按标签筛选"></div>
             <div id="libraryList" class="library-list"></div>
             <div class="library-footer"><span id="libraryCount">0 个固定积木</span><span id="libraryFooterHint">点击或拖动加入</span><button id="refreshActions" class="library-refresh-button" type="button" hidden>重新扫描</button></div>
@@ -110,7 +139,7 @@
                 <div class="stage-toolbar">
                   <div><strong id="stageCount">0 个积木</strong><span class="stage-toolbar-helper">按顺序以空行连接</span></div>
                   <div class="stage-toolbar-actions">
-                    <button id="addTextStage" class="secondary-button text-block-add" type="button"><span>文本积木</span></button>
+                    <button id="addTextStage" class="secondary-button button-compact text-block-add" type="button"><span>文本积木</span></button>
                     <button id="clearStage" class="text-button" type="button">清空组装台</button>
                   </div>
                 </div>
@@ -130,7 +159,7 @@
                   <form id="groupForm" class="group-save-row">
                     <label class="sr-only" for="groupName">组状态名称</label>
                     <input id="groupName" type="text" maxlength="48" placeholder="给当前组装顺序命名" />
-                    <button id="saveGroup" class="secondary-button" type="submit">新建并保存</button>
+                    <button id="saveGroup" class="secondary-button button-compact" type="submit">新建并保存</button>
                   </form>
                   <div id="groupList" class="group-list" aria-live="polite"></div>
                 </div>
@@ -146,9 +175,9 @@
                 <span class="output-format">TXT</span>
               </div>
               <div class="output-actions">
-                <button id="copyPrompt" class="secondary-button" type="button">复制文本</button>
-                <button id="importPrompt" class="secondary-button import-prompt-button" type="button">导入任务提交</button>
-                <button id="downloadPrompt" class="primary-button" type="button">导出 TXT</button>
+                <button id="copyPrompt" class="secondary-button button-compact" type="button">复制文本</button>
+                <button id="importPrompt" class="secondary-button button-compact import-prompt-button" type="button">导入任务</button>
+                <button id="downloadPrompt" class="primary-button button-compact" type="button">导出 TXT</button>
               </div>
               <div class="output-preview-wrap">
                 <textarea id="promptOutput" readonly spellcheck="false" placeholder="加入积木后，组合文本会在这里出现"></textarea>
@@ -162,7 +191,7 @@
     </div>
 
     <div id="customBlockModal" class="modal-backdrop" hidden>
-      <section class="custom-block-dialog" role="dialog" aria-modal="true" aria-labelledby="customBlockTitle">
+      <section class="custom-block-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="customBlockTitle">
         <div class="modal-heading">
           <div>
             <div class="section-kicker">CUSTOM BLOCK</div>
@@ -172,6 +201,10 @@
         </div>
         <p id="customBlockDescription" class="modal-description">把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。</p>
         <form id="customBlockForm">
+          <label id="customBlockCategoryField" class="field-group">
+            <span class="field-label">一级分类 <span class="field-hint inline-hint">对应 Markdown 的 ### 标题</span></span>
+            <input id="customBlockCategory" type="text" placeholder="例如：镜头与运动" maxlength="32" />
+          </label>
           <label class="field-group">
             <span class="field-label">积木名称</span>
             <input id="customBlockName" type="text" placeholder="例如：柔和自然光" maxlength="32" required />
@@ -192,7 +225,7 @@
       </section>
     </div>
     <div id="imagePreviewModal" class="modal-backdrop" hidden>
-      <section class="image-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
+      <section class="image-preview-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
         <div class="modal-heading">
           <div>
             <div class="section-kicker">IMAGE PREVIEW</div>
@@ -205,7 +238,7 @@
       </section>
     </div>
     <div id="depthImportModal" class="modal-backdrop" hidden>
-      <section class="depth-import-dialog" role="dialog" aria-modal="true" aria-labelledby="depthImportTitle">
+      <section class="depth-import-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="depthImportTitle">
         <div class="modal-heading">
           <div>
             <div id="depthImportKicker" class="section-kicker">IMPORT DEPTH MAP</div>
@@ -218,7 +251,7 @@
         <div id="depthImportTargets" class="depth-import-targets" role="radiogroup" aria-label="LoadImage 节点"></div>
         <div class="dialog-actions">
           <button id="cancelDepthImport" class="secondary-button" type="button">取消</button>
-          <button id="confirmDepthImport" class="primary-button" type="button" disabled>导入到选中节点</button>
+          <button id="confirmDepthImport" class="primary-button" type="button" disabled>导入任务</button>
         </div>
       </section>
     </div>

@@ -5,13 +5,13 @@ STATIC_ROOT = Path(__file__).parents[1] / "static"
 
 
 def test_all_web_pages_load_shared_motion_runtime():
-    for page_name in ("index.html", "prompt.html", "outputs.html"):
+    for page_name in ("index.html", "prompt.html", "outputs.html", "compare.html", "workflows.html", "dashboard.html"):
         page = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
         assert '<script src="/static/motion.js"></script>' in page
 
 
 def test_all_web_pages_share_the_same_brand_header_structure():
-    for page_name in ("index.html", "prompt.html", "outputs.html"):
+    for page_name in ("index.html", "prompt.html", "outputs.html", "compare.html", "workflows.html", "dashboard.html"):
         page = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
         assert 'class="brand-lockup brand-home-link"' in page
         assert 'class="brand-name">RH Workflow Desk</span>' in page
@@ -40,6 +40,37 @@ def test_slide_runtime_covers_page_navigation_and_dialogs():
     assert "root.classList.add(\"motion-page-leave\"" not in motion
     assert "window.RHMotion" in motion
     assert "prefers-reduced-motion" in motion
+
+
+def test_page_direction_matches_primary_navigation_order():
+    motion = (STATIC_ROOT / "motion.js").read_text(encoding="utf-8")
+
+    assert 'var pageOrder = ["/workflows", "/prompt", "/", "/outputs", "/dashboard", "/outputs/compare"];' in motion
+
+
+def test_primary_navigation_isolated_from_the_static_topbar_transition():
+    css = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+    for page_name in ("index.html", "prompt.html", "outputs.html", "compare.html", "workflows.html", "dashboard.html"):
+        page = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
+        header, navigation = page.split('<nav class="top-nav"', 1)
+        assert "</header>" in header
+        assert navigation.count('class="top-nav-link') == 5
+    assert "view-transition-name: page-nav" in css
+    assert ":root::view-transition-old(page-nav) { opacity: 0; animation: none; }" in css
+    assert ":root::view-transition-new(page-nav) { opacity: 1; animation: none; }" in css
+
+
+def test_primary_navigation_does_not_resize_when_pressed_or_active():
+    css = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+    assert ".top-nav-link:active { transform: none; }" in css
+    assert "width: 66px;" in css
+    assert "width: 116px;" in css
+    assert "height: 60px;" in css
+    assert "width: 150px;" not in css
+    assert "height: 72px;" not in css
+    assert "transition: width var(--motion-expand)" in css
+    assert ".top-nav-link.active .top-nav-label" in css
+    assert "width: 66px;" in css
 
 
 def test_primary_page_wires_motion_feedback():
@@ -80,6 +111,7 @@ def test_action_library_can_import_depth_into_task_load_image():
     assert "target.bypassed" in prompt_js
     assert "is-disabled" in prompt_js
     assert '已保存到任务草稿' in prompt_js
+    assert '>导入任务</button>' in prompt_js
     assert "canonicalWorkflowName" in app_js
     assert "modifiedWorkflowName" in app_js
     assert 'link.download = modifiedWorkflowName(sourceName)' in app_js

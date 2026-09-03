@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 
-VERSION = 3
+VERSION = 5
 DEFAULT_POSE_RESOURCES_PATH = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.md")
 DEFAULT_RESOURCES_PATH = Path("/Users/apple/Documents/VideoMake/ref/Resources.md")
 
@@ -35,6 +35,23 @@ def _category(value: str) -> str:
     return re.sub(r"^[一二三四五六七八九十]+、", "", value.strip())
 
 
+def _tags(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = value.replace("，", ",").replace("、", ",").split(",")
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for raw in value:
+        tag = str(raw or "").strip()
+        if tag and tag not in result:
+            result.append(tag)
+    return result
+
+
+def _tags_without_category(value: Any, category: str) -> list[str]:
+    return [tag for tag in _tags(value) if tag != category]
+
+
 def _normalise_action(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -45,14 +62,11 @@ def _normalise_action(value: Any) -> dict[str, Any] | None:
     depth_image_path = str(value.get("depth_image_path") or "").strip()
     if not action_id or not title or not text:
         return None
-    raw_tags = value.get("tags", [])
-    if isinstance(raw_tags, str):
-        raw_tags = [raw_tags]
-    if not isinstance(raw_tags, list):
-        raw_tags = []
+    category = _category(str(value.get("category") or "")) or "未分类"
     return {
         "id": action_id,
-        "tags": [str(tag).strip() for tag in raw_tags if str(tag).strip()],
+        "category": category,
+        "tags": _tags_without_category(value.get("tags", []), category),
         "title": title,
         "text": text,
         # image_path remains as a compatibility alias for older callers/cache files.
@@ -138,11 +152,13 @@ class ActionStore:
         in_pose = False
 
         def finish() -> None:
+            nonlocal current
             if not current:
                 return
             prompt = "\n".join(current["prompt_lines"])
             prompt = re.sub(r"\n{3,}", "\n\n", prompt).strip()
             if not prompt:
+                current = None
                 return
             title = current["title"]
             color_image_path = current["color_image_path"]
@@ -150,12 +166,11 @@ class ActionStore:
             # Keep the legacy alias color-only. A depth-only placeholder must
             # never be served or counted as an original image.
             image_path = color_image_path
-            tags = ["pose"]
-            if current_category:
-                tags.insert(0, current_category)
+            category = current_category or "未分类"
             actions.append({
                 "id": _action_id(image_path, title),
-                "tags": tags,
+                "category": category,
+                "tags": _tags_without_category(current["tags"], category),
                 "title": title,
                 "text": prompt,
                 "image_path": image_path,
@@ -163,6 +178,7 @@ class ActionStore:
                 "depth_image_path": depth_image_path,
                 "pair_key": _pair_key(color_image_path or depth_image_path, "color"),
             })
+            current = None
 
         for raw_line in lines:
             line = raw_line.strip()
@@ -174,6 +190,7 @@ class ActionStore:
             if not in_pose:
                 continue
             if line.startswith("### "):
+                finish()
                 current_category = _category(line[4:])
                 continue
             if line.startswith("#### "):
@@ -184,10 +201,15 @@ class ActionStore:
                     "title": title,
                     "color_image_path": "",
                     "depth_image_path": "",
+                    "tags": [],
                     "prompt_lines": [],
                 }
                 continue
             if not current:
+                continue
+            tags_match = re.match(r"^tags\s*[:：]\s*(.*)$", line, re.IGNORECASE)
+            if tags_match:
+                current["tags"] = _tags(tags_match.group(1))
                 continue
             for image_match in re.finditer(r"!\[[^\]]*\]\((pose/(color|depth)/[^)]+)\)", line):
                 image_path, kind = image_match.groups()
@@ -216,7 +238,13 @@ class ActionStore:
         with self._lock:
             source_mtime, source_sha256 = self._source_signature()
             document = self._read()
-            if not force and source_sha256 and document.get("source_sha256") == source_sha256 and isinstance(document.get("actions"), list):
+            if (
+                not force
+                and source_sha256
+                and document.get("version") == VERSION
+                and document.get("source_sha256") == source_sha256
+                and isinstance(document.get("actions"), list)
+            ):
                 actions = [_normalise_action(value) for value in document["actions"]]
                 self._actions = [value for value in actions if value]
                 return

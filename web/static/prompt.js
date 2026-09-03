@@ -13,7 +13,7 @@
   var GRID_SPLITTER_STORAGE_KEY = "rh-workflow-desk-prompt-library-width-v2";
   var gridSplitterDrag = null;
   var REFERENCE_MODES = ["character", "audio", "background", "clothes"];
-  var state = { libraryBlocks: [], actions: [], actionSource: null, references: [], referenceSource: null, libraryMode: "blocks", assemblyView: "stage", stage: [], groups: [], activeGroupId: "", filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
+  var state = { libraryBlocks: [], actions: [], actionSource: null, references: [], referenceSource: null, libraryMode: "blocks", assemblyView: "stage", stage: [], groups: [], activeGroupId: "", categoryFilter: "全部", filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
   var toastTimer = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -43,7 +43,24 @@
     return allBlocks();
   }
   function getPromptText() {
-    return state.stage.map(function (item) { return String(item.text || "").trim(); }).filter(Boolean).join("\n\n");
+    return state.stage.map(function (item) {
+      return String(item.kind === "text" ? (item.translatedText || "") : (item.text || "")).trim();
+    }).filter(Boolean).join("\n\n");
+  }
+  function pendingTranslationItems() {
+    return state.stage.filter(function (item) {
+      return item.kind === "text" && String(item.text || "").trim() && !String(item.translatedText || "").trim();
+    });
+  }
+  function promptTextForAction(action) {
+    var pending = pendingTranslationItems();
+    if (pending.length) {
+      showToast("请先翻译所有自由文本，再" + action + "提示词", true);
+      return "";
+    }
+    var output = getPromptText();
+    if (!output) showToast("组装台还没有可" + action + "的文本", true);
+    return output;
   }
   function showToast(message, isError) {
     var toast = $("promptToast");
@@ -155,9 +172,11 @@
     var result = { instance_id: item.instanceId, kind: item.kind };
     if (item.kind === "text") {
       result.text = String(item.text || "");
+      result.translated_text = String(item.translatedText || "");
     } else if (item.kind === "action") {
       result.action_id = item.sourceId || "";
       result.snapshot = {
+        category: item.category || "",
         title: item.title || "",
         text: item.text || "",
         tags: item.tags || [],
@@ -184,10 +203,11 @@
   }
   function stageItemFromApi(item) {
     if (!item || (item.kind !== "text" && item.kind !== "fixed" && item.kind !== "action" && item.kind !== "reference")) return null;
-    if (item.kind === "text") return { instanceId: item.instance_id || makeId("text"), kind: "text", title: "自由文本", text: String(item.text || ""), tags: [] };
+    if (item.kind === "text") return { instanceId: item.instance_id || makeId("text"), kind: "text", title: "自由文本", text: String(item.text || ""), translatedText: String(item.translated_text || item.translatedText || ""), tags: [] };
     var sourceId = item.kind === "action" ? (item.action_id || item.block_id) : (item.kind === "reference" ? item.reference_id : item.block_id);
     var source = item.kind === "action" ? state.actions.find(function (candidate) { return candidate.id === sourceId; }) : (item.kind === "reference" ? state.references.find(function (candidate) { return candidate.id === sourceId; }) : allBlocks().find(function (candidate) { return candidate.id === sourceId; }));
     var snapshot = item.snapshot || {};
+    var hasSnapshotCategory = Object.prototype.hasOwnProperty.call(snapshot, "category");
     var hasSnapshotTitle = Object.prototype.hasOwnProperty.call(snapshot, "title");
     var hasSnapshotText = Object.prototype.hasOwnProperty.call(snapshot, "text");
     var hasSnapshotTags = Object.prototype.hasOwnProperty.call(snapshot, "tags");
@@ -210,6 +230,9 @@
       instanceId: item.instance_id || makeId(item.kind),
       kind: item.kind,
       sourceId: sourceId || "",
+      category: item.kind === "action"
+        ? (hasSnapshotCategory ? String(snapshot.category || "未分类") : (source ? source.category || "未分类" : "未分类"))
+        : "",
       title: hasSnapshotTitle ? String(snapshot.title || "") : (source ? source.title : (item.kind === "action" ? "动作已不可用" : "已删除积木")),
       text: hasSnapshotText ? String(snapshot.text || "") : (source ? source.text : ""),
       tags: hasSnapshotTags ? (Array.isArray(snapshot.tags) ? snapshot.tags : []) : (source ? (source.tags || []) : []),
@@ -303,13 +326,37 @@
   function blockMatches(block) {
     var needle = state.search.toLowerCase();
     var tags = block.tags || [];
+    var category = String(block.category || "未分类");
+    var supportsCategory = state.libraryMode === "blocks" || state.libraryMode === "pose" || state.libraryMode === "actions" || isReferenceMode();
+    var matchesCategory = !supportsCategory || state.categoryFilter === "全部" || category === state.categoryFilter;
     var matchesTag = state.filter === "全部" || tags.indexOf(state.filter) !== -1;
-    var matchesSearch = !needle || [block.title, block.text].concat(tags).join(" ").toLowerCase().indexOf(needle) !== -1;
-    return matchesTag && matchesSearch;
+    var matchesSearch = !needle || [category, block.title, block.text].concat(tags).join(" ").toLowerCase().indexOf(needle) !== -1;
+    return matchesCategory && matchesTag && matchesSearch;
+  }
+  function renderCategoryFilters() {
+    var container = $("categoryFilters");
+    if (!container) return;
+    if (state.libraryMode !== "blocks" && state.libraryMode !== "pose" && state.libraryMode !== "actions" && !isReferenceMode()) {
+      container.innerHTML = "";
+      return;
+    }
+    var categories = unique(currentLibraryEntries().map(function (entry) { return String(entry.category || "未分类"); }));
+    if (state.categoryFilter !== "全部" && categories.indexOf(state.categoryFilter) === -1) state.categoryFilter = "全部";
+    container.innerHTML = ["全部"].concat(categories).map(function (category) {
+      return '<button class="category-filter' + (state.categoryFilter === category ? " active" : "") + '" type="button" data-filter-category="' + esc(category) + '">' + esc(category) + '</button>';
+    }).join("");
   }
   function renderFilters() {
     var entries = currentLibraryEntries();
-    var tags = unique([].concat.apply([], entries.map(function (entry) { return entry.tags || []; })));
+    if ((state.libraryMode === "blocks" || state.libraryMode === "pose" || state.libraryMode === "actions" || isReferenceMode()) && state.categoryFilter !== "全部") {
+      entries = entries.filter(function (entry) { return String(entry.category || "未分类") === state.categoryFilter; });
+    }
+    var tags = unique([].concat.apply([], entries.map(function (entry) {
+      var category = String(entry.category || "");
+      return (entry.tags || []).filter(function (tag) {
+        return String(tag).trim() !== category;
+      });
+    })));
     if (state.filter !== "全部" && tags.indexOf(state.filter) === -1) state.filter = "全部";
     $("tagFilters").innerHTML = ["全部"].concat(tags).map(function (tag) {
       return '<button class="tag-filter' + (state.filter === tag ? " active" : "") + '" type="button" data-filter-tag="' + esc(tag) + '">' + esc(tag) + '</button>';
@@ -495,7 +542,7 @@
     depthImportActionId = "";
     workflowImportAsset = asset;
     renderDepthImportTargets(readTaskDraft());
-    $("depthImportTitle").textContent = "导入工作流";
+    $("depthImportTitle").textContent = "导入任务";
     $("depthImportKicker").textContent = "IMPORT TO WORKFLOW";
     window.RHMotion.openModal("depthImportModal", "closeDepthImport");
   }
@@ -559,7 +606,7 @@
     }).finally(function () {
       if ($("confirmDepthImport")) {
         $("confirmDepthImport").disabled = false;
-        $("confirmDepthImport").textContent = "导入到选中节点";
+        $("confirmDepthImport").textContent = "导入任务";
       }
     });
   }
@@ -575,12 +622,15 @@
       return;
     }
     $("libraryList").innerHTML = actions.map(function (action, index) {
-      var importWorkflowButton = action.depth_image_available
-        ? '<button class="import-workflow-button action-card-import" type="button" data-import-workflow data-import-workflow-kind="action" data-import-workflow-id="' + esc(action.id) + '" title="选择 LoadImage 节点并导入深度图">导入工作流</button>'
+      var hasColorImage = Boolean(action.image_available || action.color_image_available);
+      var hasDepthImage = Boolean(action.depth_image_available);
+      var importWorkflowButton = hasColorImage
+        ? '<button class="import-workflow-button action-card-import" type="button" data-import-workflow data-import-workflow-kind="action" data-import-workflow-id="' + esc(action.id) + '" title="' + esc(hasDepthImage ? "选择 LoadImage 节点并导入深度图" : "暂无可用深度图，请先完成原图与深度图配对") + '"' + (hasDepthImage ? "" : ' disabled aria-disabled="true"') + '>导入任务</button>'
         : "";
+      var category = action.category || "未分类";
       return '<article class="action-library-card" draggable="true" data-action-id="' + esc(action.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
         '<div class="action-card-media">' + actionMediaMarkup(action, "") + '</div>' +
-        '<div class="action-card-body"><div class="library-block-top action-card-top"><div class="library-block-title"><span class="block-type-dot action" aria-hidden="true"></span><span>' + esc(action.title) + '</span></div><span class="action-card-top-actions">' + importWorkflowButton + '<span class="library-block-label">POSE</span></span></div>' +
+        '<div class="action-card-body"><div class="library-block-top action-card-top"><div class="library-block-title"><span class="block-type-dot action" aria-hidden="true"></span><span>' + esc(action.title) + '</span></div><span class="action-card-top-actions">' + importWorkflowButton + '<span class="action-card-category" title="一级分类">' + esc(category) + '</span><span class="library-block-label">POSE</span></span></div>' +
         '<div class="block-tags">' + (action.tags || []).map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' +
         '<div class="action-library-text">' + esc(action.text) + '</div>' +
         '<div class="library-block-footer"><span class="action-card-buttons"><button class="add-block-button" type="button" data-add-action="' + esc(action.id) + '">加入组装台&nbsp;→</button></span><span class="action-pair-status ' + actionPairClass(action) + '" title="' + esc(action.pair_message || "") + '">' + esc(actionPairLabel(action)) + '</span></div></div></article>';
@@ -647,7 +697,7 @@
     $("libraryList").innerHTML = references.map(function (reference, index) {
       var label = reference.kind_label || "参考资源";
       var importWorkflowButton = reference.image_available
-        ? '<button class="import-workflow-button" type="button" data-import-workflow data-import-workflow-kind="reference" data-import-workflow-id="' + esc(reference.id) + '" title="选择 LoadImage 节点并导入图片">导入工作流</button>'
+        ? '<button class="import-workflow-button" type="button" data-import-workflow data-import-workflow-kind="reference" data-import-workflow-id="' + esc(reference.id) + '" title="选择 LoadImage 节点并导入图片">导入任务</button>'
         : "";
       return '<article class="reference-library-card" draggable="true" data-reference-id="' + esc(reference.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
         referenceMediaMarkup(reference, "reference-card-media") +
@@ -704,15 +754,18 @@
     var referenceLabels = { character: "人物库", audio: "音频库", background: "背景库", clothes: "服装库" };
     var typeLabel = isText ? "自由文本" : (isAction ? (item.missing ? "动作 · 已不可用" : "动作库") : (isReference ? (item.missing ? "参考资源 · 已不可用" : (referenceLabels[item.referenceKind] || "参考资源库")) : (item.missing ? "固定积木 · 已删除" : "固定积木")));
     var importWorkflowButton = canImportWorkflow
-      ? '<button class="import-workflow-button stage-workflow-import" type="button" data-import-workflow data-import-workflow-kind="' + (isAction ? "action" : "reference") + '" data-import-workflow-id="' + esc(item.sourceId) + '" title="选择 LoadImage 节点并导入' + (isAction ? "深度图" : "图片") + '">导入工作流</button>'
+      ? '<button class="import-workflow-button stage-workflow-import" type="button" data-import-workflow data-import-workflow-kind="' + (isAction ? "action" : "reference") + '" data-import-workflow-id="' + esc(item.sourceId) + '" title="选择 LoadImage 节点并导入' + (isAction ? "深度图" : "图片") + '">导入任务</button>'
       : "";
     var textMarkup = isText
-      ? '<textarea class="stage-text-editor" data-stage-text="' + index + '" placeholder="输入这一块要拼接的文本内容"></textarea>'
+      ? '<div class="stage-text-fields"><label class="stage-text-field"><span class="stage-text-label">输入内容</span><textarea class="stage-text-editor" data-stage-text="' + index + '" placeholder="输入这一块要拼接的文本内容"></textarea></label><label class="stage-text-field stage-text-translation-field"><span class="stage-text-label"><span>英文翻译结果</span><span class="stage-translation-status' + (item.translatedText ? " is-ready" : "") + '" data-stage-translation-status="' + index + '">' + (item.translatedText ? "已翻译" : "等待翻译") + '</span></span><textarea class="stage-text-translation" data-stage-translation="' + index + '" readonly placeholder="点击右上角“翻译”后显示英文结果">' + esc(item.translatedText || "") + '</textarea></label></div>'
       : '<button class="stage-block-copy stage-block-copy-trigger" type="button" data-edit-stage="' + index + '" title="点击编辑当前积木" aria-label="编辑当前积木：' + esc(item.title || "固定积木") + '">' + esc(item.text) + '</button>';
+    var titleMarkup = isText
+      ? '<div class="stage-block-title-row"><h3>自由文本</h3><button class="secondary-button button-compact translate-text-button" type="button" data-translate-stage="' + index + '" title="将输入内容翻译为英文"><span>翻译</span></button></div>'
+      : '<h3>' + esc(item.title || "固定积木") + '</h3>';
     return '<article class="stage-block ' + (isText ? "text" : (isAction ? "action" : (isReference ? "reference" : "fixed"))) + (item.missing ? " missing" : "") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + '">' +
       '<div class="stage-block-grip" data-drag-handle title="拖动排序" aria-label="拖动排序">⋮⋮</div>' +
       '<div class="stage-block-main"><div class="stage-block-copy-content"><div class="stage-block-top"><span class="stage-index">' + String(index + 1).padStart(2, "0") + '</span><span class="stage-type-label">' + typeLabel + '</span></div>' +
-      '<h3>' + esc(item.title || (isText ? "自由文本" : "固定积木")) + '</h3>' +
+      titleMarkup +
       ((tags.length || importWorkflowButton) ? '<div class="stage-block-tags">' + importWorkflowButton + tags.map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' : "") +
       textMarkup +
       '</div>' + actionThumb + referenceThumb + '</div><div class="stage-block-actions"><button class="stage-action remove" type="button" data-remove-stage="' + index + '">移除</button></div></article>';
@@ -727,14 +780,19 @@
       if (indexLabel) indexLabel.textContent = String(index + 1).padStart(2, "0");
       var removeButton = card.querySelector("[data-remove-stage]");
       if (removeButton) removeButton.dataset.removeStage = String(index);
+      var editButton = card.querySelector("[data-edit-stage]");
+      if (editButton) editButton.dataset.editStage = String(index);
       var editor = card.querySelector("[data-stage-text]");
       if (editor) editor.dataset.stageText = String(index);
     });
   }
+  function stageEmptyMarkup() {
+    return '<div class="stage-empty"><span class="stage-empty-mark">01</span><strong>组装台还是空的</strong><span>从左侧点击积木或动作，或加入一块自由文本开始。</span></div>';
+  }
   function renderStage() {
     var list = $("stageList");
     if (!state.stage.length) {
-      list.innerHTML = '<div class="stage-empty"><span class="stage-empty-mark">01</span><strong>组装台还是空的</strong><span>从左侧点击积木或动作，或加入一块自由文本开始。</span></div>';
+      list.innerHTML = stageEmptyMarkup();
       updateStageDom();
       renderOutput();
       return;
@@ -752,9 +810,15 @@
   }
   function renderOutput() {
     var output = getPromptText();
+    var pending = pendingTranslationItems();
     $("promptOutput").value = output;
+    $("promptOutput").placeholder = pending.length ? "还有 " + pending.length + " 块自由文本未翻译；翻译后才会进入英文提示词" : "加入积木后，组合文本会在这里出现";
     $("charCount").textContent = output.length + " 字";
     $("lineCount").textContent = output ? output.split(/\n\s*\n/).length + " 段" : "0 段";
+    ["copyPrompt", "importPrompt", "downloadPrompt"].forEach(function (id) {
+      var button = $(id);
+      if (button) button.disabled = pending.length > 0 || !output;
+    });
   }
   function renderAssemblyView() {
     var isGroups = state.assemblyView === "groups";
@@ -776,6 +840,7 @@
     if (groupsView) groupsView.hidden = !isGroups;
   }
   function renderAll() {
+    renderCategoryFilters();
     renderFilters();
     renderLibrary();
     renderStage();
@@ -799,7 +864,7 @@
         var active = group.id === state.activeGroupId;
         return '<article class="group-entry' + (active ? " active" : "") + '">' +
           '<div class="group-entry-main"><strong>' + esc(group.name) + '</strong><span>' + (group.items || []).length + ' 个积木 · ' + esc(formatGroupTime(group.updated_at)) + '</span></div>' +
-          '<div class="group-entry-actions"><button class="group-action load" type="button" data-load-group="' + esc(group.id) + '">加载</button><button class="group-action delete" type="button" data-delete-group="' + esc(group.id) + '">删除</button></div>' +
+          '<div class="group-entry-actions"><button class="group-action load" type="button" data-load-group="' + esc(group.id) + '">加载</button><button class="group-action overwrite" type="button" data-overwrite-group="' + esc(group.id) + '" title="用当前组装台覆盖此组状态">覆盖</button><button class="group-action delete" type="button" data-delete-group="' + esc(group.id) + '">删除</button></div>' +
           '</article>';
       }).join("");
     }
@@ -809,7 +874,7 @@
     if (groupCount) groupCount.textContent = String(state.groups.length);
   }
   function stageItemFromLibrary(id) {
-    if (id === "__free_text__") return { instanceId: makeId("text"), kind: "text", title: "自由文本", text: "", tags: [] };
+    if (id === "__free_text__") return { instanceId: makeId("text"), kind: "text", title: "自由文本", text: "", translatedText: "", tags: [] };
     if (state.libraryMode === "pose" || state.libraryMode === "actions") {
       var action = state.actions.find(function (item) { return item.id === id; });
       if (!action) return null;
@@ -817,6 +882,7 @@
         instanceId: makeId("action"),
         kind: "action",
         sourceId: action.id,
+        category: action.category || "未分类",
         title: action.title,
         text: action.text,
         tags: action.tags || [],
@@ -885,16 +951,72 @@
   function addTextBlock() {
     insertLibraryBlock("__free_text__", state.stage.length);
   }
+  function updateTranslationDom(index) {
+    var item = state.stage[index];
+    if (!item || item.kind !== "text") return;
+    var card = document.querySelector('.stage-block[data-stage-index="' + index + '"]');
+    if (!card) return;
+    var translation = card.querySelector('[data-stage-translation]');
+    if (translation) translation.value = item.translatedText || "";
+    var status = card.querySelector('[data-stage-translation-status]');
+    if (status) {
+      status.textContent = item.translatedText ? "已翻译" : "等待翻译";
+      status.classList.toggle("is-ready", Boolean(item.translatedText));
+    }
+  }
+  function translateTextBlock(index) {
+    var item = state.stage[index];
+    if (!item || item.kind !== "text") return;
+    var sourceText = String(item.text || "").trim();
+    if (!sourceText) return showToast("请先在输入框中填写自由文本", true);
+    var button = document.querySelector('.translate-text-button[data-translate-stage="' + index + '"]');
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.querySelector("span").textContent = "翻译中…";
+    jsonRequest("/api/prompt/translate", "POST", { text: sourceText }).then(function (data) {
+      var currentIndex = state.stage.indexOf(item);
+      if (currentIndex === -1 || String(item.text || "").trim() !== sourceText) return;
+      item.translatedText = String(data.translated_text || "").trim();
+      if (!item.translatedText) throw new Error("阿里云没有返回英文结果");
+      saveState();
+      updateTranslationDom(currentIndex);
+      renderOutput();
+      showToast("自由文本已翻译为英文");
+    }).catch(function (error) {
+      showToast("翻译失败：" + error.message, true);
+    }).finally(function () {
+      var currentButton = document.querySelector('.stage-block[data-stage-instance-id="' + CSS.escape(String(item.instanceId)) + '"] .translate-text-button');
+      if (!currentButton) return;
+      currentButton.disabled = false;
+      currentButton.classList.remove("is-loading");
+      currentButton.querySelector("span").textContent = "翻译";
+    });
+  }
+  function updateStageAfterRemoval(index, card) {
+    var list = $("stageList");
+    if (card && card.isConnected) card.remove();
+    if (!state.stage.length) {
+      list.innerHTML = stageEmptyMarkup();
+    }
+    updateStageDom();
+    renderOutput();
+  }
   function removeStage(index) {
+    var removed = state.stage[index];
+    if (!removed) return;
+    var card = $("stageList").querySelector('.stage-block[data-stage-index="' + index + '"]');
     state.stage.splice(index, 1);
     saveState();
-    renderStage();
+    updateStageAfterRemoval(index, card);
+    showToast("已从工作台移除「" + (removed.title || "当前积木") + "」");
   }
   function editStage(index) {
     var item = state.stage[index];
     if (!item || item.kind === "text") return;
     editingBlockId = "";
     editingStageIndex = index;
+    $("customBlockCategoryField").hidden = true;
     $("customBlockTitle").textContent = "编辑组装台积木";
     $("customBlockModal").querySelector(".section-kicker").textContent = "EDIT ASSEMBLY BLOCK";
     $("customBlockDescription").textContent = "这里只修改当前组装台中的这一块，不会改变积木库里的原始内容。";
@@ -1080,7 +1202,7 @@
       state.draggedIndex = null;
       state.dragPreviewIndex = null;
       saveState();
-      renderStage();
+      updateStageAfterRemoval(sourceIndex, drag.card);
       showToast(removed ? "已从工作台移除「" + (removed.title || "当前积木") + "」" : "已从工作台移除当前积木");
       return;
     }
@@ -1152,6 +1274,29 @@
     renderAssemblyView();
     showToast("已加载「" + group.name + "」");
   }
+  function overwriteGroup(groupId, button) {
+    var group = state.groups.find(function (item) { return item.id === groupId; });
+    if (!group || !window.confirm("用当前组装台覆盖组状态「" + group.name + "」吗？")) return;
+    button.disabled = true;
+    jsonRequest("/api/prompt/groups", "POST", {
+      id: group.id,
+      name: group.name,
+      items: state.stage.map(stageItemToApi),
+    }).then(function (data) {
+      var updated = data.group;
+      var index = state.groups.findIndex(function (item) { return item.id === updated.id; });
+      if (index === -1) state.groups.unshift(updated);
+      else state.groups[index] = updated;
+      state.activeGroupId = updated.id;
+      $("groupName").value = updated.name;
+      renderGroups();
+      showToast("组状态「" + updated.name + "」已覆盖");
+    }).catch(function (error) {
+      showToast("组状态覆盖失败：" + error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+    });
+  }
   function deleteGroup(groupId) {
     var group = state.groups.find(function (item) { return item.id === groupId; });
     if (!group || !window.confirm("删除组状态「" + group.name + "」吗？组装台不会改变。")) return;
@@ -1170,12 +1315,14 @@
   function openCustomModal(block) {
     editingBlockId = block ? block.id : "";
     editingStageIndex = null;
+    $("customBlockCategoryField").hidden = false;
     $("customBlockTitle").textContent = editingBlockId ? "编辑固定积木" : "添加固定积木";
     $("customBlockModal").querySelector(".section-kicker").textContent = editingBlockId ? "EDIT BLOCK" : "CUSTOM BLOCK";
     $("customBlockDescription").textContent = "把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。";
     $("customBlockForm").querySelector('button[type="submit"]').textContent = editingBlockId ? "保存修改" : "保存积木";
     $("customBlockForm").reset();
     if (block) {
+      $("customBlockCategory").value = block.category || "未分类";
       $("customBlockName").value = block.title || "";
       $("customBlockText").value = block.text || "";
       $("customBlockTags").value = (block.tags || []).join("，");
@@ -1186,6 +1333,7 @@
     window.RHMotion.closeModal("customBlockModal");
     editingBlockId = "";
     editingStageIndex = null;
+    $("customBlockCategoryField").hidden = false;
     $("customBlockTitle").textContent = "添加固定积木";
     $("customBlockModal").querySelector(".section-kicker").textContent = "CUSTOM BLOCK";
     $("customBlockDescription").textContent = "把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。";
@@ -1197,8 +1345,8 @@
     if (block) openCustomModal(block);
   }
   function copyPrompt() {
-    var output = getPromptText();
-    if (!output) return showToast("组装台还没有可复制的文本", true);
+    var output = promptTextForAction("复制");
+    if (!output) return;
     var copyPromise = navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(output) : Promise.reject(new Error("clipboard unavailable"));
     copyPromise.then(function () {
       showToast("提示词已复制到剪贴板");
@@ -1217,8 +1365,8 @@
     });
   }
   function downloadPrompt() {
-    var output = getPromptText();
-    if (!output) return showToast("组装台还没有可导出的文本", true);
+    var output = promptTextForAction("导出");
+    if (!output) return;
     var blob = new Blob(["\ufeff" + output], { type: "text/plain;charset=utf-8" });
     var url = URL.createObjectURL(blob);
     var link = document.createElement("a");
@@ -1243,8 +1391,8 @@
     window.RHMotion.closeModal("imagePreviewModal");
   }
   function importPromptToTask() {
-    var output = getPromptText();
-    if (!output) return showToast("组装台还没有可导入的文本", true);
+    var output = promptTextForAction("导入");
+    if (!output) return;
     try {
       localStorage.setItem(TASK_PROMPT_IMPORT_KEY, JSON.stringify({ version: 1, text: output, createdAt: Date.now() }));
       window.location.href = "/";
@@ -1276,7 +1424,9 @@
       var nextMode = button.dataset.libraryMode;
       if (nextMode === state.libraryMode) return;
       state.libraryMode = nextMode;
+      state.categoryFilter = "全部";
       state.filter = "全部";
+      renderCategoryFilters();
       renderFilters();
       renderLibrary();
       animateLibraryModeSwitch();
@@ -1288,6 +1438,15 @@
       if (isReferenceMode()) return refreshReferences();
     });
     $("blockSearch").addEventListener("input", function () { state.search = this.value.trim(); renderLibrary(); });
+    $("categoryFilters").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-filter-category]");
+      if (!button) return;
+      state.categoryFilter = button.dataset.filterCategory;
+      state.filter = "全部";
+      renderCategoryFilters();
+      renderFilters();
+      renderLibrary();
+    });
     $("tagFilters").addEventListener("click", function (event) {
       var button = event.target.closest("[data-filter-tag]");
       if (!button) return;
@@ -1298,6 +1457,8 @@
     $("groupList").addEventListener("click", function (event) {
       var loadButton = event.target.closest("[data-load-group]");
       if (loadButton) return loadGroup(loadButton.dataset.loadGroup);
+      var overwriteButton = event.target.closest("[data-overwrite-group]");
+      if (overwriteButton) return overwriteGroup(overwriteButton.dataset.overwriteGroup, overwriteButton);
       var deleteButton = event.target.closest("[data-delete-group]");
       if (deleteButton) deleteGroup(deleteButton.dataset.deleteGroup);
     });
@@ -1365,10 +1526,14 @@
       var index = Number(editor.dataset.stageText);
       if (!state.stage[index]) return;
       state.stage[index].text = editor.value;
+      state.stage[index].translatedText = "";
       saveState();
+      updateTranslationDom(index);
       renderOutput();
     });
     $("stageList").addEventListener("click", function (event) {
+      var translateButton = event.target.closest("[data-translate-stage]");
+      if (translateButton) return translateTextBlock(Number(translateButton.dataset.translateStage));
       var mediaToggle = event.target.closest("[data-action-media-toggle]");
       if (mediaToggle) {
         var mediaContainer = mediaToggle.closest("[data-action-media]");
@@ -1519,6 +1684,7 @@
       event.preventDefault();
       var name = $("customBlockName").value.trim();
       var text = $("customBlockText").value.trim();
+      var category = $("customBlockCategory").value.trim() || "未分类";
       if (!name || !text) return showToast("请填写积木名称和固定文本", true);
       var stageIndex = editingStageIndex;
       if (stageIndex != null) {
@@ -1538,7 +1704,7 @@
       submitButton.disabled = true;
       var endpoint = blockId ? "/api/prompt/library/" + encodeURIComponent(blockId) : "/api/prompt/library";
       var method = blockId ? "PUT" : "POST";
-      jsonRequest(endpoint, method, { title: name, text: text, tags: parseTags($("customBlockTags").value) }).then(function (data) {
+      jsonRequest(endpoint, method, { category: category, title: name, text: text, tags: parseTags($("customBlockTags").value) }).then(function (data) {
         if (blockId) {
           var index = state.libraryBlocks.findIndex(function (item) { return item.id === blockId; });
           if (index !== -1) state.libraryBlocks[index] = data.block;
