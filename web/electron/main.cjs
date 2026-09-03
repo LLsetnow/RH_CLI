@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain } = require("electron");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -15,6 +15,10 @@ let mainWindow = null;
 let backendProcess = null;
 let backendPort = null;
 const accountWindows = new Map();
+const pageNavigationShortcuts = [
+  ["Control+Left", "previous"],
+  ["Control+Right", "next"]
+];
 
 function normaliseAccount(value) {
   const account = value && typeof value === "object" ? value : {};
@@ -385,6 +389,22 @@ function createWindow(port) {
   return mainWindow.loadURL(`http://127.0.0.1:${port}/`);
 }
 
+function registerPageNavigationShortcuts() {
+  pageNavigationShortcuts.forEach(([accelerator, direction]) => {
+    const registered = globalShortcut.register(accelerator, () => {
+      if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused()) return;
+      mainWindow.webContents.send("rh-global-page-navigation", direction);
+    });
+    if (!registered) {
+      console.warn(`[rh-electron] 无法注册全局快捷键：${accelerator}`);
+    }
+  });
+}
+
+function unregisterPageNavigationShortcuts() {
+  pageNavigationShortcuts.forEach(([accelerator]) => globalShortcut.unregister(accelerator));
+}
+
 async function boot() {
   try {
     if (process.platform === "darwin" && app.dock) {
@@ -392,6 +412,7 @@ async function boot() {
     }
     const port = await startBackend();
     await createWindow(port);
+    registerPageNavigationShortcuts();
   } catch (error) {
     stopBackend();
     dialog.showErrorBox("RH Workflow Desk 启动失败", error instanceof Error ? error.message : String(error));
@@ -402,6 +423,7 @@ async function boot() {
 app.whenReady().then(boot);
 
 app.on("before-quit", () => {
+  unregisterPageNavigationShortcuts();
   stopBackend();
 });
 

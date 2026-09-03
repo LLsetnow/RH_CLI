@@ -32,7 +32,7 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
-          <a id="openSettings" class="settings-button settings-access settings-link" href="/?openSettings=1" aria-label="打开本地设置" title="打开本地设置">
+          <a id="openSettings" class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
         </div>
@@ -68,6 +68,12 @@
             <span class="top-nav-label">仪表盘</span>
           </span>
         </a>
+        <a class="top-nav-link" href="/settings">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2" /><path d="M12 19v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M3 12h2" /><path d="M19 12h2" /><path d="m4.93 19.07 1.41-1.41" /><path d="m17.66 6.34 1.41-1.41" /><circle cx="12" cy="12" r="4" /></svg>
+            <span class="top-nav-label">设置</span>
+          </span>
+        </a>
       </nav>
 
       <section class="intro-block">
@@ -86,7 +92,11 @@
                 <h2>导入 API 工作流</h2>
               </div>
               <div class="workflow-heading-actions">
-                <button id="exportWorkflowButton" class="secondary-button button-compact" type="button" hidden>导出当前 API</button>
+                <div class="workflow-library-actions" aria-label="工作流库操作">
+                  <button id="saveWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>保存</button>
+                  <button id="overwriteWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>覆盖</button>
+                  <button id="exportWorkflowButton" class="secondary-button button-compact" type="button" hidden>导出</button>
+                </div>
                 <div class="step-pill">JSON</div>
               </div>
             </div>
@@ -109,13 +119,6 @@
 
             <div class="submit-strip" id="submitStrip" hidden>
               <div class="submit-config">
-                <label class="field-label" for="keySelect">调度 API Key</label>
-                <select id="keySelect">
-                  <option value="">自动选择可用 API Key</option>
-                </select>
-                <span class="field-hint submit-shortcut">Ctrl + Enter 快捷提交</span>
-              </div>
-              <div class="submit-config">
                 <label class="field-label" for="instanceType">提交机型</label>
                 <select id="instanceType">
                   <option value="default">Standard · 24GB · ¥4.70572 / 小时</option>
@@ -123,6 +126,7 @@
                   <option value="ultra">Ultra · 84GB · ¥9.07531 / 小时</option>
                 </select>
                 <span class="field-hint">通过 instanceType 指定，默认使用 Standard。</span>
+                <span class="field-hint submit-shortcut">Ctrl + Enter 快捷提交</span>
               </div>
               <button id="submitButton" class="primary-button" type="button">
                 <span class="button-glyph">→</span><span class="button-label">加入任务队列</span>
@@ -162,7 +166,7 @@
       </div>
     </div>
 
-    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="toast" class="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
     <div id="settingsModal" class="modal-backdrop" hidden>
       <section class="panel settings-panel settings-modal-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
         <div class="panel-heading compact-heading">
@@ -204,7 +208,7 @@
         <div class="credential-heading prompt-resources-heading">
           <div>
             <span class="field-label">提示词工坊资源路径</span>
-            <span class="field-hint">六类积木分别读取各自的本机文件；保存后会立即重新扫描，媒体仍保留原路径，不会复制。</span>
+            <span class="field-hint">基础积木保留独立 Markdown 文件；动作、人物、音频、背景、服装统一读取 ref 根目录下的对应文件夹，保存后立即重新扫描。</span>
           </div>
         </div>
         <div class="setting-grid prompt-library-setting">
@@ -216,34 +220,15 @@
             <button id="choosePromptLibrary" class="secondary-button" type="button" data-pick-prompt-resource="library">选择文件</button>
           </div>
         </div>
-        <div class="setting-grid action-resources-setting">
+        <div class="setting-grid media-library-root-setting">
           <label class="field-group">
-            <span class="field-label field-label-with-help">动作库 Markdown 文件 <button class="field-help" type="button" aria-label="动作库文件读取说明" data-tooltip="读取该文件中从 ## pose 到下一个 ## 的内容；每个 #### 条目读取图片链接和 > 开头的提示词。图片仍从原目录读取，不会复制。">?</button></span>
-            <input id="actionResourcesPath" type="text" placeholder="/Users/apple/Documents/VideoMake/ref/pose/pose.md" />
-            <span class="field-hint">保存后会立即重新扫描动作图片、分类标签和姿势提示词。</span>
+            <span class="field-label field-label-with-help">媒体库 ref 文件夹 <button class="field-help" type="button" aria-label="媒体库目录读取说明" data-tooltip="统一读取 ref/pose/pose.md、character/character.md、audio/audio.md、background/background.md 和 clothes/clothes.md。媒体文件保留相对路径，不会复制。">?</button></span>
+            <input id="mediaLibraryRoot" type="text" placeholder="~/Documents/VideoMake/ref" />
+            <span class="field-hint">保存后会立即重新扫描动作、人物、音频、背景和服装卡片。</span>
           </label>
           <div class="setting-actions">
-            <button id="chooseActionResources" class="secondary-button" type="button">选择文件</button>
-            <button id="saveActionResources" class="secondary-button" type="button">保存并扫描</button>
+            <button id="chooseMediaLibraryRoot" class="secondary-button" type="button">选择文件夹</button>
           </div>
-        </div>
-        <div class="reference-path-grid">
-          <label class="reference-path-row">
-            <span class="field-label">人物库 Markdown 文件</span>
-            <span class="reference-path-control"><input id="characterResourcesPath" type="text" placeholder="ref/character/character.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="character">选择</button></span>
-          </label>
-          <label class="reference-path-row">
-            <span class="field-label">音频库 Markdown 文件</span>
-            <span class="reference-path-control"><input id="audioResourcesPath" type="text" placeholder="ref/audio/audio.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="audio">选择</button></span>
-          </label>
-          <label class="reference-path-row">
-            <span class="field-label">背景库 Markdown 文件</span>
-            <span class="reference-path-control"><input id="backgroundResourcesPath" type="text" placeholder="ref/background/background.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="background">选择</button></span>
-          </label>
-          <label class="reference-path-row">
-            <span class="field-label">服装库 Markdown 文件</span>
-            <span class="reference-path-control"><input id="clothesResourcesPath" type="text" placeholder="ref/clothes/clothes.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="clothes">选择</button></span>
-          </label>
         </div>
         <div class="setting-resource-actions">
           <button id="savePromptResources" class="secondary-button" type="button">保存全部路径并扫描</button>
@@ -289,11 +274,20 @@
           </label>
         </div>
         <div class="telegram-actions">
-          <label class="telegram-enabled-toggle"><input id="telegramEnabled" type="checkbox" />启用成片自动推送</label>
+          <label class="telegram-enabled-toggle"><input id="telegramEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用成片自动推送</span></label>
           <span class="field-hint">Token 只保存在本机；已保存 Token 留空即可保持不变。</span>
-          <button id="testTelegram" class="secondary-button" type="button">测试连接</button>
-          <button id="saveTelegram" class="secondary-button" type="button">保存 Telegram</button>
-          <button id="clearTelegram" class="text-button" type="button">清除配置</button>
+          <span class="telegram-button-group">
+            <button id="saveTelegram" class="secondary-button" type="button">保存 Telegram</button>
+            <button id="clearTelegram" class="secondary-button" type="button">清除配置</button>
+            <button id="testTelegram" class="secondary-button" type="button">测试连接</button>
+          </span>
+        </div>
+        <div class="telegram-inbound-panel">
+          <div class="telegram-inbound-copy">
+            <span class="field-label">Telegram 图片入站</span>
+            <span id="telegramInboundWorkflow" class="field-hint">未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。</span>
+          </div>
+          <label class="telegram-enabled-toggle"><input id="telegramInboundEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>收到图片后自动运行</span></label>
         </div>
         <div class="setting-grid personal-capacity-setting">
           <label class="field-group">
@@ -302,6 +296,18 @@
             <span class="field-hint">默认 3；仅影响普通个人 API Key，企业级、共享或 Wallet API Key 保持 100。</span>
           </label>
           <button id="savePersonalCapacity" class="secondary-button" type="button">保存并发数</button>
+        </div>
+        <div class="setting-grid api-key-strategy-setting">
+          <label class="field-group">
+            <span class="field-label">API Key 调度策略</span>
+            <select id="apiKeyStrategy">
+              <option value="personal_then_shared">优先个人，满载时使用共享/企业</option>
+              <option value="personal_only">仅使用个人 API Key</option>
+              <option value="shared_only">仅使用共享/企业 API Key</option>
+            </select>
+            <span class="field-hint">任务提交页不再选择 API Key，所有提交都会按此策略自动调度。</span>
+          </label>
+          <button id="saveApiKeyStrategy" class="secondary-button" type="button">保存策略</button>
         </div>
         <div class="divider account-divider"></div>
         <div class="credential-heading account-heading">

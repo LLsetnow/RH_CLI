@@ -48,6 +48,116 @@ def test_prompt_store_persists_translated_free_text(tmp_path):
     assert PromptStore(tmp_path).snapshot()["state"]["items"] == state["items"]
 
 
+def test_prompt_store_exports_current_workbench_as_a_task_group_snapshot(tmp_path):
+    store = PromptStore(tmp_path)
+    state = store.save_state([{"instanceId": "item-1", "kind": "text", "text": "任务镜头"}])
+
+    group = store.task_group_snapshot()
+
+    assert group["name"] == "任务提交时组装台"
+    assert group["items"] == state["items"]
+    assert group["id"].startswith("task-group-")
+
+
+def test_prompt_store_persists_media_stage_items_and_groups(tmp_path):
+    store = PromptStore(tmp_path)
+    media = {
+        "instanceId": "media-item",
+        "kind": "media",
+        "mediaPath": "/tmp/reference.png",
+        "mediaName": "reference.png",
+        "mediaKind": "image",
+        "mediaMime": "image/png",
+    }
+
+    state = store.save_state([media])
+    group = store.save_group("媒体参考", state["items"])
+    reloaded = PromptStore(tmp_path).snapshot()
+
+    expected = {
+        "instance_id": "media-item",
+        "kind": "media",
+        "media_path": "/tmp/reference.png",
+        "media_name": "reference.png",
+        "media_kind": "image",
+        "media_mime": "image/png",
+    }
+    assert state["items"] == [expected]
+    assert reloaded["state"]["items"] == [expected]
+    assert group["items"] == [expected]
+
+
+def test_prompt_store_persists_empty_media_stage_placeholder(tmp_path):
+    store = PromptStore(tmp_path)
+
+    state = store.save_state([{
+        "instanceId": "media-placeholder",
+        "kind": "media",
+    }])
+
+    assert state["items"] == [{
+        "instance_id": "media-placeholder",
+        "kind": "media",
+        "media_path": "",
+        "media_name": "媒体积木",
+        "media_kind": "",
+        "media_mime": "",
+    }]
+
+
+def test_prompt_store_persists_generated_subject_definitions_marker(tmp_path):
+    store = PromptStore(tmp_path)
+
+    state = store.save_state([{
+        "instanceId": "subject-item",
+        "kind": "text",
+        "text": "subject_definitions:\n<Subject 1>: A person.",
+        "translatedText": "subject_definitions:\n<Subject 1>: A person.",
+        "translationDisabled": True,
+        "generatedType": "subject_definitions",
+        "segments": [{"type": "text", "text": "subject_definitions:\n<Subject 1>: A person."}],
+    }])
+
+    assert state["items"][0]["generated_type"] == "subject_definitions"
+    assert state["items"][0]["translation_disabled"] is True
+    assert PromptStore(tmp_path).snapshot()["state"]["items"][0]["generated_type"] == "subject_definitions"
+
+
+def test_prompt_store_persists_structured_free_text_references(tmp_path):
+    store = PromptStore(tmp_path)
+    state = store.save_state([
+        {
+            "instanceId": "text-with-reference",
+            "kind": "text",
+            "text": "镜头跟随 @站立动作",
+            "translatedText": "The camera follows __RH_REF_1__.",
+            "segments": [
+                {"type": "text", "text": "镜头跟随 "},
+                {
+                    "type": "reference",
+                    "sourceType": "action",
+                    "sourceId": "action-1",
+                    "label": "站立动作",
+                    "snapshot": {"title": "站立动作", "text": "A standing pose", "tags": ["pose"], "ignored": "drop me"},
+                },
+            ],
+        }
+    ])
+
+    assert state["items"][0]["segments"] == [
+        {"type": "text", "text": "镜头跟随 "},
+        {
+            "type": "reference",
+            "source_type": "action",
+            "source_id": "action-1",
+            "label": "站立动作",
+            "snapshot": {"title": "站立动作", "text": "A standing pose", "tags": ["pose"]},
+        },
+    ]
+    assert state["items"][0]["translated_text"] == "The camera follows __RH_REF_1__."
+    assert PromptStore(tmp_path).snapshot()["state"]["items"] == state["items"]
+
+
 def test_deleted_library_block_keeps_group_order_and_snapshot(tmp_path):
     store = PromptStore(tmp_path)
     block = store.add_block({"title": "光线", "text": "柔和自然光", "tags": ["风格"]})
@@ -75,6 +185,11 @@ def test_update_library_block_preserves_id_and_refreshes_references(tmp_path):
     assert updated == {"id": block["id"], "category": "未分类", **expected_snapshot}
     assert snapshot["state"]["items"][0]["snapshot"] == expected_snapshot
     assert snapshot["groups"]["groups"][0]["items"][0]["snapshot"] == expected_snapshot
+    library_text = (tmp_path / "prompt" / "library.md").read_text()
+    assert "#### 新标题" in library_text
+    assert "tags: 新标签" in library_text
+    assert "> 新文本" in library_text
+    assert "#### 原标题" not in library_text
 
 
 def test_save_group_with_id_overwrites_items_without_creating_a_second_group(tmp_path):

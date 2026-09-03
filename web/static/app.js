@@ -9,13 +9,13 @@
   var accountBusy = {};
   var taskStatusSnapshot = null;
   var completedTaskNotices = {};
-  var toastTimer = 0;
   var draftSaveTimer = 0;
   var submitButtonLabel = "";
   var submitButtonGlyph = "";
   var draftStorageWarningShown = false;
   var draftStorageKey = "rh-workflow-desk-draft-v1";
   var pendingPromptStorageKey = "rh-workflow-desk-pending-prompt-v1";
+  var pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1";
   var statusLabels = {
     queued: "排队中", submitting: "提交中", running: "执行中", completed: "已完成",
     failed: "失败", cancelled: "已取消", interrupted: "已中断", recovering: "恢复中", no_balance: "无余额",
@@ -77,10 +77,7 @@
   function accountStatusLabel(status) { return accountStatusLabels[status] || status || "未知"; }
   function showToast(message, isError) {
     var toast = $("toast");
-    toast.textContent = message;
-    toast.className = "toast show" + (isError ? " error" : "");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toast.className = "toast"; }, 3600);
+    if (window.RHMotion && window.RHMotion.showToast) window.RHMotion.showToast(toast, message, isError);
   }
   function request(path, options) {
     return fetch(path, options || {}).then(function (response) {
@@ -167,15 +164,10 @@
     }
   }
 
-  function draftCredential() {
-    return { selectedKeyId: $("keySelect") ? $("keySelect").value : "" };
-  }
-
   function saveDraftNow() {
     var previous = readDraft() || {};
     var draft = {
       version: 1,
-      credential: draftCredential(),
       workflow: previous.workflow || null
     };
     if (appState.workflow && appState.analysis && appState.workflowId) {
@@ -283,16 +275,21 @@
     return true;
   }
 
+  function queuePromptGroupSnapshot(group) {
+    try {
+      if (!group || !Array.isArray(group.items)) {
+        localStorage.removeItem(pendingPromptGroupStorageKey);
+        return;
+      }
+      localStorage.setItem(pendingPromptGroupStorageKey, JSON.stringify({ version: 1, group: group }));
+    } catch (error) {
+      showToast("提示词组状态无法暂存到本机", true);
+    }
+  }
+
   function restoreDraft(silent) {
     var draft = readDraft();
     if (!draft) return;
-
-    var credential = draft.credential || {};
-    if ($("keySelect") && credential.selectedKeyId && appState.keys.some(function (key) {
-      return key.id === credential.selectedKeyId && key.status === "ready";
-    })) {
-      $("keySelect").value = credential.selectedKeyId;
-    }
 
     var savedWorkflow = draft.workflow;
     if (!savedWorkflow || !savedWorkflow.data || typeof savedWorkflow.data !== "object" || !savedWorkflow.analysis || typeof savedWorkflow.analysis !== "object") return;
@@ -312,7 +309,7 @@
     restoreInputValues(savedWorkflow.values || {});
     $("workflowFilename").textContent = "已恢复 " + appState.workflowName;
     $("workflowRemoteConfig").hidden = false;
-    $("exportWorkflowButton").hidden = false;
+    setWorkflowLibraryActionsVisible(true);
     if (!silent) showToast("已恢复上次工作流和输入配置");
   }
 
@@ -336,8 +333,6 @@
 
   function renderKeys() {
     var list = $("credentialList");
-    var select = $("keySelect");
-    var current = select.value;
     if (!appState.keys.length) {
       list.innerHTML = '<div class="credential-empty">还没有保存 API Key。添加后会先验证站点、余额和账户类型。</div>';
     } else {
@@ -357,12 +352,6 @@
           credentialActionButton(key, "delete-key", "删除", "credential-action-delete") + '</span></div></div>';
       }).join("");
     }
-    var options = '<option value="">自动选择可用 API Key</option>';
-    appState.keys.filter(function (key) { return key.status === "ready"; }).forEach(function (key) {
-      options += '<option value="' + esc(key.id) + '">' + esc(key.name) + ' · ' + esc(key.capacity) + '并发 · ' + esc(key.site) + '</option>';
-    });
-    select.innerHTML = options;
-    if (current && appState.keys.some(function (key) { return key.id === current && key.status === "ready"; })) select.value = current;
   }
 
   function syncCurrentAccountSite() {
@@ -508,16 +497,75 @@
       var canDelete = ["completed", "failed", "cancelled", "interrupted"].indexOf(task.status) !== -1;
       var queueLabel = task.status === "queued" && task.queue_position ? '<span>本地队列第 ' + esc(task.queue_position) + ' 位</span><span>·</span>' : "";
       var statusClass = esc(task.status);
+      var errorText = taskErrorText(task);
+      var progressMarkup = errorText ? '<button class="task-error task-error-copy" type="button" data-action="copy-task-error" title="点击复制完整错误信息" aria-label="复制完整错误信息">' + esc(taskErrorSummary(errorText)) + '</button>' : esc(task.progress || "等待调度…");
       return '<article class="task-card ' + statusClass + '" data-task-id="' + esc(task.id) + '">' +
         '<div class="task-top"><button class="task-name task-name-button" type="button" data-action="open-task" title="打开任务详情" aria-label="打开任务 ' + esc(task.workflow_name) + '">' + esc(task.workflow_name) + '</button>' +
         '<span class="task-status ' + statusClass + '">' + statusLabel(task.status) + '</span></div>' +
         '<div class="task-meta"><span>' + esc(taskCredentialLabel(task)) + '</span><span>·</span><span>机型 ' + esc(taskInstanceLabel(task)) + '</span><span>·</span>' + queueLabel + '<span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
-        '<div class="task-progress">' + esc(task.progress || "等待调度…") + (task.error ? '<br /><span class="task-error">' + esc(task.error) + '</span>' : "") + '</div>' +
+        '<div class="task-progress">' + progressMarkup + '</div>' +
         '<div class="task-footer"><span class="task-footer-info"><span class="task-output-count">' + esc(outputLabel) + '</span>' + (costLabel ? '<span class="task-cost">' + esc(costLabel) + '</span>' : '') + '<span class="task-duration">' + esc(durationLabel) + '</span></span>' +
         '<span class="task-actions"><button class="task-load-button" type="button" data-action="load-task">加载</button>' +
         (canCancel ? '<button type="button" data-action="cancel-task">取消</button>' : "") +
         (canDelete ? '<button type="button" data-action="delete-task">删除</button>' : "") + '</span></div></article>';
     }).join("");
+  }
+
+  function taskErrorText(task) {
+    if (!task) return "";
+    var error = String(task.error || "").trim();
+    if (error) return error;
+    if (["failed", "cancelled"].indexOf(String(task.status || "")) !== -1) return String(task.progress || "任务失败").trim();
+    return "";
+  }
+
+  function taskErrorSummary(value) {
+    var summary = String(value || "").replace(/\s+/g, " ").trim();
+    return summary.length > 120 ? summary.slice(0, 117) + "…" : summary;
+  }
+
+  function taskErrorCopyText(task) {
+    var primary = taskErrorText(task);
+    var detail = task && task.error_detail;
+    var hasDetail = detail && (typeof detail !== "object" || Object.keys(detail).length > 0);
+    if (!hasDetail) return primary;
+    var serialized = "";
+    try { serialized = JSON.stringify(detail, null, 2); } catch (error) { serialized = String(detail); }
+    return primary ? primary + "\n\n错误详情：\n" + serialized : serialized;
+  }
+
+  function copyTextFallback(text) {
+    return new Promise(function (resolve, reject) {
+      var input = document.createElement("textarea");
+      input.value = text;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.left = "-9999px";
+      document.body.appendChild(input);
+      input.select();
+      var copied = false;
+      try { copied = document.execCommand("copy"); } catch (error) { copied = false; }
+      input.remove();
+      if (copied) resolve();
+      else reject(new Error("剪贴板不可用"));
+    });
+  }
+
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      return navigator.clipboard.writeText(text).catch(function () { return copyTextFallback(text); });
+    }
+    return copyTextFallback(text);
+  }
+
+  function copyTaskError(task) {
+    var text = taskErrorCopyText(task);
+    if (!text) return showToast("没有可复制的错误信息", true);
+    copyTextToClipboard(text).then(function () {
+      showToast("完整错误信息已复制");
+    }).catch(function () {
+      showToast("复制失败：剪贴板不可用", true);
+    });
   }
 
   function animateTaskCard(taskId) {
@@ -566,13 +614,9 @@
     if (document.activeElement !== $("outputDir")) $("outputDir").value = appState.settings.output_dir || "";
     if (document.activeElement !== $("douyinCookiePath")) $("douyinCookiePath").value = appState.settings.douyin_cookie_path || "";
     if (document.activeElement !== $("promptLibraryPath")) $("promptLibraryPath").value = appState.settings.prompt_library_path || "";
-    if (document.activeElement !== $("actionResourcesPath")) $("actionResourcesPath").value = appState.settings.action_resources_path || "";
-    var referencePaths = appState.settings.reference_resources_paths || {};
-    ["character", "audio", "background", "clothes"].forEach(function (kind) {
-      var input = $(kind + "ResourcesPath");
-      if (input && document.activeElement !== input) input.value = referencePaths[kind] || "";
-    });
+    if ($("mediaLibraryRoot") && document.activeElement !== $("mediaLibraryRoot")) $("mediaLibraryRoot").value = appState.settings.media_library_root || "";
     if (document.activeElement !== $("personalCapacity")) $("personalCapacity").value = appState.settings.personal_capacity || 3;
+    if ($("apiKeyStrategy") && document.activeElement !== $("apiKeyStrategy")) $("apiKeyStrategy").value = appState.settings.api_key_strategy || "personal_then_shared";
     var translationSettings = appState.settings.aliyun_translation || {};
     if ($("aliyunTranslationAccessKeyId") && document.activeElement !== $("aliyunTranslationAccessKeyId")) {
       $("aliyunTranslationAccessKeyId").value = translationSettings.access_key_id || "";
@@ -588,7 +632,16 @@
     var telegramSettings = appState.settings.telegram || {};
     if ($("telegramBotToken") && document.activeElement !== $("telegramBotToken")) $("telegramBotToken").value = "";
     if ($("telegramChatId") && document.activeElement !== $("telegramChatId")) $("telegramChatId").value = telegramSettings.chat_id || "";
-    if ($("telegramEnabled")) $("telegramEnabled").checked = Boolean(telegramSettings.enabled);
+    if ($("telegramEnabled") && document.activeElement !== $("telegramEnabled")) {
+      $("telegramEnabled").checked = Boolean(telegramSettings.enabled);
+    }
+    if ($("telegramInboundEnabled") && document.activeElement !== $("telegramInboundEnabled")) {
+      $("telegramInboundEnabled").checked = Boolean(telegramSettings.inbound_enabled);
+    }
+    if ($("telegramInboundWorkflow")) {
+      var inboundWorkflow = telegramSettings.inbound_workflow_name || telegramSettings.inbound_workflow_id || "未选择工作流";
+      $("telegramInboundWorkflow").textContent = telegramSettings.inbound_workflow_id ? ("当前工作流：" + inboundWorkflow + (telegramSettings.inbound_enabled ? " · 已启用" : " · 未启用")) : "未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。";
+    }
     if ($("telegramStatus")) {
       var telegramStatus = telegramSettings.configured ? (telegramSettings.enabled ? "已启用 · " + (telegramSettings.source === "environment" ? "环境变量" : "本机") : "已配置 · 未启用") : "未配置";
       $("telegramStatus").textContent = telegramStatus;
@@ -611,11 +664,8 @@
 
   function openSettingsFromQuery() {
     var params = new URLSearchParams(window.location.search);
-    if (params.get("openSettings") !== "1" || !$('settingsModal')) return;
-    window.RHMotion.openModal("settingsModal", "outputDir");
-    if (window.history && window.history.replaceState) {
-      window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
-    }
+    if (params.get("openSettings") !== "1") return;
+    window.location.replace("/settings");
   }
 
   function focusInputFromQuery() {
@@ -631,6 +681,13 @@
     if (window.history && window.history.replaceState) window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
   }
 
+  function submitAfterInitialLoad() {
+    var params = new URLSearchParams(window.location.search);
+    if (params.get("autoSubmit") !== "1") return;
+    if (window.history && window.history.replaceState) window.history.replaceState({}, document.title, window.location.pathname + window.location.hash);
+    window.setTimeout(function () { submitTask(); }, 0);
+  }
+
   function setAnalysisStatus(message, isError) {
     var element = $("analysisStatus");
     element.hidden = !message;
@@ -642,6 +699,13 @@
     appState.remoteWorkflowId = String(value || "").trim();
     var input = $("remoteWorkflowId");
     if (input) input.value = appState.remoteWorkflowId;
+  }
+
+  function setWorkflowLibraryActionsVisible(visible) {
+    ["saveWorkflowLibraryButton", "overwriteWorkflowLibraryButton", "exportWorkflowButton"].forEach(function (id) {
+      var button = $(id);
+      if (button) button.hidden = !visible;
+    });
   }
 
   function updateThemeToggle() {
@@ -975,12 +1039,12 @@
     var accept = isVideo ? "video/*" : "image/*";
     var mediaMarkup = isVideo ? '<video controls preload="metadata" playsinline></video>' : '<img alt="" draggable="false" />';
     var pasteButton = isVideo ? "" : '<button class="file-button paste-file-button" data-action="paste-file" data-input-id="' + esc(item.id) + '" type="button">粘贴图片</button>';
-    var hint = isVideo ? "拖入、选择或输入路径后预览视频" : "拖入、⌘V 粘贴或点击“预览”查看图片";
+    var hint = isVideo ? "拖入、选择或输入路径后预览视频" : "拖入、⌘V 粘贴或点击“选择文件”查看图片";
     var douyinSource = isVideo ? '<div class="video-source-row"><label class="video-url-field"><span class="sr-only">抖音视频链接</span><input class="douyin-url" data-input-id="' + esc(item.id) + '" type="url" placeholder="粘贴抖音视频链接（可选）" autocomplete="off" /></label><button class="file-button douyin-download-button" data-action="download-douyin" data-input-id="' + esc(item.id) + '" type="button">下载抖音</button></div>' : "";
     return '<div class="file-input-layout"><div class="file-input-controls">' +
       '<div class="file-dropzone" data-action="pick-file" data-input-id="' + esc(item.id) + '" tabindex="0" role="group" aria-label="文件拖放区域">' +
       '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">' + hint + '</small></span>' +
-      '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" accept="' + accept + '" hidden />' + pasteButton + '<button class="file-button" data-action="pick-file" data-input-id="' + esc(item.id) + '" type="button">预览</button></div>' +
+      '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" accept="' + accept + '" hidden />' + pasteButton + '<button class="file-button" data-action="pick-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button></div>' +
       '<div class="input-control-row"><input class="file-path" data-input-id="' + esc(item.id) + '" data-original-value="' + esc(String(item.default || "")) + '" type="text" placeholder="输入本机绝对路径（不会复制文件）" value="' + esc(/^(\/|[A-Za-z]:[\\/])/.test(String(item.default || "")) ? String(item.default || "") : "") + '" /><button class="file-button native-file-button" data-action="pick-native-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button></div>' + douyinSource +
       '<div class="file-meta" data-meta-id="' + esc(item.id) + '">点击“选择文件”后，这里会显示本机绝对路径；输入文件不会复制到项目目录。</div></div>' +
       '<figure class="file-preview" data-preview-id="' + esc(item.id) + '" data-expected-preview-kind="' + kind + '" draggable="true" title="拖动此预览到其他文件输入以替换" aria-label="' + label + '，可拖动到其他文件输入替换" hidden><figcaption>' + label + '</figcaption><div class="file-preview-frame">' + mediaMarkup + '</div><div class="file-preview-name"></div></figure></div></div>';
@@ -1117,7 +1181,7 @@
       setBypassedNodeMap(data.analysis && data.analysis.bypassed_nodes);
       renderAnalysis(data.analysis);
       $("workflowRemoteConfig").hidden = false;
-      $("exportWorkflowButton").hidden = false;
+      setWorkflowLibraryActionsVisible(true);
       setAnalysisStatus("工作流已识别，可以准备输入并提交。", false);
       applyPendingPrompt();
       saveDraftNow();
@@ -1134,7 +1198,7 @@
       $("workflowInputs").hidden = true;
       $("submitStrip").hidden = true;
       $("workflowRemoteConfig").hidden = true;
-      $("exportWorkflowButton").hidden = true;
+      setWorkflowLibraryActionsVisible(false);
       setAnalysisStatus(error.message, true);
     });
   }
@@ -1142,6 +1206,7 @@
   function loadTask(task) {
     return request("/api/tasks/" + encodeURIComponent(task.id) + "/load").then(function (data) {
       var savedTask = data.task || task;
+      queuePromptGroupSnapshot(data.prompt_group);
       appState.workflowId = data.workflow_id || "";
       appState.remoteWorkflowId = String(savedTask.remote_workflow_id || (data.analysis && data.analysis.remote_workflow_id) || "").trim();
       appState.workflow = data.workflow || null;
@@ -1166,14 +1231,9 @@
         bypassedNodes: savedTask.bypassed_nodes || savedTask.bypassed_inputs || []
       });
       applyPendingPrompt();
-      if ($("keySelect") && savedTask.key_id && appState.keys.some(function (key) {
-        return key.id === savedTask.key_id && key.status === "ready";
-      })) {
-        $("keySelect").value = savedTask.key_id;
-      }
       $("workflowFilename").textContent = "已加载 " + appState.workflowName;
       $("workflowRemoteConfig").hidden = false;
-      $("exportWorkflowButton").hidden = false;
+      setWorkflowLibraryActionsVisible(true);
       setAnalysisStatus("已加载任务数据，可以继续修改后提交。", false);
       var panel = document.querySelector(".workflow-panel");
       saveDraftNow();
@@ -1198,7 +1258,7 @@
       setRemoteWorkflowId(appState.remoteWorkflowId);
       $("workflowFilename").textContent = "已加载 " + appState.workflowName;
       $("workflowRemoteConfig").hidden = false;
-      $("exportWorkflowButton").hidden = false;
+      setWorkflowLibraryActionsVisible(true);
       setAnalysisStatus("已打开工作流资料，可以配置输入后提交。", false);
       saveDraftNow();
       if (window.history && window.history.replaceState) window.history.replaceState({}, document.title, "/");
@@ -1552,13 +1612,13 @@
     });
   }
 
-  function pickActionResources(button) {
+  function pickMediaLibraryRoot(button) {
     var original = button.textContent;
     button.disabled = true;
     button.textContent = "选择中…";
-    request("/api/pick-action-resources", { method: "POST" }).then(function (selected) {
-      $("actionResourcesPath").value = selected.path || "";
-      showToast("已选择动作库文件，请点击“保存并扫描”确认");
+    request("/api/pick-media-root", { method: "POST" }).then(function (selected) {
+      $("mediaLibraryRoot").value = selected.path || "";
+      showToast("已选择媒体库目录，请点击“保存全部路径并扫描”确认");
     }).catch(function (error) {
       showToast(error.message, true);
     }).finally(function () {
@@ -1594,24 +1654,13 @@
   function promptResourceSettingsPayload() {
     return {
       prompt_library_path: $("promptLibraryPath").value.trim(),
-      action_resources_path: $("actionResourcesPath").value.trim(),
-      reference_resources_paths: {
-        character: $("characterResourcesPath").value.trim(),
-        audio: $("audioResourcesPath").value.trim(),
-        background: $("backgroundResourcesPath").value.trim(),
-        clothes: $("clothesResourcesPath").value.trim(),
-      },
+      media_library_root: $("mediaLibraryRoot").value.trim(),
     };
   }
 
   function applyPromptResourceSettings(data) {
     if (data.prompt_library_path) $("promptLibraryPath").value = data.prompt_library_path;
-    if (data.action_resources_path) $("actionResourcesPath").value = data.action_resources_path;
-    var paths = data.reference_resources_paths || {};
-    ["character", "audio", "background", "clothes"].forEach(function (kind) {
-      var input = $(kind + "ResourcesPath");
-      if (input && paths[kind]) input.value = paths[kind];
-    });
+    if (data.media_library_root && $("mediaLibraryRoot")) $("mediaLibraryRoot").value = data.media_library_root;
   }
 
   function savePromptResources() {
@@ -1619,7 +1668,7 @@
     button.disabled = true;
     jsonRequest("/api/settings", "PATCH", promptResourceSettingsPayload()).then(function (data) {
       applyPromptResourceSettings(data);
-      showToast("六类积木路径已保存，资源库已重新扫描");
+      showToast("基础积木和媒体库路径已保存，资源库已重新扫描");
     }).catch(function (error) {
       showToast(error.message, true);
     }).finally(function () {
@@ -1820,13 +1869,13 @@
     });
   }
 
-  function exportWorkflow() {
-    if (!appState.workflow) return showToast("请先导入 API 工作流", true);
+  function buildCurrentWorkflow() {
+    if (!appState.workflow) throw new Error("请先导入 API 工作流");
     var workflow;
     try {
       workflow = JSON.parse(JSON.stringify(appState.workflow));
     } catch (error) {
-      return showToast("当前工作流无法导出", true);
+      throw new Error("当前工作流无法读取");
     }
     delete workflow.__rh_meta__;
     var currentRemoteWorkflowId = $("remoteWorkflowId") ? $("remoteWorkflowId").value.trim() : "";
@@ -1866,6 +1915,20 @@
       return values.bypassedNodes.indexOf(nodeId) === -1;
     }).length * 2;
     applyBypassedNodes(workflow, values.bypassedNodes);
+    return { workflow: workflow, values: values, changes: changes, remoteWorkflowId: currentRemoteWorkflowId };
+  }
+
+  function exportWorkflow() {
+    var prepared;
+    try {
+      prepared = buildCurrentWorkflow();
+    } catch (error) {
+      return showToast(error.message || "当前工作流无法导出", true);
+    }
+    var workflow = prepared.workflow;
+    var values = prepared.values;
+    var changes = prepared.changes;
+    var currentRemoteWorkflowId = prepared.remoteWorkflowId;
     var sourceName = appState.workflowName || "workflow_api.json";
     var blob = new Blob([JSON.stringify(workflow, null, 2) + "\n"], { type: "application/json;charset=utf-8" });
     var url = URL.createObjectURL(blob);
@@ -1877,6 +1940,59 @@
     link.remove();
     window.setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     showToast("已导出当前 API 工作流，保留了 " + changes + " 个输入配置" + (values.bypassedNodes.length ? "，已旁路 " + values.bypassedNodes.length + " 个节点" : "") + (currentRemoteWorkflowId ? "和 workflowId" : ""));
+  }
+
+  function saveWorkflowLibrary(overwrite) {
+    var button = $(overwrite ? "overwriteWorkflowLibraryButton" : "saveWorkflowLibraryButton");
+    if (button && button.disabled) return;
+    var prepared;
+    try {
+      prepared = buildCurrentWorkflow();
+    } catch (error) {
+      return showToast(error.message || "当前工作流无法保存", true);
+    }
+    var workflow = prepared.workflow;
+    var payload = { content: JSON.stringify(workflow, null, 2) };
+    if (appState.workflowInputConfig && typeof appState.workflowInputConfig === "object") payload.input_config = appState.workflowInputConfig;
+    if (!overwrite) {
+      payload.filename = canonicalWorkflowName(appState.workflowName || "workflow_api.json");
+      payload.account_id = appState.workflowAccountId || "";
+      payload.remote_workflow_id = prepared.remoteWorkflowId;
+      payload.source_dir = appState.workflowSourceDir || "";
+    } else if (!appState.workflowId) {
+      return showToast("当前工作流尚未保存到工作流库，请先点击“保存”", true);
+    }
+    if (button) {
+      button.disabled = true;
+      button.textContent = overwrite ? "覆盖中…" : "保存中…";
+      button.setAttribute("aria-busy", "true");
+    }
+    var path = overwrite ? "/api/workflows/" + encodeURIComponent(appState.workflowId) : "/api/workflows";
+    var method = overwrite ? "PATCH" : "POST";
+    jsonRequest(path, method, payload).then(function (data) {
+      var record = overwrite ? (data.workflow || {}) : (data.record || {});
+      appState.workflow = (data.workflow && !overwrite ? data.workflow : workflow) || workflow;
+      appState.workflowDirty = false;
+      if (!overwrite && record.id) appState.workflowId = String(record.id);
+      if (record.name) appState.workflowName = canonicalWorkflowName(record.name);
+      if (record.remote_workflow_id != null) setRemoteWorkflowId(record.remote_workflow_id);
+      if (record.source_dir != null) appState.workflowSourceDir = String(record.source_dir || "");
+      if (record.account_id != null) appState.workflowAccountId = String(record.account_id || "");
+      if (record.input_config && typeof record.input_config === "object") appState.workflowInputConfig = record.input_config;
+      saveDraftNow();
+      $("workflowFilename").textContent = (overwrite ? "已覆盖 " : "已保存 ") + appState.workflowName;
+      showToast(overwrite ? "已覆盖工作流库中的当前工作流" : "已保存为新的工作流");
+    }).catch(function (error) {
+      var message = error.message || "工作流保存失败";
+      if (overwrite && message.indexOf("找不到工作流") !== -1) message = "当前工作流尚未保存到工作流库，请先点击“保存”";
+      showToast(message, true);
+    }).finally(function () {
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute("aria-busy");
+        button.textContent = overwrite ? "覆盖" : "保存";
+      }
+    });
   }
 
   function submitTask() {
@@ -1947,7 +2063,6 @@
       random_noise: values.randomNoise,
       resolution: values.resolution,
       bypassed_nodes: values.bypassedNodes,
-      key_id: $("keySelect").value || null,
       instance_type: $("instanceType").value || "default",
       output_dir: $("outputDir").value.trim() || null
     }).then(function (data) {
@@ -1996,13 +2111,14 @@
     var logs = Array.isArray(task.stage_logs) ? task.stage_logs : [];
     var errorDetail = task.error_detail;
     var hasErrorDetail = errorDetail && (typeof errorDetail !== "object" || Object.keys(errorDetail).length > 0);
+    var errorText = taskErrorText(task);
     var logMarkup = logs.length ? '<ol class="stage-log-list">' + logs.map(function (log) {
       var detail = log && log.detail != null ? '<details class="stage-log-detail"><summary>查看阶段详情</summary><pre>' + jsonPreview(log.detail) + '</pre></details>' : '';
       return '<li class="stage-log-item ' + (log.level === "error" ? "error" : (log.level === "warning" ? "warning" : "")) + '">' +
         '<div class="stage-log-marker"></div><div class="stage-log-body"><div class="stage-log-top"><span class="stage-log-stage">' + esc(stageLabel(log.stage)) + '</span><time>' + logTime(log.at) + '</time></div>' +
         '<div class="stage-log-message">' + esc(log.message || "") + '</div>' + detail + '</div></li>';
     }).join("") + '</ol>' : '<div class="diagnostics-empty">暂无阶段日志</div>';
-    var errorMarkup = hasErrorDetail ? '<details class="error-detail" open><summary>错误详情</summary><pre>' + jsonPreview(errorDetail) + '</pre></details>' : '';
+    var errorMarkup = hasErrorDetail || errorText ? '<details class="error-detail" open><summary>错误详情</summary><pre>' + (hasErrorDetail ? jsonPreview(errorDetail) : esc(errorText)) + '</pre></details>' : '';
     diagnostics.innerHTML = '<section class="diagnostics-section"><div class="diagnostics-heading"><span>阶段日志</span><span class="diagnostics-count">' + logs.length + '</span></div>' + logMarkup + errorMarkup + '</section>';
   }
 
@@ -2056,6 +2172,10 @@
     if (!task) return;
     if (action === "load-task") {
       loadTask(task).catch(function (error) { showToast(error.message, true); });
+      return;
+    }
+    if (action === "copy-task-error") {
+      copyTaskError(task);
       return;
     }
     if (action === "open-task") openTask(task);
@@ -2205,7 +2325,6 @@
       appState.remoteWorkflowId = this.value.trim();
       scheduleDraftSave();
     });
-    $("keySelect").addEventListener("change", scheduleDraftSave);
     var dropzone = $("workflowDropzone");
     ["dragenter", "dragover"].forEach(function (name) { dropzone.addEventListener(name, function (event) { event.preventDefault(); dropzone.classList.add("dragging"); }); });
     ["dragleave", "drop"].forEach(function (name) { dropzone.addEventListener(name, function (event) { event.preventDefault(); dropzone.classList.remove("dragging"); }); });
@@ -2363,6 +2482,9 @@
       }
     }, true);
     $("submitButton").addEventListener("click", submitTask);
+    document.addEventListener("rh-submit-task", submitTask);
+    $("saveWorkflowLibraryButton").addEventListener("click", function () { saveWorkflowLibrary(false); });
+    $("overwriteWorkflowLibraryButton").addEventListener("click", function () { saveWorkflowLibrary(true); });
     $("exportWorkflowButton").addEventListener("click", exportWorkflow);
     $("queueList").addEventListener("click", handleQueueClick);
     $("credentialList").addEventListener("click", handleCredentialClick);
@@ -2406,15 +2528,6 @@
     });
     $("chooseDouyinCookie").addEventListener("click", function () { pickDouyinCookie(this); });
     $("saveDouyinCookie").addEventListener("click", saveDouyinCookie);
-    $("saveActionResources").addEventListener("click", function () {
-      var value = $("actionResourcesPath").value.trim();
-      var button = this;
-      button.disabled = true;
-      jsonRequest("/api/settings", "PATCH", { action_resources_path: value }).then(function (data) {
-        $("actionResourcesPath").value = data.action_resources_path;
-        showToast("动作库路径已保存，已重新扫描");
-      }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
-    });
     document.querySelectorAll("[data-pick-prompt-resource]").forEach(function (button) {
       button.addEventListener("click", function () { pickPromptResource(this); });
     });
@@ -2425,6 +2538,14 @@
         $("personalCapacity").value = data.personal_capacity;
         renderKeys();
         showToast("个人并发数已保存");
+      }).catch(function (error) { showToast(error.message, true); });
+    });
+    $("saveApiKeyStrategy").addEventListener("click", function () {
+      var value = $("apiKeyStrategy").value;
+      jsonRequest("/api/settings", "PATCH", { api_key_strategy: value }).then(function (data) {
+        $("apiKeyStrategy").value = data.api_key_strategy;
+        appState.settings.api_key_strategy = data.api_key_strategy;
+        showToast("API Key 调度策略已保存");
       }).catch(function (error) { showToast(error.message, true); });
     });
     $("saveAliyunTranslation").addEventListener("click", function () {
@@ -2452,11 +2573,16 @@
         telegram_bot_token: $("telegramBotToken").value.trim(),
         telegram_chat_id: $("telegramChatId").value.trim(),
         telegram_enabled: $("telegramEnabled").checked,
+        telegram_inbound_enabled: $("telegramInboundEnabled").checked,
       }).then(function (data) {
         var settings = data.telegram || {};
         $("telegramBotToken").value = "";
         $("telegramChatId").value = settings.chat_id || "";
         $("telegramEnabled").checked = Boolean(settings.enabled);
+        $("telegramInboundEnabled").checked = Boolean(settings.inbound_enabled);
+        if ($("telegramInboundWorkflow")) {
+          $("telegramInboundWorkflow").textContent = settings.inbound_workflow_id ? ("当前工作流：" + (settings.inbound_workflow_name || settings.inbound_workflow_id) + (settings.inbound_enabled ? " · 已启用" : " · 未启用")) : "未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。";
+        }
         $("telegramStatus").textContent = settings.configured ? (settings.enabled ? "已启用 · 本机" : "已配置 · 未启用") : "未配置";
         $("telegramStatus").classList.toggle("ready", Boolean(settings.configured && settings.enabled));
         showToast("Telegram 推送配置已保存");
@@ -2478,26 +2604,21 @@
         $("telegramBotToken").value = "";
         $("telegramChatId").value = settings.chat_id || "";
         $("telegramEnabled").checked = false;
+        $("telegramInboundEnabled").checked = false;
+        if ($("telegramInboundWorkflow")) $("telegramInboundWorkflow").textContent = "未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。";
         $("telegramStatus").textContent = settings.configured ? "已配置 · 未启用" : "未配置";
         $("telegramStatus").classList.remove("ready");
         showToast("Telegram 本机配置已清除");
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; });
     });
     $("chooseOutputDir").addEventListener("click", function () { pickOutputDirectory(this); });
-    $("chooseActionResources").addEventListener("click", function () { pickActionResources(this); });
+    $("chooseMediaLibraryRoot").addEventListener("click", function () { pickMediaLibraryRoot(this); });
     $("closeSettings").addEventListener("click", function () { window.RHMotion.closeModal("settingsModal"); });
     $("settingsModal").addEventListener("click", function (event) { if (event.target === $("settingsModal")) window.RHMotion.closeModal("settingsModal"); });
     $("credentialForm").addEventListener("submit", function (event) { event.preventDefault(); });
     $("closeModal").addEventListener("click", closeTaskModal);
     $("taskModal").addEventListener("click", function (event) { if (event.target === $("taskModal")) closeTaskModal(); });
     document.addEventListener("keydown", function (event) {
-      if (event.ctrlKey && event.key === "Enter" && !event.shiftKey && !event.altKey && !event.metaKey && !event.isComposing) {
-        if ($("settingsModal").hidden && $("taskModal").hidden) {
-          event.preventDefault();
-          submitTask();
-        }
-        return;
-      }
       if (event.key !== "Escape") return;
       closeTaskModal();
       window.RHMotion.closeModal("settingsModal");
@@ -2515,12 +2636,14 @@
         applyPendingPrompt();
         openSettingsFromQuery();
         focusInputFromQuery();
+        submitAfterInitialLoad();
       });
     }
     restoreDraft();
     applyPendingPrompt();
     openSettingsFromQuery();
     focusInputFromQuery();
+    submitAfterInitialLoad();
   });
   window.addEventListener("storage", function (event) {
     if (event.key !== draftStorageKey || !event.newValue) return;

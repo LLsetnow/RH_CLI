@@ -1,11 +1,12 @@
 (function () {
   "use strict";
 
-  var state = { outputs: [], summary: {}, type: "all", rating: 0, search: "", sort: "newest" };
+  var state = { outputs: [], summary: {}, type: "all", rating: 0, search: "", sort: "newest", telegramConfigured: false };
   var outputImport = { item: null, path: "" };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
+  var pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1";
   var ratingBusy = {};
-  var toastTimer = 0;
+  var telegramUploadBusy = {};
 
   function $(id) { return document.getElementById(id); }
   function esc(value) {
@@ -25,10 +26,18 @@
   }
   function showToast(message, isError) {
     var toast = $("outputToast");
-    toast.textContent = message;
-    toast.className = "toast show" + (isError ? " error" : "");
-    window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(function () { toast.className = "toast"; }, 3200);
+    if (window.RHMotion && window.RHMotion.showToast) window.RHMotion.showToast(toast, message, isError);
+  }
+  function queuePromptGroupSnapshot(group) {
+    try {
+      if (!group || !Array.isArray(group.items)) {
+        localStorage.removeItem(pendingPromptGroupStorageKey);
+        return;
+      }
+      localStorage.setItem(pendingPromptGroupStorageKey, JSON.stringify({ version: 1, group: group }));
+    } catch (error) {
+      showToast("提示词组状态无法暂存到本机", true);
+    }
   }
   function formatTime(timestamp) {
     if (!timestamp) return "—";
@@ -232,6 +241,25 @@
     if (!taskId || (item && item.workflow_available === false)) return esc(taskName);
     return '<button class="artifact-workflow-link" type="button" data-load-task-workflow="' + esc(taskId) + '" title="加载此次工作流草稿" aria-label="加载工作流 ' + esc(taskName) + '">' + esc(taskName) + '</button>';
   }
+  function telegramUploadKey(taskId, outputIndex) {
+    return String(taskId || "") + ":" + String(outputIndex);
+  }
+  function updateTelegramUploadButtons(key, busy) {
+    document.querySelectorAll("[data-upload-key]").forEach(function (button) {
+      if (button.dataset.uploadKey !== key) return;
+      button.disabled = busy;
+      button.textContent = busy ? "上传中" : "上传";
+      if (busy) button.setAttribute("aria-busy", "true");
+      else button.removeAttribute("aria-busy");
+    });
+  }
+  function telegramUploadButtonMarkup(item) {
+    var taskId = String(item && item.task_id || "");
+    var outputIndex = Number(item && item.output_index);
+    var key = telegramUploadKey(taskId, outputIndex);
+    var busy = Boolean(telegramUploadBusy[key]);
+    return '<button class="artifact-upload-task" type="button" data-upload-task="' + esc(taskId) + '" data-upload-output-index="' + esc(item.output_index) + '" data-upload-key="' + esc(key) + '"' + (busy ? ' disabled aria-busy="true"' : '') + '>' + (busy ? "上传中" : "上传") + '</button>';
+  }
   function taskDraftFromLoadData(data) {
     var task = data && data.task && typeof data.task === "object" ? data.task : {};
     var workflow = data && data.workflow && typeof data.workflow === "object" ? data.workflow : null;
@@ -272,6 +300,7 @@
     request("/api/tasks/" + encodeURIComponent(taskId) + "/load").then(function (data) {
       var draft = taskDraftFromLoadData(data);
       if (!draft.workflow.id) throw new Error("任务中缺少本地工作流标识");
+      queuePromptGroupSnapshot(data.prompt_group);
       window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
       showToast("已加载工作流「" + draft.workflow.name + "」，正在打开任务提交页");
       window.location.href = "/";
@@ -452,16 +481,19 @@
       return '<article class="artifact-card' + (canCompare ? ' is-compare-draggable' : '') + '" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" data-compare-draggable="' + (canCompare ? 'true' : 'false') + '" draggable="' + (canCompare ? 'true' : 'false') + '" tabindex="0" role="button" aria-roledescription="' + (canCompare ? '可拖拽到内容对比' : '产物卡片') + '" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
         '<div class="artifact-card-head"><span class="artifact-type ' + esc(item.display_type) + '">' + typeLabel(item.display_type) + '</span><span class="artifact-size">' + size + '</span></div>' +
         mediaMarkup(item) +
-        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页">任务 · ' + taskWorkflowLabel(item) + '</div><div class="artifact-foot"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span><span class="artifact-foot-actions">' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + (item.kind === "file" ? '<button class="artifact-import-task" type="button" data-import-output="' + esc(item.id) + '">导入任务</button>' : '') + '<button class="artifact-delete-task" type="button" data-delete-task="' + esc(item.task_id) + '" aria-label="' + esc(taskLabel) + '" title="' + esc(taskLabel) + '">删除任务</button></span></div></div>' +
+        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页">任务 · ' + taskWorkflowLabel(item) + '</div><div class="artifact-foot"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span><span class="artifact-foot-actions">' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + '<span class="artifact-task-actions">' + (state.telegramConfigured && item.kind === "file" ? telegramUploadButtonMarkup(item) : '') + (item.kind === "file" ? '<button class="artifact-import-task" type="button" data-import-output="' + esc(item.id) + '">导入任务</button>' : '') + '<button class="artifact-delete-task" type="button" data-delete-task="' + esc(item.task_id) + '" aria-label="' + esc(taskLabel) + '" title="' + esc(taskLabel) + '">删除任务</button></span></span></div></div>' +
         '</article>';
     }).join("");
     window.RHMotion.bindVideoLoopControls($("outputGrid"));
   }
   function loadOutputs(showMessage) {
     $("refreshOutputs").disabled = true;
-    request("/api/outputs").then(function (data) {
+    Promise.all([request("/api/outputs"), request("/api/state")]).then(function (results) {
+      var data = results[0];
+      var settings = results[1] && results[1].settings && results[1].settings.telegram;
       state.outputs = Array.isArray(data.outputs) ? data.outputs : [];
       state.summary = data.summary || {};
+      state.telegramConfigured = Boolean(settings && settings.configured);
       render();
       if (showMessage) showToast("产物列表已刷新");
     }).catch(function (error) {
@@ -540,6 +572,28 @@
       var loadTaskButton = event.target.closest("[data-load-task-workflow]");
       if (loadTaskButton) {
         if (!loadTaskButton.disabled) loadTaskWorkflowToSubmit(loadTaskButton.dataset.loadTaskWorkflow, loadTaskButton);
+        return;
+      }
+      var uploadButton = event.target.closest("[data-upload-task]");
+      if (uploadButton) {
+        var uploadTaskId = String(uploadButton.dataset.uploadTask || "").trim();
+        var outputIndex = Number(uploadButton.dataset.uploadOutputIndex);
+        var uploadKey = telegramUploadKey(uploadTaskId, outputIndex);
+        if (!uploadTaskId || !Number.isInteger(outputIndex) || outputIndex < 0 || uploadButton.disabled || telegramUploadBusy[uploadKey]) return;
+        telegramUploadBusy[uploadKey] = true;
+        updateTelegramUploadButtons(uploadKey, true);
+        request("/api/tasks/" + encodeURIComponent(uploadTaskId) + "/telegram", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ output_index: outputIndex })
+        }).then(function (data) {
+          showToast(data.message || "已加入 Telegram 上传队列");
+        }).catch(function (error) {
+          showToast("上传到 Telegram 失败：" + error.message, true);
+        }).finally(function () {
+          delete telegramUploadBusy[uploadKey];
+          updateTelegramUploadButtons(uploadKey, false);
+        });
         return;
       }
       var importButton = event.target.closest("[data-import-output]");

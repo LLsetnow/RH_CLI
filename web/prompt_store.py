@@ -35,6 +35,24 @@ def _tags(value: Any) -> list[str]:
     return result
 
 
+def _media_kind(value: Any, path: str = "") -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("image/") or raw == "image":
+        return "image"
+    if raw.startswith("audio/") or raw == "audio":
+        return "audio"
+    if raw.startswith("video/") or raw == "video":
+        return "video"
+    suffix = Path(path).suffix.lower()
+    if suffix in {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}:
+        return "image"
+    if suffix in {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"}:
+        return "audio"
+    if suffix in {".avi", ".flv", ".mkv", ".mov", ".mp4", ".m4v", ".webm", ".wmv"}:
+        return "video"
+    return ""
+
+
 def _block(value: Any, fallback_id: str | None = None) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -45,6 +63,60 @@ def _block(value: Any, fallback_id: str | None = None) -> dict[str, Any] | None:
     if not block_id or not title or not text:
         return None
     return {"id": block_id, "category": category, "tags": _tags(value.get("tags")), "title": title, "text": text}
+
+
+def _segments(value: Any) -> list[dict[str, Any]]:
+    """Keep the structured prompt-editor segments while discarding unknown fields."""
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    allowed_snapshot_keys = {
+        "title",
+        "text",
+        "tags",
+        "category",
+        "color_image_url",
+        "depth_image_url",
+        "pair_status",
+        "color_image_path",
+        "depth_image_path",
+        "image_url",
+        "image_path",
+        "audio_url",
+        "audio_path",
+        "media_type",
+        "reference_kind",
+    }
+    for segment in value:
+        if not isinstance(segment, dict):
+            continue
+        segment_type = str(segment.get("type") or "").strip()
+        if segment_type == "text":
+            result.append({"type": "text", "text": str(segment.get("text") or "")})
+            continue
+        if segment_type != "reference":
+            continue
+        source_type = str(segment.get("source_type") or segment.get("sourceType") or "").strip()
+        source_id = str(segment.get("source_id") or segment.get("sourceId") or "").strip()
+        if source_type not in {"block", "action", "reference"} or not source_id:
+            continue
+        normalized: dict[str, Any] = {
+            "type": "reference",
+            "source_type": source_type,
+            "source_id": source_id,
+            "label": str(segment.get("label") or "").strip(),
+        }
+        snapshot = segment.get("snapshot")
+        if isinstance(snapshot, dict):
+            safe_snapshot: dict[str, Any] = {}
+            for key in allowed_snapshot_keys:
+                if key not in snapshot:
+                    continue
+                safe_snapshot[key] = _tags(snapshot[key]) if key == "tags" else str(snapshot[key] or "").strip()
+            if safe_snapshot:
+                normalized["snapshot"] = safe_snapshot
+        result.append(normalized)
+    return result
 
 
 def _stable_block_id(title: str, category: str = "") -> str:
@@ -178,13 +250,44 @@ def _item(value: Any) -> dict[str, Any] | None:
         return None
     instance_id = str(value.get("instance_id") or value.get("instanceId") or _new_id("item")).strip()
     kind = str(value.get("kind") or "").strip()
-    if not instance_id or kind not in {"fixed", "action", "reference", "text"}:
+    if not instance_id or kind not in {"fixed", "action", "reference", "media", "text"}:
         return None
     if kind == "text":
         result = {"instance_id": instance_id, "kind": "text", "text": str(value.get("text") or "")}
         if "translated_text" in value or "translatedText" in value:
             result["translated_text"] = str(value.get("translated_text") or value.get("translatedText") or "")
+        if value.get("translation_disabled") or value.get("translationDisabled"):
+            result["translation_disabled"] = True
+        generated_type = str(value.get("generated_type") or value.get("generatedType") or "").strip()
+        if generated_type:
+            result["generated_type"] = generated_type[:64]
+        if isinstance(value.get("segments"), list):
+            result["segments"] = _segments(value.get("segments"))
         return result
+    if kind == "media":
+        media_path = str(value.get("media_path") or value.get("mediaPath") or value.get("path") or "").strip()
+        media_name = str(value.get("media_name") or value.get("mediaName") or Path(media_path).name or "媒体积木").strip()
+        media_mime = str(value.get("media_mime") or value.get("mediaMime") or value.get("mime") or "").strip().lower()
+        media_kind = _media_kind(value.get("media_kind") or value.get("mediaKind") or value.get("media_type") or value.get("mediaType"), media_path)
+        if not media_path:
+            return {
+                "instance_id": instance_id,
+                "kind": "media",
+                "media_path": "",
+                "media_name": media_name[:240] or "媒体积木",
+                "media_kind": media_kind,
+                "media_mime": media_mime[:120],
+            }
+        if not media_kind:
+            return None
+        return {
+            "instance_id": instance_id,
+            "kind": "media",
+            "media_path": media_path,
+            "media_name": media_name[:240] or "媒体文件",
+            "media_kind": media_kind,
+            "media_mime": media_mime[:120],
+        }
     if kind == "action":
         reference_id = value.get("action_id") or value.get("actionId") or value.get("block_id") or value.get("blockId") or value.get("sourceId")
     elif kind == "reference":
@@ -211,7 +314,7 @@ def _item(value: Any) -> dict[str, Any] | None:
                 "text": text,
             },
         }
-        for key in ("image_url", "audio_url", "media_type"):
+        for key in ("image_url", "image_path", "audio_url", "audio_path", "media_type"):
             if key in snapshot_value:
                 result["snapshot"][key] = str(snapshot_value.get(key) or "").strip()
         return result
@@ -450,6 +553,16 @@ class PromptStore:
         with self._lock:
             self._write(self.state_path, document)
         return document
+
+    def task_group_snapshot(self) -> dict[str, Any]:
+        """Return the current workbench in the same shape as a saved group state."""
+        with self._lock:
+            return {
+                "id": _new_id("task-group"),
+                "name": "任务提交时组装台",
+                "updated_at": time.time_ns() // 1_000_000,
+                "items": self._state()["items"],
+            }
 
     def save_group(self, name: str, values: Any, group_id: str | None = None) -> dict[str, Any]:
         clean_name = str(name or "").strip()

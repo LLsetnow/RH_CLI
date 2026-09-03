@@ -57,6 +57,16 @@ def test_output_file_cards_can_import_into_a_task_file_input():
     assert ".artifact-import-task" in styles
 
 
+def test_output_telegram_upload_locks_one_artifact_until_request_finishes():
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+
+    assert "telegramUploadBusy" in script
+    assert "data-upload-key=" in script
+    assert 'button.textContent = busy ? "上传中" : "上传"' in script
+    assert "delete telegramUploadBusy[uploadKey]" in script
+    assert "telegramUploadBusy[uploadKey]" in script
+
+
 def test_output_workflow_names_load_the_task_draft_and_open_submit_page():
     script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
     styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
@@ -69,6 +79,7 @@ def test_output_workflow_names_load_the_task_draft_and_open_submit_page():
     assert ".finally(function ()" in script
     assert ".artifact-workflow-link" in styles
     assert '>导入任务</button>' in script
+    assert "queuePromptGroupSnapshot(data.prompt_group)" in script
 
 
 def test_output_grid_favors_four_portrait_cards_on_desktop():
@@ -119,12 +130,20 @@ def test_dashboard_page_exposes_usage_range_and_independent_ledger():
     assert 'id="dashboardAccountFilter"' in page
     assert 'id="dashboardDailyChart"' in page
     assert 'id="dashboardCoinBalance"' in page
+    assert 'id="dashboardMoneySpent"' in page
     assert 'id="dashboardAccountBalances"' in page
     assert '"/api/dashboard?days="' in script
+    assert '"/api/dashboard/refresh-balances"' in script
+    assert 'method: "POST"' in script
+    assert "refreshBalanceSnapshots" in script
+    assert "余额已更新" in script
     assert "account_id" in script
     assert "renderAccountOptions" in script
     assert "account_count" in script
     assert "account_name" in script
+    assert "money_spent" in script
+    assert "近 24 小时" in script
+    assert "近24小时" in page
     assert "dashboard-range-tabs::before" in styles
     assert "dashboard-data-switching" in script
     assert "独立用量记录" in page
@@ -141,6 +160,7 @@ def test_dashboard_page_exposes_usage_range_and_independent_ledger():
     assert ".dashboard-annual-heatmap" in styles
     assert "overflow: hidden" in styles
     assert ".dashboard-metric-processing" in styles
+    assert ".dashboard-money-spent" in styles
     assert ".dashboard-recent-item" in styles
 
 
@@ -153,16 +173,60 @@ def test_workflow_submit_exposes_all_instance_type_options():
     assert 'value="ultra">Ultra · 84GB · ¥9.07531 / 小时' in page
 
 
-def test_settings_exposes_configurable_action_library_source_and_help():
+def test_workflow_submit_can_save_overwrite_and_export_current_workflow():
     page = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
-    assert 'id="actionResourcesPath"' in page
-    assert 'data-tooltip="读取该文件中从 ## pose' in page
+    assert 'id="saveWorkflowLibraryButton"' in page
+    assert 'id="overwriteWorkflowLibraryButton"' in page
+    assert '>导出</button>' in page
+    assert 'function buildCurrentWorkflow()' in script
+    assert 'function saveWorkflowLibrary(overwrite)' in script
+    assert 'jsonRequest(path, method, payload)' in script
+    assert '"PATCH"' in script
+    assert 'input_config' in script
+
+
+def test_settings_exposes_configurable_media_library_root_and_help():
+    page = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    settings_page = (STATIC_ROOT / "settings.html").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "settings.js").read_text(encoding="utf-8")
+
+    assert 'id="mediaLibraryRoot"' in page
+    assert 'id="mediaLibraryRoot"' in settings_page
+    assert 'id="actionResourcesPath"' not in settings_page
+    assert 'id="characterResourcesPath"' not in settings_page
+    assert 'data-tooltip="统一读取 ref/pose/pose.md' in page
     assert ".field-help::after" in styles
-    assert "/api/pick-action-resources" in script
-    assert "action_resources_path" in script
+    assert "/api/pick-media-root" in script
+    assert "media_library_root" in script
+
+
+def test_settings_exposes_api_key_dispatch_strategy():
+    page = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    settings_page = (STATIC_ROOT / "settings.html").read_text(encoding="utf-8")
+    app_script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    settings_script = (STATIC_ROOT / "settings.js").read_text(encoding="utf-8")
+
+    for markup in (page, settings_page):
+        assert 'id="apiKeyStrategy"' in markup
+        assert 'value="personal_only"' in markup
+        assert 'value="personal_then_shared"' in markup
+        assert 'value="shared_only"' in markup
+        assert "任务提交页不再选择 API Key" in markup
+    assert "api_key_strategy" in app_script
+    assert "saveApiKeyStrategy" in app_script
+    assert "api_key_strategy" in settings_script
+
+
+def test_task_submission_does_not_expose_api_key_selector():
+    page = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="keySelect"' not in page
+    assert "调度 API Key" not in page
+    assert "keySelect" not in script
 
 
 def test_settings_modal_uses_one_control_font_size():
@@ -175,19 +239,18 @@ def test_settings_modal_uses_one_control_font_size():
     assert "font-size: 11px;" in styles
 
 
-def test_settings_exposes_all_six_prompt_library_sources_and_mode_transition():
+def test_settings_exposes_prompt_and_media_library_sources_and_mode_transition():
     page = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    settings_page = (STATIC_ROOT / "settings.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "settings.js").read_text(encoding="utf-8")
     prompt_script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
     prompt_styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
 
-    for field_id in (
-        "promptLibraryPath", "actionResourcesPath", "characterResourcesPath",
-        "audioResourcesPath", "backgroundResourcesPath", "clothesResourcesPath",
-    ):
+    for field_id in ("promptLibraryPath", "mediaLibraryRoot"):
         assert f'id="{field_id}"' in page
-    assert "reference_resources_paths" in script
-    assert "/api/pick-prompt-resource" in script
+        assert f'id="{field_id}"' in settings_page
+    assert "media_library_root" in script
+    assert "/api/pick-media-root" in script
     assert "animateLibraryModeSwitch" in prompt_script
     assert "library-mode-switching" in prompt_styles
     assert "@keyframes library-mode-switch" in prompt_styles
@@ -217,12 +280,96 @@ def test_prompt_library_exposes_category_then_tag_filters():
     assert ".action-card-category" in styles
 
 
+def test_prompt_library_title_toggles_a_full_width_animated_view():
+    page = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
+
+    assert 'id="toggleLibraryExpand"' in page
+    assert 'aria-controls="promptBuilderGrid"' in page
+    assert "libraryExpanded" in script
+    assert "setLibraryExpanded" in script
+    assert 'classList.toggle("is-library-expanded"' in script
+    assert ".prompt-builder-grid.is-library-expanded" in styles
+    assert ".prompt-builder-grid.is-library-expanded .prompt-main-stack" in styles
+    assert "grid-template-columns var(--motion-expand) var(--ease-out)" in styles
+    assert "translate3d(18px, 0, 0)" in styles
+
+
+def test_prompt_library_expanded_cards_use_responsive_two_to_four_column_grid_without_add_buttons():
+    script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
+
+    assert "data-add-action" not in script
+    assert "data-add-reference" not in script
+    assert "data-add-block" not in script
+    assert "add-block-button" not in script
+    assert "拖动卡片加入" in script
+    assert "repeat(auto-fill, minmax(280px, 1fr))" in styles
+    assert ".prompt-builder-grid.is-library-expanded .library-list > .action-library-card" in styles
+    assert ".prompt-builder-grid.is-library-expanded .library-list > .reference-library-card" in styles
+
+
+def test_prompt_library_basic_cards_edit_from_title_and_image_preview_is_image_only():
+    page = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
+
+    assert 'class="library-block-title library-block-title-button"' in script
+    assert 'data-edit-block="' in script
+    assert 'var method = blockId ? "PUT" : "POST"' in script
+    assert 'class="modal-backdrop image-preview-backdrop"' in page
+    assert 'class="image-preview-surface"' in page
+    assert 'id="imagePreviewTitle"' not in page
+    assert 'id="imagePreviewCaption"' not in page
+    assert ".image-preview-surface img" in styles
+    assert "box-shadow:" in styles
+    assert "height: 176px" in styles
+
+
+def test_prompt_library_resource_cards_support_preview_tag_edit_and_contextual_creation():
+    page = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
+
+    assert 'id="textPreviewModal"' in page
+    assert "data-text-preview" in script
+    assert "data-edit-resource" in script
+    assert "openResourceModal" in script
+    assert "/api/prompt/actions" in script
+    assert "/api/prompt/references" in script
+    assert 'state.libraryMode === "blocks"' in script
+    assert "RESOURCE_LABELS" in script
+    assert "@container prompt-library (min-width: 380px)" in styles
+    assert "@container prompt-library (min-width: 500px)" in styles
+    assert "repeat(3, minmax(0, 1fr))" in styles
+
+
+def test_prompt_resource_creation_imports_media_without_manual_relative_paths():
+    page = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
+
+    assert 'id="resourceMediaPicker"' in page
+    assert 'type="hidden"' in page
+    assert "RESOURCE_MEDIA_SLOTS" in script
+    assert "data-resource-media-pick" in script
+    assert "data-resource-media-paste" in script
+    assert 'addEventListener("drop"' in script
+    assert "handleResourceMediaPaste" in script
+    assert "resourceMediaPayload" in script
+    assert "media.length" in script
+    assert "/api/prompt/actions" in script and "/api/prompt/references" in script
+    assert "不会复制媒体" not in page
+    assert ".resource-media-slot.is-dragging" in styles
+
+
 def test_prompt_action_cards_preserve_the_full_image_in_card_preview():
     styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
 
     assert ".action-media-image img { object-fit: contain; }" in styles
     assert ".action-media-image:hover img { transform: none; }" in styles
-    assert ".image-preview-frame img" in styles and "object-fit: contain" in styles
+    assert ".image-preview-surface img" in styles and "object-fit: contain" in styles
 
 
 def test_workflow_file_inputs_support_clipboard_image_paste():

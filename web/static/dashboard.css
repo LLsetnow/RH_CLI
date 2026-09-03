@@ -24,6 +24,8 @@
 .dashboard-metric-value { display: block; overflow: hidden; margin-top: 17px; color: var(--ink); font-family: "SFMono-Regular", Consolas, monospace; font-size: clamp(25px, 3vw, 36px); font-weight: 650; letter-spacing: -.07em; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-metric-processing { overflow: visible; font-size: clamp(22px, 2.55vw, 31px); letter-spacing: -.08em; line-height: 1.08; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
 .dashboard-metric-accent .dashboard-metric-value { color: var(--accent); }
+.dashboard-money-spent { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 12px; color: var(--subtle); font-size: 9px; }
+.dashboard-money-spent strong { overflow: hidden; color: var(--warm); font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-metric-meta { display: block; overflow: hidden; margin-top: 11px; color: var(--subtle); font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-content-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(290px, .75fr); gap: 14px; margin-top: 14px; align-items: stretch; }
 .dashboard-chart-panel, .dashboard-side { height: 100%; }

@@ -140,3 +140,37 @@ def test_action_store_reindexes_when_resources_content_changes(tmp_path):
     assert first["id"] == second["id"]
     assert second["text"] == "Updated prompt."
     assert store._read()["source_sha256"] != cache["source_sha256"]
+
+
+def test_action_store_writes_added_and_updated_entries_back_to_pose_markdown(tmp_path):
+    root = tmp_path / "ref"
+    (root / "pose" / "color").mkdir(parents=True)
+    (root / "pose" / "depth").mkdir(parents=True)
+    (root / "pose" / "color" / "new.jpg").write_bytes(b"color")
+    (root / "pose" / "depth" / "new_depth.png").write_bytes(b"depth")
+    source = root / "pose" / "pose.md"
+    source.write_text(
+        "## pose\n\n### 站立\n\n#### old.jpg\nid: pose-stable\n"
+        "![200](pose/color/new.jpg)![200](pose/depth/new_depth.png)\n\n> Old text\n",
+        encoding="utf-8",
+    )
+    store = ActionStore(tmp_path / "data", source_root=root)
+
+    updated = store.update_action("pose-stable", {"title": "改名", "tags": ["侧倾"], "text": "Updated text"})
+    assert updated["title"] == "改名"
+    content = source.read_text(encoding="utf-8")
+    assert "id: pose-stable" in content
+    assert "tags: 侧倾" in content
+    assert "> Updated text" in content
+
+    added = store.add_action({
+        "category": "坐姿",
+        "title": "新动作",
+        "text": "New action",
+        "tags": ["测试"],
+        "color_image_path": "pose/color/new.jpg",
+        "depth_image_path": "pose/depth/new_depth.png",
+    })
+    assert added["title"] == "新动作"
+    assert "新动作" in source.read_text(encoding="utf-8")
+    assert any(item["id"] == added["id"] for item in store.actions())

@@ -77,10 +77,30 @@ def _normalise_action(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _relative_path(value: Any, root: Path) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        try:
+            path = path.resolve().relative_to(root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"媒体路径必须位于媒体库根目录内：{path}") from exc
+    if ".." in path.parts:
+        raise ValueError("媒体路径不能跳出媒体库根目录。")
+    return str(path)
+
+
 class ActionStore:
     """Build and serve a local action library from a configured pose Markdown file."""
 
-    def __init__(self, data_root: str | Path, source_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        data_root: str | Path,
+        source_path: str | Path | None = None,
+        source_root: str | Path | None = None,
+    ) -> None:
         self.root = Path(data_root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.prompt_root = self.root / "prompt"
@@ -89,7 +109,12 @@ class ActionStore:
         self.source_path = (
             Path(source_path).expanduser().resolve()
             if source_path is not None
-            else self._resolve_source_path()
+            else (Path(source_root).expanduser().resolve() / "pose" / "pose.md" if source_root is not None else self._resolve_source_path())
+        )
+        self.source_root = (
+            Path(source_root).expanduser().resolve()
+            if source_root is not None
+            else self.source_path.parent.parent.resolve() if self.source_path.parent.name == "pose" else self.source_path.parent.resolve()
         )
         self._lock = threading.RLock()
         self._migrate_legacy_cache()
@@ -125,8 +150,20 @@ class ActionStore:
             raise FileNotFoundError(f"动作库文件不存在：{path}")
         with self._lock:
             self.source_path = path
+            self.source_root = path.parent.parent.resolve() if path.parent.name == "pose" else path.parent.resolve()
             self.refresh(force=True)
         return path
+
+    def set_source_root(self, value: str | Path) -> Path:
+        root = Path(value).expanduser().resolve()
+        if not root.is_dir():
+            raise FileNotFoundError(f"媒体库根目录不存在：{root}")
+        path = root / "pose" / "pose.md"
+        with self._lock:
+            self.source_root = root
+            self.source_path = path
+            self.refresh(force=True)
+        return root
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -168,7 +205,7 @@ class ActionStore:
             image_path = color_image_path
             category = current_category or "未分类"
             actions.append({
-                "id": _action_id(image_path, title),
+                "id": current.get("id") or _action_id(image_path, title),
                 "category": category,
                 "tags": _tags_without_category(current["tags"], category),
                 "title": title,
@@ -198,6 +235,7 @@ class ActionStore:
                 title = re.sub(r"（[^）]*）$", "", line[5:]).strip()
                 title = Path(title).stem
                 current = {
+                    "id": "",
                     "title": title,
                     "color_image_path": "",
                     "depth_image_path": "",
@@ -210,6 +248,10 @@ class ActionStore:
             tags_match = re.match(r"^tags\s*[:：]\s*(.*)$", line, re.IGNORECASE)
             if tags_match:
                 current["tags"] = _tags(tags_match.group(1))
+                continue
+            id_match = re.match(r"^id\s*[:：]\s*(.*)$", line, re.IGNORECASE)
+            if id_match:
+                current["id"] = id_match.group(1).strip()
                 continue
             for image_match in re.finditer(r"!\[[^\]]*\]\((pose/(color|depth)/[^)]+)\)", line):
                 image_path, kind = image_match.groups()
@@ -317,9 +359,9 @@ class ActionStore:
             for action in self._actions:
                 item = copy.deepcopy(action)
                 status, message, color_available, depth_available = self._pair_status(action)
+                item["color_image_path"] = str(action.get("color_image_path") or action.get("image_path") or "")
+                item["depth_image_path"] = str(action.get("depth_image_path") or "")
                 item.pop("image_path", None)
-                item.pop("color_image_path", None)
-                item.pop("depth_image_path", None)
                 item["image_available"] = color_available
                 item["image_url"] = f"/api/prompt/actions/{quote(action['id'], safe='')}/image" if color_available else ""
                 item["color_image_available"] = color_available
@@ -330,6 +372,93 @@ class ActionStore:
                 item["pair_message"] = message
                 result.append(item)
             return result
+
+    def _write_source(self, actions: list[dict[str, Any]]) -> None:
+        self.source_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["# 动作参考索引", "", "## pose", ""]
+        last_category = None
+        for action in actions:
+            category = str(action.get("category") or "未分类").strip() or "未分类"
+            if category != last_category:
+                if last_category is not None:
+                    lines.append("")
+                lines.extend([f"### {category}", ""])
+                last_category = category
+            lines.extend([
+                f"#### {str(action.get('title') or '').strip()}",
+                f"id: {str(action.get('id') or '').strip()}",
+            ])
+            tags = _tags_without_category(action.get("tags", []), category)
+            if tags:
+                lines.append("tags: " + ", ".join(tags))
+            color_path = str(action.get("color_image_path") or action.get("image_path") or "").strip()
+            depth_path = str(action.get("depth_image_path") or "").strip()
+            if color_path:
+                lines.append(f"![200]({color_path})")
+            if depth_path:
+                lines.append(f"![200]({depth_path})")
+            for prompt_line in str(action.get("text") or "").strip().splitlines():
+                lines.append("> " + prompt_line)
+            lines.append("")
+        temporary = self.source_path.with_name(f".{self.source_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            temporary.replace(self.source_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def add_action(self, value: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValueError("动作内容必须是对象。")
+        payload = dict(value)
+        payload["color_image_path"] = _relative_path(payload.get("color_image_path") or payload.get("image_path"), self.source_root)
+        payload["depth_image_path"] = _relative_path(payload.get("depth_image_path"), self.source_root)
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("动作名称不能为空。")
+        payload["id"] = str(payload.get("id") or _action_id(payload["color_image_path"] or payload["depth_image_path"], title)).strip()
+        if any(item["id"] == payload["id"] for item in self._actions):
+            raise ValueError("动作 ID 已存在。")
+        payload["text"] = str(payload.get("text") or "").strip()
+        if not payload["text"]:
+            raise ValueError("动作提示词不能为空。")
+        normalised = _normalise_action(payload)
+        if not normalised:
+            raise ValueError("动作内容不完整。")
+        with self._lock:
+            self._actions.append(normalised)
+            self._write_source(self._actions)
+            self.refresh(force=True)
+            return copy.deepcopy(self._find(normalised["id"]))
+
+    def update_action(self, action_id: str, value: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            current = self._find(action_id)
+            if not current:
+                raise KeyError(f"找不到动作：{action_id}")
+            payload = dict(current)
+            payload.update(value if isinstance(value, dict) else {})
+            payload["id"] = action_id
+            payload["color_image_path"] = _relative_path(payload.get("color_image_path") or payload.get("image_path"), self.source_root)
+            payload["depth_image_path"] = _relative_path(payload.get("depth_image_path"), self.source_root)
+            normalised = _normalise_action(payload)
+            if not normalised:
+                raise ValueError("动作内容不完整。")
+            index = self._actions.index(current)
+            self._actions[index] = normalised
+            self._write_source(self._actions)
+            self.refresh(force=True)
+            return copy.deepcopy(self._find(action_id))
+
+    def delete_action(self, action_id: str) -> None:
+        with self._lock:
+            before = len(self._actions)
+            self._actions = [item for item in self._actions if item["id"] != action_id]
+            if len(self._actions) == before:
+                raise KeyError(f"找不到动作：{action_id}")
+            self._write_source(self._actions)
+            self.refresh(force=True)
 
     def source_status(self) -> dict[str, Any]:
         with self._lock:

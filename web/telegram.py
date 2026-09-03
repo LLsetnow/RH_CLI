@@ -10,7 +10,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 from rh_cli.errors import RhCliError
@@ -28,6 +28,8 @@ class TelegramNotifier:
 
     RETRIES = 3
     CHUNK_SIZE = 1024 * 1024
+    MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024
+    IMAGE_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
     def __init__(self, store: Any) -> None:
         self.store = store
@@ -59,12 +61,23 @@ class TelegramNotifier:
             and str(os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
         )
         enabled = bool(data.get("telegram_enabled")) if "telegram_enabled" in data else self._is_true(os.environ.get("RH_TELEGRAM_ENABLED"))
+        inbound_workflow_id = str(data.get("telegram_inbound_workflow_id") or "").strip()
+        inbound_workflow_name = ""
+        if inbound_workflow_id:
+            try:
+                inbound_workflow_name = str(self.store.workflow_record(inbound_workflow_id).get("name") or "").strip()
+            except Exception:
+                inbound_workflow_name = "工作流已删除"
         return {
             "configured": bool(token and chat_id),
             "enabled": enabled,
             "bot_token_hint": self._mask(token),
             "chat_id": chat_id,
             "source": "local" if local_configured else "environment" if environment_configured else "",
+            "inbound_enabled": bool(data.get("telegram_inbound_enabled")),
+            "inbound_workflow_id": inbound_workflow_id,
+            "inbound_workflow_name": inbound_workflow_name,
+            "inbound_file_input_id": str(data.get("telegram_inbound_file_input_id") or "").strip(),
         }
 
     @staticmethod
@@ -77,8 +90,8 @@ class TelegramNotifier:
     @staticmethod
     def _caption(task: dict[str, Any], output: dict[str, Any]) -> str:
         workflow_name = str(task.get("workflow_name") or "RH Workflow Desk").strip()
-        filename = str(output.get("name") or "成片").strip()
-        return f"{workflow_name} · {filename}"[:1024]
+        task_id = str(task.get("id") or "").strip() or "unknown-task"
+        return f"{workflow_name} · {task_id}"[:1024]
 
     @staticmethod
     def _output_key(index: int, output: dict[str, Any]) -> str:
@@ -170,6 +183,31 @@ class TelegramNotifier:
             raise TelegramDeliveryError(description[:300])
         return payload
 
+    def _api_get(self, token: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        query = urlencode({key: value for key, value in (params or {}).items() if value is not None})
+        path = f"/bot{quote(token, safe=':_-')}/{method}"
+        if query:
+            path += f"?{query}"
+        connection: http.client.HTTPSConnection | None = None
+        try:
+            connection = http.client.HTTPSConnection("api.telegram.org", timeout=40)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            raw = response.read(2 * 1024 * 1024)
+        except (OSError, http.client.HTTPException) as exc:
+            raise TelegramDeliveryError("Telegram 网络请求失败，请检查网络或代理。") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise TelegramDeliveryError("Telegram 返回了无法识别的响应。") from exc
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            description = str(payload.get("description") or "Telegram 接口拒绝了请求") if isinstance(payload, dict) else "Telegram 接口返回异常"
+            raise TelegramDeliveryError(description[:300])
+        return payload
+
     def _with_retries(self, action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         last_error: TelegramDeliveryError | None = None
         for attempt in range(self.RETRIES):
@@ -194,6 +232,158 @@ class TelegramNotifier:
         )
         return {"ok": True, "message": "测试消息已发送到 Telegram。"}
 
+    def send_message(
+        self,
+        text: str,
+        chat_id: str | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        token, configured_chat_id = self.credentials()
+        target_chat_id = str(chat_id or configured_chat_id or "").strip()
+        if not token or not target_chat_id:
+            raise TelegramDeliveryError("请先配置 Telegram Bot Token 和 Chat ID。")
+        message = str(text or "").strip()
+        if not message:
+            return
+        fields = {"chat_id": target_chat_id, "text": message[:4096]}
+        if reply_markup is not None:
+            fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
+        self._with_retries(
+            lambda: self._api_call(token, "sendMessage", fields)
+        )
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
+        token, _ = self.credentials()
+        callback_id = str(callback_query_id or "").strip()
+        if not token or not callback_id:
+            raise TelegramDeliveryError("Telegram 回调信息不完整。")
+        fields = {"callback_query_id": callback_id}
+        if str(text or "").strip():
+            fields["text"] = str(text).strip()[:200]
+        if show_alert:
+            fields["show_alert"] = "true"
+        self._with_retries(lambda: self._api_call(token, "answerCallbackQuery", fields))
+
+    def edit_message_text(
+        self,
+        chat_id: str,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        token, _ = self.credentials()
+        target_chat_id = str(chat_id or "").strip()
+        message = str(text or "").strip()
+        if not token or not target_chat_id or not message:
+            raise TelegramDeliveryError("Telegram 消息信息不完整。")
+        fields = {"chat_id": target_chat_id, "message_id": str(int(message_id)), "text": message[:4096]}
+        if reply_markup is not None:
+            fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
+        self._with_retries(lambda: self._api_call(token, "editMessageText", fields))
+
+    def delete_message(self, chat_id: str, message_id: int) -> None:
+        token, _ = self.credentials()
+        target_chat_id = str(chat_id or "").strip()
+        if not token or not target_chat_id:
+            raise TelegramDeliveryError("Telegram 消息信息不完整。")
+        fields = {"chat_id": target_chat_id, "message_id": str(int(message_id))}
+        self._with_retries(lambda: self._api_call(token, "deleteMessage", fields))
+
+    @staticmethod
+    def image_file_reference(update: dict[str, Any]) -> dict[str, str] | None:
+        message = update.get("message") if isinstance(update, dict) else None
+        if not isinstance(message, dict):
+            return None
+        photos = message.get("photo")
+        if isinstance(photos, list):
+            for item in reversed(photos):
+                if isinstance(item, dict) and str(item.get("file_id") or "").strip():
+                    return {
+                        "file_id": str(item["file_id"]),
+                        "name": "telegram-photo.jpg",
+                        "mime": "image/jpeg",
+                    }
+        document = message.get("document")
+        if isinstance(document, dict):
+            mime = str(document.get("mime_type") or "").strip().lower()
+            name = str(document.get("file_name") or "telegram-image").strip() or "telegram-image"
+            suffix = Path(name).suffix.lower()
+            if (mime.startswith("image/") or suffix in TelegramNotifier.IMAGE_SUFFIXES) and str(document.get("file_id") or "").strip():
+                return {"file_id": str(document["file_id"]), "name": name, "mime": mime or "image/*"}
+        return None
+
+    def poll_updates(self, offset: int | None = None) -> list[dict[str, Any]]:
+        token, _ = self.credentials()
+        if not token:
+            return []
+        params: dict[str, Any] = {
+            "timeout": 25,
+            "limit": 100,
+            "allowed_updates": json.dumps(["message", "callback_query"], separators=(",", ":")),
+        }
+        if offset is not None:
+            params["offset"] = offset
+        payload = self._with_retries(lambda: self._api_get(token, "getUpdates", params))
+        updates = payload.get("result")
+        return [item for item in updates if isinstance(item, dict)] if isinstance(updates, list) else []
+
+    def download_image(self, update_id: int, reference: dict[str, str], target_dir: Path) -> Path:
+        token, _ = self.credentials()
+        file_id = str(reference.get("file_id") or "").strip()
+        if not token or not file_id:
+            raise TelegramDeliveryError("Telegram 图片信息不完整。")
+        payload = self._with_retries(lambda: self._api_get(token, "getFile", {"file_id": file_id}))
+        result = payload.get("result")
+        file_path = str(result.get("file_path") or "").strip() if isinstance(result, dict) else ""
+        if not file_path:
+            raise TelegramDeliveryError("Telegram 没有返回图片文件路径。")
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in self.IMAGE_SUFFIXES:
+            suffix = Path(str(reference.get("name") or "")).suffix.lower()
+        if suffix not in self.IMAGE_SUFFIXES:
+            suffix = ".jpg"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"telegram_{int(update_id)}_{uuid4().hex[:12]}{suffix}"
+        target = (target_dir / filename).resolve()
+        if target.parent != target_dir.resolve():
+            raise TelegramDeliveryError("Telegram 图片保存路径无效。")
+        temporary = target.with_name(f".{target.name}.part")
+        connection: http.client.HTTPSConnection | None = None
+        total = 0
+        try:
+            path = f"/file/bot{quote(token, safe=':_-')}/{quote(file_path.lstrip('/'), safe='/._-') }"
+            connection = http.client.HTTPSConnection("api.telegram.org", timeout=60)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            if response.status >= 400:
+                response.read(1024 * 1024)
+                raise TelegramDeliveryError("Telegram 图片下载失败。")
+            content_length = response.getheader("Content-Length")
+            try:
+                if content_length and int(content_length) > self.MAX_INBOUND_IMAGE_BYTES:
+                    raise TelegramDeliveryError("Telegram 图片不能超过 20MB。")
+            except ValueError:
+                pass
+            with temporary.open("wb") as destination:
+                while chunk := response.read(self.CHUNK_SIZE):
+                    total += len(chunk)
+                    if total > self.MAX_INBOUND_IMAGE_BYTES:
+                        raise TelegramDeliveryError("Telegram 图片不能超过 20MB。")
+                    destination.write(chunk)
+            temporary.replace(target)
+            return target
+        except TelegramDeliveryError:
+            raise
+        except (OSError, http.client.HTTPException) as exc:
+            raise TelegramDeliveryError("Telegram 图片下载失败，请检查网络或代理。") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _send_output(self, token: str, chat_id: str, task: dict[str, Any], output: dict[str, Any]) -> None:
         kind = str(output.get("kind") or "file")
         if kind == "text":
@@ -208,19 +398,28 @@ class TelegramNotifier:
         fields = {"chat_id": chat_id, "caption": self._caption(task, output)}
         self._with_retries(lambda: self._api_call(token, method, fields, file_field, path))
 
-    def notify_task(self, task_id: str, outputs: list[dict[str, Any]]) -> dict[str, int | str]:
+    def notify_task(
+        self,
+        task_id: str,
+        outputs: list[dict[str, Any]],
+        *,
+        force: bool = False,
+        output_indices: list[int] | None = None,
+    ) -> dict[str, int | str]:
         settings = self.settings()
-        if not settings["enabled"]:
+        task = self.store.task(task_id) or {"id": task_id, "workflow_name": "RH Workflow Desk"}
+        is_telegram_inbound = str(task.get("submission_source") or "").strip().lower() == "telegram"
+        if not force and not is_telegram_inbound and not settings["enabled"]:
             return {"status": "disabled", "sent": 0, "failed": 0}
         token, chat_id = self.credentials()
         if not token or not chat_id:
             return {"status": "not_configured", "sent": 0, "failed": 0}
-        task = self.store.task(task_id) or {"id": task_id, "workflow_name": "RH Workflow Desk"}
         sent = 0
         failed = 0
-        for index, output in enumerate(outputs):
+        for position, output in enumerate(outputs):
             if not isinstance(output, dict):
                 continue
+            index = output_indices[position] if output_indices and position < len(output_indices) else position
             delivery_key = self._output_key(index, output)
             if self.store.telegram_delivery_sent(task_id, delivery_key):
                 continue

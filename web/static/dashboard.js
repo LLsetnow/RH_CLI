@@ -2,7 +2,6 @@
   "use strict";
 
   var state = { days: 7, accountId: "", data: null, loading: false };
-  var toastTimer = 0;
   var switchTimer = 0;
 
   function $(id) { return document.getElementById(id); }
@@ -36,6 +35,14 @@
     return hours + " 小时" + (minutes ? " " + minutes + " 分" : "");
   }
 
+  function formatMoneySpent(items) {
+    if (!Array.isArray(items) || !items.length) return "0";
+    return items.map(function (item) {
+      var symbol = String(item && item.symbol || "");
+      return symbol + formatNumber(item && item.value, 4);
+    }).join(" · ");
+  }
+
   function formatTimestamp(value) {
     var timestamp = numeric(value);
     if (!timestamp) return "时间未记录";
@@ -44,8 +51,9 @@
     return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0") + " " + String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0");
   }
 
-  function request(url) {
-    return fetch(url, { cache: "no-store" }).then(function (response) {
+  function request(url, options) {
+    var fetchOptions = Object.assign({ cache: "no-store" }, options || {});
+    return fetch(url, fetchOptions).then(function (response) {
       return response.json().then(function (data) {
         if (!response.ok) throw new Error(data.message || "请求失败");
         return data;
@@ -55,11 +63,7 @@
 
   function showToast(message, isError) {
     var toast = $("dashboardToast");
-    toast.textContent = message;
-    toast.classList.toggle("error", Boolean(isError));
-    toast.classList.add("show");
-    window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(function () { toast.classList.remove("show"); }, 2600);
+    if (window.RHMotion && window.RHMotion.showToast) window.RHMotion.showToast(toast, message, isError);
   }
 
   function statusLabel(status) {
@@ -88,7 +92,7 @@
   }
 
   function renderRangeState() {
-    var labels = { 1: "今天", 7: "近 7 天", 30: "近 30 天" };
+    var labels = { 1: "近 24 小时", 7: "近 7 天", 30: "近 30 天" };
     $("dashboardRangeLabel").textContent = labels[state.days] || "近 7 天";
     document.querySelectorAll("[data-dashboard-days]").forEach(function (button) {
       var active = Number(button.dataset.dashboardDays) === state.days;
@@ -122,6 +126,7 @@
     var summary = data.summary || {};
     var accountLabel = data.account_filter_name || "全部账号";
     $("dashboardCoinsSpent").textContent = formatNumber(summary.coins_spent, 4);
+    $("dashboardMoneySpent").textContent = formatMoneySpent(summary.money_spent);
     $("dashboardCoinsMeta").textContent = accountLabel + " · 所选时间范围 · RH 币";
     $("dashboardSubmissions").textContent = String(summary.submissions || 0);
     $("dashboardSubmissionsMeta").textContent = accountLabel + " · 包含成功、失败和取消的提交";
@@ -259,14 +264,31 @@
     if (animate) animateDashboardUpdate();
   }
 
-  function loadDashboard(showMessage, animate) {
+  function refreshBalanceSnapshots() {
+    return request("/api/dashboard/refresh-balances", { method: "POST" });
+  }
+
+  function balanceRefreshMessage(result) {
+    if (result && result.error) return "仪表盘已刷新，余额刷新失败：" + result.error.message;
+    var refreshed = Number(result && result.refreshed || 0);
+    var failed = Number(result && result.failed || 0);
+    if (failed) return "仪表盘已刷新，余额更新 " + refreshed + " 个，" + failed + " 个失败";
+    return "仪表盘已刷新，余额已更新";
+  }
+
+  function loadDashboard(showMessage, animate, shouldRefreshBalances) {
     if (state.loading) return;
     state.loading = true;
     $("refreshDashboard").disabled = true;
-    request("/api/dashboard?days=" + encodeURIComponent(state.days) + "&account_id=" + encodeURIComponent(state.accountId)).then(function (data) {
-      state.data = data;
-      render(data, animate);
-      if (showMessage) showToast("仪表盘已刷新");
+    var balanceRequest = shouldRefreshBalances
+      ? refreshBalanceSnapshots().then(function (result) { return result; }).catch(function (error) { return { error: error }; })
+      : Promise.resolve(null);
+    balanceRequest.then(function (balanceResult) {
+      return request("/api/dashboard?days=" + encodeURIComponent(state.days) + "&account_id=" + encodeURIComponent(state.accountId)).then(function (data) {
+        state.data = data;
+        render(data, animate);
+        if (showMessage) showToast(balanceRefreshMessage(balanceResult), Boolean(balanceResult && (balanceResult.error || Number(balanceResult.failed || 0))));
+      });
     }).catch(function (error) {
       showToast("读取仪表盘失败：" + error.message, true);
     }).finally(function () {
@@ -289,13 +311,13 @@
       var button = event.target.closest("[data-dashboard-days]");
       if (!button) return;
       state.days = Number(button.dataset.dashboardDays) || 7;
-      loadDashboard(false, true);
+      loadDashboard(false, true, false);
     });
     $("dashboardAccountFilter").addEventListener("change", function () {
       state.accountId = this.value;
-      loadDashboard(false, true);
+      loadDashboard(false, true, false);
     });
-    $("refreshDashboard").addEventListener("click", function () { loadDashboard(true); });
+    $("refreshDashboard").addEventListener("click", function () { loadDashboard(true, true, true); });
     window.addEventListener("resize", function () {
       if (state.data) renderAnnualHeatmap(state.data);
       updateRangeIndicator();
@@ -305,6 +327,6 @@
   document.addEventListener("DOMContentLoaded", function () {
     bindEvents();
     renderRangeState();
-    loadDashboard(false, false);
+    loadDashboard(false, false, false);
   });
 }());

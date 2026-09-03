@@ -56,22 +56,31 @@
 .workflow-node-summary span strong { color: var(--muted); font-weight: 700; }
 .workflow-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 9px; margin-top: auto; padding-top: 14px; }
 .workflow-card-time { color: var(--subtle); font-size: 9px; }
-.workflow-card-actions { display: inline-flex; align-items: center; gap: 8px; }
+.workflow-card-actions { display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px 8px; }
 .workflow-card-action { padding: 0; border: 0; color: var(--subtle); background: transparent; font-size: 9px; }
 .workflow-card-action:hover { color: var(--accent); }
 .workflow-card-action.primary { color: var(--accent); font-weight: 700; }
+.workflow-card-action.is-inbound { padding: 3px 6px; border: 1px solid rgba(110, 231, 216, .25); border-radius: 999px; background: rgba(110, 231, 216, .07); }
 .workflow-card-action.danger:hover { color: var(--danger); }
 .workflow-empty { padding: 50px 20px; border: 1px dashed var(--line); border-radius: 14px; color: var(--subtle); text-align: center; }
 .workflow-empty strong, .workflow-empty span { display: block; }
 .workflow-empty strong { color: var(--muted); font-size: 12px; }
 .workflow-empty span { margin-top: 7px; font-size: 10px; line-height: 1.6; }
-.workflow-modal-panel, .workflow-json-panel, .workflow-config-panel { width: min(560px, 100%); }
+.workflow-modal-panel { width: min(820px, 100%); max-height: min(860px, calc(100vh - 48px)); overflow: auto; }
+.workflow-config-panel { width: min(820px, 100%); }
 .workflow-editor-hint { margin-top: 12px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .workflow-editor-form { display: grid; gap: 15px; margin-top: 20px; }
 .workflow-editor-form input, .workflow-editor-form select { margin-top: 7px; }
 .workflow-editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .workflow-editor-note { padding: 10px 11px; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--subtle); background: rgba(9, 14, 27, .28); font-size: 9px; line-height: 1.55; }
-.workflow-config-panel { width: min(820px, 100%); }
+.workflow-editor-json { margin-top: 4px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
+.workflow-editor-json-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.workflow-editor-json-heading > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.workflow-editor-json-heading .field-hint { color: var(--subtle); font-size: 9px; line-height: 1.5; }
+.workflow-editor-json textarea { display: block; width: 100%; min-height: 320px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: rgba(7, 12, 24, .62); font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; line-height: 1.6; resize: vertical; }
+.workflow-editor-json textarea:focus { border-color: var(--accent); outline: 2px solid rgba(110, 231, 216, .18); outline-offset: 1px; }
+.workflow-editor-json-actions { display: flex; flex-direction: row; align-items: stretch; justify-content: flex-end; gap: 7px; flex: 0 0 auto; }
+.workflow-editor-json-actions > button { width: 68px; min-width: 68px; justify-content: center; }
 .workflow-config-mode { display: grid; gap: 7px; margin-top: 19px; }
 .workflow-config-mode select { padding-right: 28px; }
 .workflow-config-builder { margin-top: 16px; padding: 13px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(9, 14, 27, .28); }
@@ -90,18 +99,24 @@
 .workflow-config-item-id { display: block; margin-top: 4px; overflow: hidden; color: var(--subtle); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .workflow-config-remove { padding: 0; border: 0; color: var(--subtle); background: transparent; font-size: 10px; cursor: pointer; }
 .workflow-config-remove:hover { color: var(--danger); }
-.workflow-config-item-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(120px, .7fr) auto; align-items: end; gap: 9px; margin-top: 11px; }
-.workflow-config-item-grid input, .workflow-config-item-grid select { min-height: var(--control-compact-height); margin-top: 6px; font-size: var(--control-compact-font-size); }
-.workflow-config-required { display: flex; min-height: 37px; align-items: center; gap: 6px; color: var(--muted); font-size: 9px; white-space: nowrap; }
-.workflow-config-required input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+.workflow-config-item-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, .72fr) minmax(0, 1fr); align-items: end; gap: 9px; margin-top: 11px; }
+.workflow-config-item-grid input, .workflow-config-item-grid select, .workflow-config-item-grid textarea { min-height: var(--control-compact-height); margin-top: 6px; font-size: var(--control-compact-font-size); }
+.workflow-config-item-grid textarea { min-height: 58px; resize: vertical; }
+.workflow-config-name-control { display: flex; min-width: 0; align-items: center; gap: 7px; margin-top: 6px; }
+.workflow-config-name-control > input { min-width: 0; flex: 1 1 auto; margin-top: 0; }
+.workflow-config-required { position: relative; display: inline-flex; min-height: 24px; align-items: center; gap: 6px; margin-top: 0; color: var(--muted); font-size: 9px; white-space: nowrap; cursor: pointer; user-select: none; }
+.workflow-config-required input { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; opacity: 0; pointer-events: none; clip: rect(0 0 0 0); }
+.workflow-config-required-label { line-height: 1.35; }
+.workflow-config-required-track { position: relative; display: inline-flex; width: 42px; height: 24px; flex: 0 0 42px; border: 1px solid var(--border-control); border-radius: 999px; background: var(--surface-control-muted); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .08); transition: border-color var(--motion-interaction) var(--ease-out), background var(--motion-interaction) var(--ease-out), box-shadow var(--motion-interaction) var(--ease-out); }
+.workflow-config-required-track::after { width: 18px; height: 18px; margin: 2px; border-radius: 50%; background: var(--subtle); box-shadow: 0 1px 3px rgba(0, 0, 0, .2); content: ""; transition: background var(--motion-interaction) var(--ease-out), transform var(--motion-interaction) var(--ease-out); }
+.workflow-config-required:hover .workflow-config-required-track { border-color: var(--border-control-hover); }
+.workflow-config-required input:checked + .workflow-config-required-track { border-color: var(--accent); background: rgba(110, 231, 216, .16); box-shadow: 0 0 0 3px rgba(110, 231, 216, .07); }
+.workflow-config-required input:checked + .workflow-config-required-track::after { background: var(--accent); transform: translateX(18px); }
+.workflow-config-required input:focus-visible + .workflow-config-required-track { outline: 2px solid var(--accent); outline-offset: 3px; }
 .workflow-config-options { margin-top: 9px; }
 .workflow-config-options input { min-height: var(--control-compact-height); margin-top: 6px; font-size: var(--control-compact-font-size); }
 .workflow-config-disabled { display: none; }
-.workflow-json-panel { display: flex; width: min(900px, 100%); height: min(720px, calc(100vh - 48px)); flex-direction: column; overflow: hidden; }
-.workflow-json-panel .modal-heading > div { max-width: calc(100% - 42px); }
-.workflow-json-panel #workflowJsonTitle { overflow-wrap: anywhere; word-break: break-word; font-size: clamp(16px, 2.2vw, 20px); line-height: 1.2; }
-.workflow-json-content { min-height: 0; flex: 1 1 auto; overflow: auto; margin: 18px 0 0; padding: 14px; border: 1px solid var(--line-soft); border-radius: 10px; color: var(--muted); background: rgba(7, 12, 24, .62); font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
-.workflow-modal-panel .dialog-actions, .workflow-json-panel .dialog-actions, .workflow-config-panel .dialog-actions { margin-top: 20px; }
+.workflow-modal-panel .dialog-actions, .workflow-config-panel .dialog-actions { margin-top: 20px; }
 
 @media (max-width: 760px) {
   .workflows-hero { align-items: start; flex-direction: column; gap: 22px; margin-top: 38px; }
@@ -137,7 +152,7 @@
   background: rgba(247, 250, 255, .75);
 }
 
-:root[data-theme="light"] .workflow-json-content {
+:root[data-theme="light"] .workflow-editor-json textarea {
   background: var(--panel-raised);
 }
 

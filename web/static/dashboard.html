@@ -33,7 +33,7 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
-          <a class="settings-button settings-access settings-link" href="/?openSettings=1" aria-label="打开本地设置" title="打开本地设置">
+          <a class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
         </div>
@@ -69,6 +69,12 @@
             <span class="top-nav-label">仪表盘</span>
           </span>
         </a>
+        <a class="top-nav-link" href="/settings">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2" /><path d="M12 19v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M3 12h2" /><path d="M19 12h2" /><path d="m4.93 19.07 1.41-1.41" /><path d="m17.66 6.34 1.41-1.41" /><circle cx="12" cy="12" r="4" /></svg>
+            <span class="top-nav-label">设置</span>
+          </span>
+        </a>
       </nav>
 
       <main class="dashboard-main">
@@ -98,7 +104,7 @@
               </select>
             </label>
             <div id="dashboardRangeTabs" class="dashboard-range-tabs" role="group" aria-label="选择时间范围">
-              <button class="dashboard-range-tab" type="button" data-dashboard-days="1" aria-pressed="false">1D<span>今天</span></button>
+              <button class="dashboard-range-tab" type="button" data-dashboard-days="1" aria-pressed="false">1D<span>近24小时</span></button>
               <button class="dashboard-range-tab active" type="button" data-dashboard-days="7" aria-pressed="true">7D<span>近一周</span></button>
               <button class="dashboard-range-tab" type="button" data-dashboard-days="30" aria-pressed="false">30D<span>近一月</span></button>
             </div>
@@ -110,6 +116,7 @@
           <article class="panel dashboard-metric dashboard-metric-accent">
             <div class="dashboard-metric-head"><span>RH 币消耗</span><span class="dashboard-metric-mark">COINS</span></div>
             <strong id="dashboardCoinsSpent" class="dashboard-metric-value">—</strong>
+            <div class="dashboard-money-spent"><span>余额消耗</span><strong id="dashboardMoneySpent">0</strong></div>
             <span id="dashboardCoinsMeta" class="dashboard-metric-meta">所选时间范围</span>
           </article>
           <article class="panel dashboard-metric">
@@ -185,7 +192,7 @@
       </main>
     </div>
 
-    <div id="dashboardToast" class="toast" role="status" aria-live="polite"></div>
+    <div id="dashboardToast" class="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
     <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/dashboard.js"></script>
   </body>

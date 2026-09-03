@@ -13,5 +13,11 @@ contextBridge.exposeInMainWorld("rhElectron", {
   },
   accountCheckin(account) {
     return ipcRenderer.invoke("account-checkin", account);
+  },
+  onGlobalPageNavigation(callback) {
+    if (typeof callback !== "function") return () => {};
+    const listener = (_event, direction) => callback(direction);
+    ipcRenderer.on("rh-global-page-navigation", listener);
+    return () => ipcRenderer.removeListener("rh-global-page-navigation", listener);
   }
 });

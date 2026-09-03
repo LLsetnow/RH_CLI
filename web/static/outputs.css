@@ -89,10 +89,13 @@
 .rating-stars-5 { color: var(--rating-yellow); }
 .rating-value { color: var(--subtle); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; white-space: nowrap; }
 .artifact-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; color: var(--subtle); font-size: 9px; }
-.artifact-foot-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; }
+.artifact-foot-actions { display: flex; align-items: flex-end; flex-direction: column; justify-content: flex-end; gap: 5px; min-width: 0; }
+.artifact-task-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; min-width: 0; }
 .artifact-cost { color: var(--warm); }
-.artifact-import-task { flex: 0 0 auto; padding: 0; border: 0; color: var(--accent); background: transparent; font-size: 9px; white-space: nowrap; cursor: pointer; }
-.artifact-import-task:hover { color: var(--ink); }
+.artifact-upload-task, .artifact-import-task { flex: 0 0 auto; padding: 0; border: 0; color: var(--accent); background: transparent; font-size: 9px; white-space: nowrap; cursor: pointer; }
+.artifact-upload-task { font-weight: 700; }
+.artifact-upload-task:hover, .artifact-import-task:hover { color: var(--ink); }
+.artifact-upload-task:disabled { cursor: wait; opacity: .55; }
 .artifact-import-task:disabled { cursor: wait; opacity: .55; }
 .artifact-delete-task { flex: 0 0 auto; padding: 0; border: 0; color: var(--danger); background: transparent; font-size: 9px; white-space: nowrap; cursor: pointer; }
 .artifact-delete-task:hover { color: var(--ink); }

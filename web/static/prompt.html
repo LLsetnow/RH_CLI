@@ -33,7 +33,7 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
-          <a class="settings-button settings-access settings-link" href="/?openSettings=1" aria-label="打开本地设置" title="打开本地设置">
+          <a class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
         </div>
@@ -69,6 +69,12 @@
             <span class="top-nav-label">仪表盘</span>
           </span>
         </a>
+        <a class="top-nav-link" href="/settings">
+          <span class="top-nav-content">
+            <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v2" /><path d="M12 19v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M3 12h2" /><path d="M19 12h2" /><path d="m4.93 19.07 1.41-1.41" /><path d="m17.66 6.34 1.41-1.41" /><circle cx="12" cy="12" r="4" /></svg>
+            <span class="top-nav-label">设置</span>
+          </span>
+        </a>
       </nav>
 
       <main>
@@ -88,12 +94,12 @@
           </div>
         </section>
 
-        <section class="prompt-builder-grid" aria-label="提示词积木编辑器">
+        <section id="promptBuilderGrid" class="prompt-builder-grid" aria-label="提示词积木编辑器">
           <aside class="panel library-panel">
             <div class="panel-heading prompt-panel-heading">
               <div>
                 <div class="section-kicker">01 / BLOCK LIBRARY</div>
-                <h2>积木库</h2>
+                <h2><button id="toggleLibraryExpand" class="library-title-toggle" type="button" aria-expanded="false" aria-controls="promptBuilderGrid" title="展开积木库">积木库</button></h2>
               </div>
               <button id="openCustomBlock" class="icon-button" type="button" aria-label="添加自定义固定积木" title="添加自定义固定积木">＋</button>
             </div>
@@ -116,7 +122,8 @@
             <div class="library-filter-label">二级标签</div>
             <div id="tagFilters" class="tag-filters" aria-label="按标签筛选"></div>
             <div id="libraryList" class="library-list"></div>
-            <div class="library-footer"><span id="libraryCount">0 个固定积木</span><span id="libraryFooterHint">点击或拖动加入</span><button id="refreshActions" class="library-refresh-button" type="button" hidden>重新扫描</button></div>
+            <input id="mediaBlockPicker" class="media-block-picker" type="file" accept="image/*,audio/*,video/*" hidden />
+            <div class="library-footer"><span id="libraryCount">0 个固定积木</span><span id="libraryFooterHint">拖动卡片加入</span><button id="refreshActions" class="library-refresh-button" type="button" hidden>重新扫描</button></div>
             <div class="library-drop-hint" aria-hidden="true"><span class="library-drop-hint-mark">×</span><strong>松开以移除当前积木</strong><span>积木库里的原始内容不会被删除</span></div>
           </aside>
 
@@ -139,12 +146,13 @@
                 <div class="stage-toolbar">
                   <div><strong id="stageCount">0 个积木</strong><span class="stage-toolbar-helper">按顺序以空行连接</span></div>
                   <div class="stage-toolbar-actions">
+                    <button id="generateSubjectDefinitions" class="secondary-button button-compact subject-definitions-button" type="button" disabled>插入对象定义</button>
                     <button id="addTextStage" class="secondary-button button-compact text-block-add" type="button"><span>文本积木</span></button>
                     <button id="clearStage" class="text-button" type="button">清空组装台</button>
                   </div>
                 </div>
                 <div id="stageList" class="stage-list" aria-live="polite"></div>
-                <div class="assembly-hint"><span class="hint-mark">⋮⋮</span><span>抓住左侧手柄或卡片空白处上下拖动排序；拖到左侧积木库即可移除当前积木。</span></div>
+                <div class="assembly-hint"><span>抓住卡片空白处上下拖动排序；拖到左侧积木库即可移除当前积木。</span></div>
               </div>
               <div id="assemblyGroupView" class="assembly-view" role="tabpanel" aria-labelledby="assemblyViewGroups" hidden>
                 <div class="group-view-heading">
@@ -176,7 +184,8 @@
               </div>
               <div class="output-actions">
                 <button id="copyPrompt" class="secondary-button button-compact" type="button">复制文本</button>
-                <button id="importPrompt" class="secondary-button button-compact import-prompt-button" type="button">导入任务</button>
+                <button id="importPrompt" class="secondary-button button-compact import-prompt-button" type="button">导入提示词</button>
+                <button id="importMedia" class="secondary-button button-compact import-media-button" type="button" hidden>导入媒体</button>
                 <button id="downloadPrompt" class="primary-button button-compact" type="button">导出 TXT</button>
               </div>
               <div class="output-preview-wrap">
@@ -189,6 +198,11 @@
         </section>
       </main>
     </div>
+    <div id="promptReferenceSuggest" class="prompt-reference-suggest" role="region" aria-label="插入提示词卡片" hidden>
+      <div class="prompt-reference-suggest-list" id="promptReferenceSuggestionList" role="listbox" aria-label="可插入的提示词卡片"></div>
+      <aside class="prompt-reference-suggest-preview" id="promptReferenceSuggestionPreview" aria-live="polite"></aside>
+    </div>
+    <div id="promptReferenceHover" class="prompt-reference-hover" role="tooltip" aria-label="卡片内容预览" hidden></div>
 
     <div id="customBlockModal" class="modal-backdrop" hidden>
       <section class="custom-block-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="customBlockTitle">
@@ -199,24 +213,35 @@
           </div>
           <button id="closeCustomBlock" class="close-button" type="button" aria-label="关闭">×</button>
         </div>
-        <p id="customBlockDescription" class="modal-description">把你经常重复使用的表达保存下来，下次直接从积木库加入；也可以修改已有积木的内容。</p>
+        <p id="customBlockDescription" class="modal-description">把你经常重复使用的表达保存下来，下次直接从积木库加入；保存修改会同步当前基础积木源文件。</p>
         <form id="customBlockForm">
           <label id="customBlockCategoryField" class="field-group">
             <span class="field-label">一级分类 <span class="field-hint inline-hint">对应 Markdown 的 ### 标题</span></span>
-            <input id="customBlockCategory" type="text" placeholder="例如：镜头与运动" maxlength="32" />
+            <div class="resource-category-control">
+              <select id="customBlockCategorySelect" aria-label="选择已有一级分类"></select>
+              <input id="customBlockCategory" type="text" placeholder="或输入新分类" maxlength="32" />
+            </div>
           </label>
           <label class="field-group">
-            <span class="field-label">积木名称</span>
+            <span id="customBlockNameLabel" class="field-label">积木名称</span>
             <input id="customBlockName" type="text" placeholder="例如：柔和自然光" maxlength="32" required />
           </label>
           <label class="field-group">
-            <span class="field-label">固定文本</span>
-            <textarea id="customBlockText" placeholder="输入这块积木要保存的文本内容" maxlength="600" required></textarea>
+            <span id="customBlockTextLabel" class="field-label">固定文本</span>
+            <textarea id="customBlockText" placeholder="输入这块积木要保存的文本内容" maxlength="600"></textarea>
           </label>
           <label class="field-group">
             <span class="field-label">标签 <span class="field-hint inline-hint">用逗号分隔，可添加多个</span></span>
             <input id="customBlockTags" type="text" placeholder="例如：光线，风格" maxlength="80" />
           </label>
+          <div id="resourceMediaFields" class="resource-media-fields" hidden>
+            <div id="resourceMediaSlots" class="resource-media-slots"></div>
+            <input id="resourceImagePath" type="hidden" />
+            <input id="resourceDepthPath" type="hidden" />
+            <input id="resourceAudioPath" type="hidden" />
+            <input id="resourceMediaPicker" class="resource-media-picker" type="file" hidden />
+            <div class="resource-media-tools"><span id="resourceMediaHint" class="field-hint">选择文件、拖入素材，或在素材槽位中按 ⌘V / Ctrl+V；保存时会自动复制到 ref 对应目录。</span><button id="resourceVisionButton" class="resource-ai-button" type="button" hidden>AI 识图填充</button></div>
+          </div>
           <div class="dialog-actions">
             <button id="cancelCustomBlock" class="secondary-button" type="button">取消</button>
             <button class="primary-button" type="submit">保存积木</button>
@@ -224,17 +249,21 @@
         </form>
       </section>
     </div>
-    <div id="imagePreviewModal" class="modal-backdrop" hidden>
-      <section class="image-preview-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
+    <div id="imagePreviewModal" class="modal-backdrop image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" hidden>
+      <button id="closeImagePreview" class="image-preview-surface" type="button" aria-label="关闭图片预览">
+        <img id="imagePreviewImage" src="data:," alt="" />
+      </button>
+    </div>
+    <div id="textPreviewModal" class="modal-backdrop" hidden>
+      <section class="text-preview-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="textPreviewTitle">
         <div class="modal-heading">
           <div>
-            <div class="section-kicker">IMAGE PREVIEW</div>
-            <h2 id="imagePreviewTitle">动作图片</h2>
+            <div class="section-kicker">TEXT PREVIEW</div>
+            <h2 id="textPreviewTitle">文本预览</h2>
           </div>
-          <button id="closeImagePreview" class="close-button" type="button" aria-label="关闭图片预览">×</button>
+          <button id="closeTextPreview" class="close-button" type="button" aria-label="关闭文本预览">×</button>
         </div>
-        <div class="image-preview-frame"><img id="imagePreviewImage" src="data:," alt="" /></div>
-        <p id="imagePreviewCaption" class="image-preview-caption">点击图片外区域、右上角或按 Esc 关闭</p>
+        <pre id="textPreviewContent" class="text-preview-content"></pre>
       </section>
     </div>
     <div id="depthImportModal" class="modal-backdrop" hidden>
@@ -255,7 +284,7 @@
         </div>
       </section>
     </div>
-    <div id="promptToast" class="toast" role="status" aria-live="polite"></div>
+    <div id="promptToast" class="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
     <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/prompt.js"></script>
   </body>

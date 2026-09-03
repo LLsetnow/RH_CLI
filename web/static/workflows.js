@@ -1,8 +1,7 @@
 (function () {
   "use strict";
 
-  var state = { workflows: [], accounts: [], search: "", accountFilter: "all", selectedWorkflowId: "", loadingWorkflowId: "", editor: null, jsonWorkflow: null, configEditor: null };
-  var toastTimer = 0;
+  var state = { workflows: [], accounts: [], telegram: {}, search: "", accountFilter: "all", selectedWorkflowId: "", loadingWorkflowId: "", editor: null, configEditor: null };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
 
   function $(id) { return document.getElementById(id); }
@@ -27,10 +26,7 @@
   function showToast(message, isError) {
     var toast = $("workflowToast");
     if (!toast) return;
-    window.clearTimeout(toastTimer);
-    toast.textContent = message || "";
-    toast.className = "toast show" + (isError ? " error" : "");
-    toastTimer = window.setTimeout(function () { toast.className = "toast"; }, 3200);
+    if (window.RHMotion && window.RHMotion.showToast) window.RHMotion.showToast(toast, message, isError);
   }
   function formatTime(timestamp) {
     if (!timestamp) return "—";
@@ -87,6 +83,7 @@
     var bound = Boolean(record.account_id);
     var selected = state.selectedWorkflowId === record.id;
     var loading = state.loadingWorkflowId === record.id;
+    var inbound = state.telegram && state.telegram.inbound_workflow_id === record.id;
     var summary = [
       ["节点", record.node_count],
       ["文件", record.file_count],
@@ -109,7 +106,7 @@
       '</button>' +
       '<div class="workflow-card-footer"><span class="workflow-card-time">更新于 ' + esc(formatTime(record.updated_at)) + '</span><span class="workflow-card-actions">' +
       '<button class="workflow-card-action primary" type="button" data-action="configure-workflow" data-workflow-id="' + esc(record.id) + '">配置输入</button>' +
-      '<button class="workflow-card-action" type="button" data-action="view-workflow" data-workflow-id="' + esc(record.id) + '">查看 JSON</button>' +
+      '<button class="workflow-card-action' + (inbound ? ' primary is-inbound' : '') + '" type="button" data-action="set-telegram-inbound" data-enabled="' + (inbound ? 'false' : 'true') + '" data-workflow-id="' + esc(record.id) + '">' + (inbound ? '取消入站' : '设为入站') + '</button>' +
       '<button class="workflow-card-action" type="button" data-action="export-workflow" data-workflow-id="' + esc(record.id) + '">导出</button>' +
       '<button class="workflow-card-action danger" type="button" data-action="delete-workflow" data-workflow-id="' + esc(record.id) + '">删除</button>' +
       '</span></div></article>';
@@ -147,21 +144,27 @@
     return Promise.all([request("/api/workflows"), request("/api/state")]).then(function (results) {
       state.workflows = results[0].workflows || [];
       state.accounts = results[1].accounts || [];
+      state.telegram = results[1].settings && results[1].settings.telegram || {};
       renderAccountFilter();
       renderWorkflows();
     }).catch(function (error) { showToast(error.message, true); });
   }
   function openEditor(record, imported) {
+    var rawContent = imported && imported.content != null ? String(imported.content) : "";
+    var content = rawContent;
+    try { content = JSON.stringify(JSON.parse(rawContent), null, 2); } catch (error) {}
     state.editor = {
       mode: record ? "edit" : "import",
       id: record ? record.id : "",
-      content: imported ? imported.content : "",
+      content: content,
+      savedContent: content,
       sourceDir: imported ? imported.sourceDir : ""
     };
     $("workflowEditorTitle").textContent = record ? "编辑工作流资料" : "导入工作流";
     $("workflowEditorHint").textContent = record ? "修改工作流的本地显示信息，不会改变任务历史。" : "工作流 JSON 已读取，保存后会写入本机工作流库。";
     $("workflowRecordName").value = record ? record.name : imported.filename;
     $("workflowRecordRemoteId").value = record ? (record.remote_workflow_id || "") : (imported.remoteWorkflowId || "");
+    $("workflowEditorJson").value = content;
     renderAccountOptions(record ? record.account_id : "");
     window.RHMotion.openModal("workflowEditorModal", "workflowRecordName");
   }
@@ -181,24 +184,74 @@
       openEditor(null, { content: content, filename: file.name, sourceDir: sourceDir, remoteWorkflowId: metadata.workflowId || metadata.workflow_id || "" });
     }).catch(function (error) { showToast("读取工作流失败：" + error.message, true); });
   }
+  function readEditorJson() {
+    var raw = $("workflowEditorJson").value;
+    var workflow;
+    try {
+      workflow = JSON.parse(raw);
+    } catch (error) {
+      showToast("JSON 格式无效：" + error.message, true);
+      return null;
+    }
+    if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) {
+      showToast("工作流 JSON 顶层必须是 API 节点对象", true);
+      return null;
+    }
+    return { workflow: workflow, content: JSON.stringify(workflow, null, 2) };
+  }
+  function saveWorkflowJson() {
+    var editor = state.editor;
+    if (!editor) return;
+    var parsed = readEditorJson();
+    if (!parsed) return;
+    var button = $("saveWorkflowJson");
+    button.disabled = true;
+    if (editor.mode === "import") {
+      editor.content = parsed.content;
+      editor.savedContent = parsed.content;
+      $("workflowEditorJson").value = parsed.content;
+      showToast("JSON 已更新，点击“保存工作流”写入本机工作流库");
+      button.disabled = false;
+      return;
+    }
+    jsonRequest("/api/workflows/" + encodeURIComponent(editor.id), "PATCH", { content: parsed.content }).then(function () {
+      return fetchWorkflow(editor.id);
+    }).then(function (data) {
+      var content = JSON.stringify(data.workflow, null, 2);
+      editor.content = content;
+      editor.savedContent = content;
+      $("workflowEditorJson").value = content;
+      showToast("工作流 JSON 已保存");
+      return refreshWorkflows();
+    }).catch(function (error) {
+      showToast("保存工作流 JSON 失败：" + error.message, true);
+    }).finally(function () { button.disabled = false; });
+  }
+  function restoreWorkflowJson() {
+    if (!state.editor) return;
+    $("workflowEditorJson").value = state.editor.savedContent || state.editor.content || "";
+    showToast("已复原到最近一次保存的 JSON");
+  }
   function saveWorkflowRecord(event) {
     event.preventDefault();
     if (!state.editor) return;
     var button = $("saveWorkflowRecord");
     var name = $("workflowRecordName").value.trim();
     if (!name) return showToast("请填写工作流名称", true);
+    var parsed = readEditorJson();
+    if (!parsed) return;
     button.disabled = true;
     var payload = {
       name: name,
       account_id: $("workflowRecordAccount").value,
-      remote_workflow_id: $("workflowRecordRemoteId").value.trim()
+      remote_workflow_id: $("workflowRecordRemoteId").value.trim(),
+      content: parsed.content
     };
     var promise;
     if (state.editor.mode === "edit") {
       promise = jsonRequest("/api/workflows/" + encodeURIComponent(state.editor.id), "PATCH", payload);
     } else {
       payload.filename = name;
-      payload.content = state.editor.content;
       payload.source_dir = state.editor.sourceDir;
       promise = jsonRequest("/api/workflows", "POST", payload);
     }
@@ -256,8 +309,7 @@
     fetchWorkflow(recordId).then(function (data) {
       var draft = workflowDraftFromDetail(data);
       window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
-      showToast("已覆盖任务提交页工作流：" + draft.workflow.name);
-      window.location.href = "/";
+      showToast("已覆盖任务提交页工作流草稿：" + draft.workflow.name);
     }).catch(function (error) {
       showToast("加载工作流失败：" + error.message, true);
     }).finally(function () {
@@ -282,7 +334,8 @@
       title: String(item.title || item.class_type || item.node_id || ""), class_type: String(item.class_type || ""),
       label: String(item.label || item.title || item.field || item.node_id || ""), kind: String(item.kind || "text"),
       required: Boolean(item.required), options: Array.isArray(item.options) ? item.options.slice() : [], order: 0,
-      virtual: Boolean(item.virtual), default: item.default == null ? "" : item.default
+      virtual: Boolean(item.virtual), default: item.default == null ? "" : item.default,
+      default_value: Object.prototype.hasOwnProperty.call(item, "default_value") ? item.default_value : (item.default == null ? "" : item.default)
     };
   }
   function defaultConfigItems(catalog) {
@@ -297,10 +350,16 @@
       var saved = record.input_config && record.input_config.mode === "manual" ? record.input_config : null;
       state.configEditor = {
         id: id, record: record, catalog: catalog, mode: saved ? "manual" : "auto",
-        items: saved ? saved.items.map(configItemFromCatalog) : defaultConfigItems(catalog)
+        items: saved ? saved.items.map(function (item) {
+          var catalogItem = catalog.find(function (entry) { return entry.id === item.id; });
+          var merged = Object.assign({}, catalogItem || {}, item);
+          if (catalogItem && Object.prototype.hasOwnProperty.call(catalogItem, "default_value")) merged.default_value = catalogItem.default_value;
+          if (catalogItem && Object.prototype.hasOwnProperty.call(catalogItem, "default")) merged.default = catalogItem.default;
+          return configItemFromCatalog(merged);
+        }) : defaultConfigItems(catalog)
       };
       $("workflowConfigTitle").textContent = "配置输入节点 · " + (record.name || "工作流");
-      $("workflowConfigHint").textContent = "只保存这份工作流的输入配置，不会修改 API JSON 文件，也不会影响历史任务。";
+      $("workflowConfigHint").textContent = "自动识别模式只读取工作流原始输入；切换到手动选择后，已添加的节点可编辑默认值。";
       renderConfigBuilder();
       window.RHMotion.openModal("workflowConfigModal", "workflowConfigMode");
     }).catch(function (error) { showToast("读取输入配置失败：" + error.message, true); });
@@ -331,8 +390,17 @@
         return '<option value="' + esc(entry[0]) + '"' + (item.kind === entry[0] ? " selected" : "") + '>' + esc(entry[1]) + '</option>';
       }).join("");
       var options = item.kind === "select" ? '<label class="workflow-config-options field-group"><span class="field-label">下拉选项（用逗号或换行分隔）</span><input data-config-action="options" data-config-index="' + index + '" type="text" value="' + esc((item.options || []).join(", ")) + '" placeholder="例如：low, medium, high" /></label>' : "";
+      var value = item.default_value == null ? "" : item.default_value;
+      var defaultControl;
+      if (item.kind === "boolean") {
+        defaultControl = '<span class="workflow-config-default-check"><input data-config-action="default" data-config-index="' + index + '" type="checkbox"' + ((value === true || value === "true" || value === 1) ? " checked" : "") + ' /><span>启用</span></span>';
+      } else if (item.kind === "prompt" || (typeof value === "string" && value.length > 140)) {
+        defaultControl = '<textarea data-config-action="default" data-config-index="' + index + '" rows="2">' + esc(value) + '</textarea>';
+      } else {
+        defaultControl = '<input data-config-action="default" data-config-index="' + index + '" type="' + (item.kind === "number" ? "number" : "text") + '"' + (item.kind === "number" ? ' step="any"' : "") + ' value="' + esc(value) + '" />';
+      }
       return '<div class="workflow-config-item"><div class="workflow-config-item-head"><div><div class="workflow-config-item-title" title="' + esc(item.title) + '">' + esc(item.label || item.title) + '</div><code class="workflow-config-item-id" title="' + esc(item.id) + '">' + esc(item.id) + '</code></div><button class="workflow-config-remove" type="button" data-config-action="remove" data-config-index="' + index + '">移除</button></div>' +
-        '<div class="workflow-config-item-grid"><label class="field-group"><span class="field-label">显示名称</span><input data-config-action="label" data-config-index="' + index + '" type="text" value="' + esc(item.label) + '" maxlength="160" /></label><label class="field-group"><span class="field-label">输入类型</span><select data-config-action="kind" data-config-index="' + index + '">' + kindOptions + '</select></label><label class="workflow-config-required"><input data-config-action="required" data-config-index="' + index + '" type="checkbox"' + (item.required ? " checked" : "") + ' /><span>必填</span></label></div>' + options + '</div>';
+        '<div class="workflow-config-item-grid"><div class="workflow-config-name-field field-group"><span class="field-label">显示名称</span><div class="workflow-config-name-control"><label class="workflow-config-required"><span class="workflow-config-required-label">必填</span><input data-config-action="required" data-config-index="' + index + '" type="checkbox"' + (item.required ? " checked" : "") + ' /><span class="workflow-config-required-track" aria-hidden="true"></span></label><input data-config-action="label" data-config-index="' + index + '" type="text" value="' + esc(item.label) + '" maxlength="160" /></div></div><label class="field-group"><span class="field-label">输入类型</span><select data-config-action="kind" data-config-index="' + index + '">' + kindOptions + '</select></label><label class="field-group"><span class="field-label">默认值</span>' + defaultControl + '</label></div>' + options + '</div>';
     }).join("") : '<div class="workflow-config-empty">还没有选择输入字段。请从上方选择节点和字段后添加。</div>';
   }
   function renderConfigFieldOptions() {
@@ -363,7 +431,10 @@
       return Object.assign({}, item, { order: index });
     });
     jsonRequest("/api/workflows/" + encodeURIComponent(editor.id), "PATCH", {
-      input_config: { mode: editor.mode, items: editor.mode === "manual" ? items : [] }
+      input_config: { mode: editor.mode, items: editor.mode === "manual" ? items : [] },
+      input_defaults: editor.mode === "manual" ? items.filter(function (item) { return !item.virtual && item.field; }).map(function (item) {
+        return { node_id: item.node_id, field: item.field, default: item.default_value };
+      }) : []
     }).then(function () {
       window.RHMotion.closeModal("workflowConfigModal");
       state.configEditor = null;
@@ -371,13 +442,13 @@
       return refreshWorkflows();
     }).catch(function (error) { showToast("保存输入配置失败：" + error.message, true); }).finally(function () { button.disabled = false; });
   }
-  function viewWorkflow(id) {
-    fetchWorkflow(id).then(function (data) {
-      state.jsonWorkflow = data.workflow;
-      $("workflowJsonTitle").textContent = (data.record && data.record.name) || "工作流内容";
-      $("workflowJsonContent").textContent = JSON.stringify(data.workflow, null, 2);
-      window.RHMotion.openModal("workflowJsonModal", "closeWorkflowJson");
-    }).catch(function (error) { showToast("读取工作流失败：" + error.message, true); });
+  function updateConfigDefault(target, index, editor) {
+    if (!editor.items[index]) return;
+    var item = editor.items[index];
+    var next = target.type === "checkbox" ? target.checked : target.value;
+    if (item.kind === "number" && String(next).trim() !== "" && Number.isFinite(Number(next))) next = Number(next);
+    item.default_value = next;
+    item.default = next;
   }
   function exportWorkflow(id) {
     fetchWorkflow(id).then(function (data) {
@@ -412,10 +483,25 @@
       return;
     }
     if (action === "configure-workflow") openConfig(id);
-    if (action === "view-workflow") viewWorkflow(id);
+    if (action === "set-telegram-inbound") {
+      button.disabled = true;
+      jsonRequest("/api/settings", "PATCH", {
+        telegram_inbound_workflow_id: id,
+        telegram_inbound_enabled: button.dataset.enabled === "true"
+      }).then(function (data) {
+        state.telegram = data.telegram || {};
+        showToast(state.telegram.inbound_enabled ? "已设置为 Telegram 图片入站工作流" : "已关闭 Telegram 图片入站");
+        renderWorkflows();
+      }).catch(function (error) {
+        showToast("设置 Telegram 入站失败：" + error.message, true);
+      }).finally(function () { button.disabled = false; });
+      return;
+    }
     if (action === "export-workflow") exportWorkflow(id);
     if (action === "edit-workflow") {
-      fetchWorkflow(id).then(function (data) { openEditor(data.record, null); }).catch(function (error) { showToast("打开编辑失败：" + error.message, true); });
+      fetchWorkflow(id).then(function (data) {
+        openEditor(data.record, { content: JSON.stringify(data.workflow, null, 2) });
+      }).catch(function (error) { showToast("打开编辑失败：" + error.message, true); });
     }
     if (action === "delete-workflow") {
       if (!window.confirm("确定删除这个工作流库副本吗？任务历史、任务快照和产物不会删除。")) return;
@@ -464,9 +550,8 @@
     $("closeWorkflowEditor").addEventListener("click", function () { state.editor = null; window.RHMotion.closeModal("workflowEditorModal"); });
     $("cancelWorkflowEditor").addEventListener("click", function () { state.editor = null; window.RHMotion.closeModal("workflowEditorModal"); });
     $("workflowEditorModal").addEventListener("click", function (event) { if (event.target === this) window.RHMotion.closeModal("workflowEditorModal"); });
-    $("closeWorkflowJson").addEventListener("click", function () { window.RHMotion.closeModal("workflowJsonModal"); });
-    $("closeWorkflowJsonBottom").addEventListener("click", function () { window.RHMotion.closeModal("workflowJsonModal"); });
-    $("workflowJsonModal").addEventListener("click", function (event) { if (event.target === this) window.RHMotion.closeModal("workflowJsonModal"); });
+    $("saveWorkflowJson").addEventListener("click", saveWorkflowJson);
+    $("restoreWorkflowJson").addEventListener("click", restoreWorkflowJson);
     $("workflowConfigMode").addEventListener("change", function () {
       if (!state.configEditor) return;
       state.configEditor.mode = this.value === "manual" ? "manual" : "auto";
@@ -478,19 +563,24 @@
     $("closeWorkflowConfig").addEventListener("click", function () { state.configEditor = null; window.RHMotion.closeModal("workflowConfigModal"); });
     $("cancelWorkflowConfig").addEventListener("click", function () { state.configEditor = null; window.RHMotion.closeModal("workflowConfigModal"); });
     $("workflowConfigModal").addEventListener("click", function (event) { if (event.target === this) { state.configEditor = null; window.RHMotion.closeModal("workflowConfigModal"); } });
-    $("workflowConfigItems").addEventListener("input", function (event) {
+    $("workflowConfigModal").addEventListener("input", function (event) {
       var index = Number(event.target.dataset.configIndex);
       var editor = state.configEditor;
-      if (!editor || !Number.isInteger(index) || !editor.items[index]) return;
       var action = event.target.dataset.configAction;
+      if (!editor || !Number.isInteger(index) || !editor.items[index]) return;
       if (action === "label") editor.items[index].label = event.target.value;
       if (action === "options") editor.items[index].options = event.target.value.split(/[\n,]/).map(function (value) { return value.trim(); }).filter(Boolean);
+      if (action === "default") updateConfigDefault(event.target, index, editor);
     });
-    $("workflowConfigItems").addEventListener("change", function (event) {
+    $("workflowConfigModal").addEventListener("change", function (event) {
       var index = Number(event.target.dataset.configIndex);
       var editor = state.configEditor;
-      if (!editor || !Number.isInteger(index) || !editor.items[index]) return;
       var action = event.target.dataset.configAction;
+      if (!editor || !Number.isInteger(index) || !editor.items[index]) return;
+      if (action === "default") {
+        updateConfigDefault(event.target, index, editor);
+        return;
+      }
       if (action === "kind") {
         editor.items[index].kind = event.target.value;
         if (event.target.value !== "select") editor.items[index].options = [];
@@ -507,15 +597,9 @@
         renderConfigBuilder();
       }
     });
-    $("copyWorkflowJson").addEventListener("click", function () {
-      var content = $("workflowJsonContent").textContent;
-      if (!navigator.clipboard) return showToast("当前环境不支持复制，请手动选择 JSON", true);
-      navigator.clipboard.writeText(content).then(function () { showToast("JSON 已复制"); }).catch(function () { showToast("复制失败，请手动选择 JSON", true); });
-    });
     document.addEventListener("keydown", function (event) {
       if (event.key !== "Escape") return;
       window.RHMotion.closeModal("workflowEditorModal");
-      window.RHMotion.closeModal("workflowJsonModal");
       window.RHMotion.closeModal("workflowConfigModal");
     });
   }

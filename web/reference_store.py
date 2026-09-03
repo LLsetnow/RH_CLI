@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import quote, unquote
 
 
-VERSION = 3
+VERSION = 5
 DEFAULT_REFERENCE_ROOT = Path("/Users/apple/Documents/VideoMake/ref")
 
 REFERENCE_DEFINITIONS = (
@@ -76,12 +76,28 @@ def _normalise_reference(value: Any) -> dict[str, Any] | None:
         "kind_label": kind_label,
         "category": category,
         "tags": _tags(value.get("tags")),
+        "source_tags": _tags(value.get("source_tags", value.get("tags"))),
         "title": title,
         "text": text,
         "image_path": image_path,
         "audio_path": audio_path,
         "source_path": str(value.get("source_path") or "").strip(),
     }
+
+
+def _relative_path(value: Any, root: Path) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        try:
+            path = path.resolve().relative_to(root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"媒体路径必须位于媒体库根目录内：{path}") from exc
+    if ".." in path.parts:
+        raise ValueError("媒体路径不能跳出媒体库根目录。")
+    return str(path)
 
 
 class ReferenceStore:
@@ -172,6 +188,19 @@ class ReferenceStore:
             self.refresh(force=True)
         return self.source_paths()
 
+    def set_source_root(self, value: str | Path) -> Path:
+        root = Path(value).expanduser().resolve()
+        if not root.is_dir():
+            raise FileNotFoundError(f"媒体库根目录不存在：{root}")
+        with self._lock:
+            self.source_root = root
+            self._configured_source_paths = {
+                kind: (root / relative).resolve()
+                for kind, _, relative in REFERENCE_DEFINITIONS
+            }
+            self.refresh(force=True)
+        return root
+
     def _source_signature(self) -> tuple[dict[str, str], str]:
         signatures: dict[str, str] = {}
         digest = hashlib.sha256()
@@ -237,14 +266,20 @@ class ReferenceStore:
                 return
             title = current["title"]
             category = current_category or "未分类"
-            tags = [kind_label]
+            source_tags = _tags(current.get("tags") or [])
+            tags = list(source_tags)
+            if kind_label not in tags:
+                tags.insert(0, kind_label)
             if kind == "character" and " · " in title:
-                tags.append(title.split(" · ", 1)[0].strip())
+                inferred_tag = title.split(" · ", 1)[0].strip()
+                if inferred_tag and inferred_tag not in tags:
+                    tags.append(inferred_tag)
             elif current_parent and current_parent != title:
-                tags.append(current_parent)
+                if current_parent not in tags:
+                    tags.append(current_parent)
             source_key = self._source_key(source_path)
             references.append({
-                "id": _reference_id(
+                "id": current.get("id") or _reference_id(
                     kind,
                     source_key,
                     title,
@@ -256,6 +291,7 @@ class ReferenceStore:
                 "kind_label": kind_label,
                 "category": category,
                 "tags": _tags(tags),
+                "source_tags": source_tags,
                 "title": title,
                 "text": text,
                 "image_path": images[0] if images else "",
@@ -284,23 +320,34 @@ class ReferenceStore:
                 # A character document uses this level for the character name,
                 # while the other indexes use it for the actual resource.
                 current = {
+                    "id": "",
                     "title": current_parent,
                     "images": [],
                     "audio": [],
                     "prompt_lines": [],
+                    "tags": [],
                 }
                 continue
             if line.startswith("##### ") and kind == "character":
                 finish()
                 child_title = _clean_heading(line[6:])
                 current = {
+                    "id": "",
                     "title": f"{current_parent} · {child_title}" if current_parent else child_title,
                     "images": [],
                     "audio": [],
                     "prompt_lines": [],
+                    "tags": [],
                 }
                 continue
             if not current:
+                continue
+            if re.match(r"^tags\s*:", line, re.IGNORECASE):
+                current["tags"].extend(_tags(line.split(":", 1)[1]))
+                continue
+            id_match = re.match(r"^id\s*[:：]\s*(.*)$", line, re.IGNORECASE)
+            if id_match:
+                current["id"] = id_match.group(1).strip()
                 continue
             images, audio = self._media_links(line)
             current["images"].extend(path for path in images if path not in current["images"])
@@ -377,8 +424,8 @@ class ReferenceStore:
                 item = copy.deepcopy(reference)
                 image_available = self.media_path(reference["id"], "image") is not None
                 audio_available = self.media_path(reference["id"], "audio") is not None
-                item.pop("image_path", None)
-                item.pop("audio_path", None)
+                item["image_path"] = str(reference.get("image_path") or "")
+                item["audio_path"] = str(reference.get("audio_path") or "")
                 item.pop("source_path", None)
                 item["image_available"] = image_available
                 item["audio_available"] = audio_available
@@ -387,6 +434,117 @@ class ReferenceStore:
                 item["media_type"] = "image" if image_available else ("audio" if audio_available else "text")
                 result.append(item)
             return result
+
+    def _write_source(self, kind: str, references: list[dict[str, Any]]) -> None:
+        source_path = self._configured_source_paths[kind]
+        kind_label = next(label for entry_kind, label, _ in REFERENCE_DEFINITIONS if entry_kind == kind)
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"# {kind_label}参考索引", "", f"## {kind}", ""]
+        last_category = None
+        for reference in references:
+            category = str(reference.get("category") or "未分类").strip() or "未分类"
+            if category != last_category:
+                if last_category is not None:
+                    lines.append("")
+                lines.extend([f"### {category}", ""])
+                last_category = category
+            lines.extend([
+                f"#### {str(reference.get('title') or '').strip()}",
+                f"id: {str(reference.get('id') or '').strip()}",
+            ])
+            tags = _tags(reference.get("source_tags", reference.get("tags")))
+            if tags:
+                lines.append("tags: " + ", ".join(tags))
+            image_path = str(reference.get("image_path") or "").strip()
+            audio_path = str(reference.get("audio_path") or "").strip()
+            if image_path:
+                lines.append(f"![200]({image_path})")
+            if audio_path:
+                lines.append(f"[音频文件]({audio_path})")
+            for prompt_line in str(reference.get("text") or "").strip().splitlines():
+                lines.append("> " + prompt_line)
+            lines.append("")
+        temporary = source_path.with_name(f".{source_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            temporary.replace(source_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def add_reference(self, kind: str, value: dict[str, Any]) -> dict[str, Any]:
+        allowed = {entry_kind for entry_kind, _, _ in REFERENCE_DEFINITIONS}
+        kind = str(kind or "").strip()
+        if kind not in allowed:
+            raise ValueError(f"未知的参考资源类型：{kind}")
+        if not isinstance(value, dict):
+            raise ValueError("参考资源内容必须是对象。")
+        payload = dict(value)
+        payload["kind"] = kind
+        payload["kind_label"] = next(label for entry_kind, label, _ in REFERENCE_DEFINITIONS if entry_kind == kind)
+        payload["image_path"] = _relative_path(payload.get("image_path"), self.source_root)
+        payload["audio_path"] = _relative_path(payload.get("audio_path"), self.source_root)
+        payload["title"] = str(payload.get("title") or "").strip()
+        payload["text"] = str(payload.get("text") or "").strip()
+        payload["category"] = str(payload.get("category") or "未分类").strip() or "未分类"
+        payload["source_tags"] = _tags(payload.get("tags"))
+        if not payload["title"] or not payload["text"] and not payload["image_path"] and not payload["audio_path"]:
+            raise ValueError("参考资源名称以及媒体或文本内容不能为空。")
+        payload["id"] = str(payload.get("id") or _reference_id(
+            kind,
+            self._source_key(self._configured_source_paths[kind]),
+            payload["title"],
+            category=payload["category"],
+            image_path=payload["image_path"],
+            audio_path=payload["audio_path"],
+        )).strip()
+        if any(item["id"] == payload["id"] for item in self._references):
+            raise ValueError("参考资源 ID 已存在。")
+        normalised = _normalise_reference(payload)
+        if not normalised:
+            raise ValueError("参考资源内容不完整。")
+        with self._lock:
+            entries = [item for item in self._references if item["kind"] == kind]
+            entries.append(normalised)
+            self._write_source(kind, entries)
+            self.refresh(force=True)
+            return copy.deepcopy(self._find(normalised["id"]))
+
+    def update_reference(self, reference_id: str, value: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            current = self._find(reference_id)
+            if not current:
+                raise KeyError(f"找不到参考资源：{reference_id}")
+            kind = current["kind"]
+            payload = dict(current)
+            payload.update(value if isinstance(value, dict) else {})
+            payload["id"] = reference_id
+            payload["kind"] = kind
+            payload["kind_label"] = current.get("kind_label") or kind
+            payload["image_path"] = _relative_path(payload.get("image_path"), self.source_root)
+            payload["audio_path"] = _relative_path(payload.get("audio_path"), self.source_root)
+            payload["title"] = str(payload.get("title") or "").strip()
+            payload["text"] = str(payload.get("text") or "").strip()
+            payload["category"] = str(payload.get("category") or "未分类").strip() or "未分类"
+            if isinstance(value, dict) and "tags" in value:
+                payload["source_tags"] = _tags(value.get("tags"))
+            normalised = _normalise_reference(payload)
+            if not normalised:
+                raise ValueError("参考资源名称以及媒体或文本内容不能为空。")
+            entries = [normalised if item["id"] == reference_id else item for item in self._references if item["kind"] == kind]
+            self._write_source(kind, entries)
+            self.refresh(force=True)
+            return copy.deepcopy(self._find(reference_id))
+
+    def delete_reference(self, reference_id: str) -> None:
+        with self._lock:
+            current = self._find(reference_id)
+            if not current:
+                raise KeyError(f"找不到参考资源：{reference_id}")
+            kind = current["kind"]
+            entries = [item for item in self._references if item["kind"] == kind and item["id"] != reference_id]
+            self._write_source(kind, entries)
+            self.refresh(force=True)
 
     def kind_counts(self) -> dict[str, int]:
         with self._lock:

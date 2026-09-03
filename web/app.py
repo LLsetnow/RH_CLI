@@ -38,7 +38,7 @@ from rh_cli.workflow.client import (
     _upload_file,
     _validate_api_workflow,
 )
-from .telegram import TelegramNotifier
+from .telegram import TelegramDeliveryError, TelegramNotifier
 
 
 WEB_ROOT = Path(__file__).resolve().parent
@@ -83,7 +83,10 @@ RESOLUTION_ASPECT_RATIOS = (
 DEFAULT_PERSONAL_CAPACITY = 3
 MIN_PERSONAL_CAPACITY = 1
 MAX_PERSONAL_CAPACITY = 3
+DEFAULT_API_KEY_STRATEGY = "personal_then_shared"
+API_KEY_STRATEGIES = {"personal_only", "personal_then_shared", "shared_only"}
 WORKFLOW_META_KEY = "__rh_meta__"
+PROMPT_GROUP_SNAPSHOT_FILENAME = "prompt_group.json"
 GENERAL_ACCOUNT_ID = "__general__"
 UNBOUND_ACCOUNT_ID = "__unbound__"
 INSTANCE_TYPES = {"default", "plus", "ultra"}
@@ -163,16 +166,17 @@ end try
     return path
 
 
-def pick_local_directory_on_macos() -> Path | None:
+def pick_local_directory_on_macos(prompt: str = "选择默认产物目录") -> Path | None:
     """Use the macOS native picker to select a directory without reading its contents."""
     if platform.system() != "Darwin":
         raise RhCliError("LOCAL_PICKER_UNAVAILABLE", "本机路径选择目前仅支持 macOS；请手动填写绝对路径。")
     if shutil.which("osascript") is None:
         raise RhCliError("LOCAL_PICKER_UNAVAILABLE", "本机没有可用的 macOS 文件选择器，请手动填写绝对路径。")
 
-    script = r'''
+    safe_prompt = str(prompt or "选择文件夹").replace("\\", "\\\\").replace('"', '\\"')
+    script = f'''
 try
-    set pickedFolder to choose folder with prompt "选择默认产物目录"
+    set pickedFolder to choose folder with prompt "{safe_prompt}"
     return POSIX path of pickedFolder
 on error number -128
     return ""
@@ -250,10 +254,27 @@ def personal_capacity_value(value: Any) -> int:
     return DEFAULT_PERSONAL_CAPACITY
 
 
+def is_shared_api_key_type(api_type: Any) -> bool:
+    """Return whether RunningHub identified a Key as shared/enterprise tier."""
+    normalized = str(api_type or "").strip().lower()
+    return any(label in normalized for label in (
+        "enterprise", "shared", "wallet", "team", "organization", "企业", "共享", "钱包",
+    ))
+
+
+def normalize_api_key_strategy(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in API_KEY_STRATEGIES:
+        return normalized
+    raise RhCliError(
+        "INVALID_API_KEY_STRATEGY",
+        "API Key 调度策略只能是 personal_only、personal_then_shared 或 shared_only。",
+    )
+
+
 def key_capacity(api_type: str, personal_capacity: int = DEFAULT_PERSONAL_CAPACITY) -> int:
     """Return the local scheduler cap for the RunningHub account type."""
-    normalized = str(api_type or "").lower()
-    return 100 if any(label in normalized for label in ("enterprise", "shared", "wallet")) else personal_capacity_value(personal_capacity)
+    return 100 if is_shared_api_key_type(api_type) else personal_capacity_value(personal_capacity)
 
 
 def mask_key(value: str) -> str:
@@ -475,10 +496,13 @@ def workflow_input_catalog(workflow: dict[str, Any], analysis: dict[str, Any] | 
                 continue
             input_id = f"{node_id}:{field}"
             automatic_item = automatic.get(input_id, {})
+            kind = automatic_item.get("kind")
+            if not kind:
+                kind = "boolean" if isinstance(value, bool) else "number" if isinstance(value, (int, float)) else "text"
             catalog.append({
                 "id": input_id, "node_id": str(node_id), "field": str(field), "title": title,
                 "class_type": class_type, "label": f"{title} · {field}",
-                "kind": automatic_item.get("kind", "text"),
+                "kind": kind,
                 "required": automatic_item.get("required", False), "default": display_value(value),
                 "default_value": value,
             })
@@ -557,10 +581,50 @@ def normalize_workflow_input_config(
             "kind": kind,
             "required": bool(raw.get("required", (entry or {}).get("required", False))),
             "options": options,
+            "default": display_value(
+                raw.get("default") if "default" in raw else (
+                    (nodes[node_id].get("inputs") or {}).get(field) if field else ""
+                )
+            ),
             "virtual": bool((entry or {}).get("virtual")),
             "order": position,
         })
     return {"mode": "manual", "items": items}
+
+
+def apply_workflow_input_defaults(workflow: dict[str, Any], defaults: Any) -> None:
+    """Write editable scalar input defaults back into a workflow JSON object."""
+    if defaults is None:
+        return
+    if not isinstance(defaults, list):
+        raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", "工作流输入默认值必须是列表。")
+    nodes = workflow_nodes(workflow)
+    seen: set[str] = set()
+    for position, raw in enumerate(defaults):
+        if not isinstance(raw, dict):
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"第 {position + 1} 个默认值不是对象。")
+        node_id = str(raw.get("node_id") or "").strip()
+        field = str(raw.get("field") or "").strip()
+        input_id = f"{node_id}:{field}"
+        if not node_id or not field:
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"第 {position + 1} 个默认值缺少节点或字段。")
+        if input_id in seen:
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"输入默认值重复：{input_id}")
+        seen.add(input_id)
+        node = nodes.get(node_id)
+        if not isinstance(node, dict):
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"找不到输入配置节点：{node_id}")
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict) or field not in inputs:
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"找不到输入字段：{input_id}")
+        if is_link(inputs[field]):
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"不能修改连线输入的默认值：{input_id}")
+        if "default" not in raw:
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"输入默认值缺少 default：{input_id}")
+        value = raw["default"]
+        if isinstance(value, (list, dict, tuple)):
+            raise RhCliError("INVALID_WORKFLOW_INPUT_DEFAULTS", f"输入默认值必须是标量：{input_id}")
+        inputs[field] = value
 
 
 def configured_workflow_analysis(
@@ -612,6 +676,84 @@ def configured_workflow_analysis(
         "input_mode": "manual",
     })
     return result
+
+
+def apply_default_file_inputs(
+    workflow: dict[str, Any],
+    analysis: dict[str, Any],
+    files: dict[str, str] | None,
+    bypassed_nodes: set[str],
+    workflow_path: Path,
+) -> dict[str, str]:
+    """Keep optional file inputs on their workflow defaults when not overridden.
+
+    A configured optional input means "do not require a replacement from the
+    current task", not "remove the input from the API workflow". Local default
+    paths still need to be uploaded before submission to RunningHub.
+    """
+    resolved = dict(files or {})
+    for item in analysis.get("file_inputs") or []:
+        if not isinstance(item, dict) or bool(item.get("required", True)):
+            continue
+        input_id = str(item.get("id") or "").strip()
+        node_id = str(item.get("node_id") or "").strip()
+        field = str(item.get("field") or "").strip()
+        if not input_id or not node_id or not field or node_id in bypassed_nodes:
+            continue
+        if str(resolved.get(input_id) or "").strip():
+            continue
+        node = workflow.get(node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        default_value = inputs.get(field) if isinstance(inputs, dict) else None
+        if not isinstance(default_value, str) or not default_value.strip():
+            continue
+        default_path = Path(default_value).expanduser()
+        is_absolute_default = default_path.is_absolute()
+        if not default_path.is_absolute():
+            default_path = workflow_path.parent / default_path
+        default_path = default_path.resolve()
+        if default_path.is_file():
+            resolved[input_id] = str(default_path)
+        elif is_absolute_default:
+            raise RhCliError("FILE_NOT_FOUND", f"工作流默认输入文件不存在：{default_path}")
+    return resolved
+
+
+def telegram_inbound_file_input(detail: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the only required image input used by Telegram image intake."""
+    workflow = detail.get("workflow") if isinstance(detail, dict) else None
+    record = detail.get("record") if isinstance(detail, dict) else None
+    if not isinstance(workflow, dict) or not isinstance(record, dict):
+        raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "Telegram 入站工作流资料不完整。")
+
+    analysis = configured_workflow_analysis(workflow, record.get("input_config"))
+    required_inputs: list[tuple[str, dict[str, Any]]] = []
+    for kind, key in (
+        ("file", "file_inputs"),
+        ("prompt", "prompt_inputs"),
+        ("custom", "custom_inputs"),
+        ("resolution", "resolution_inputs"),
+        ("random_noise", "random_noise_inputs"),
+    ):
+        required_inputs.extend(
+            (kind, item)
+            for item in analysis.get(key) or []
+            if isinstance(item, dict) and bool(item.get("required"))
+        )
+
+    if len(required_inputs) != 1 or required_inputs[0][0] != "file":
+        raise RhCliError(
+            "INVALID_TELEGRAM_INBOUND_WORKFLOW",
+            "Telegram 图片入站要求工作流恰好有一个必填输入节点，且该节点必须是图片节点；其他输入请设为非必填。",
+        )
+    file_input = required_inputs[0][1]
+    class_type = str(file_input.get("class_type") or "").lower()
+    if "loadimage" not in class_type and "image" not in str(file_input.get("field") or "").lower():
+        raise RhCliError(
+            "INVALID_TELEGRAM_INBOUND_WORKFLOW",
+            "Telegram 图片入站的唯一必填输入节点必须是图片节点。",
+        )
+    return file_input
 
 
 def normalize_custom_input_values(
@@ -872,6 +1014,7 @@ class LocalStore:
               dispatch_key_name TEXT NOT NULL DEFAULT '',
               dispatch_key_site TEXT NOT NULL DEFAULT '',
               dispatch_key_api_type TEXT NOT NULL DEFAULT '',
+              submission_source TEXT NOT NULL DEFAULT 'local',
               remote_task_id TEXT,
               remote_workflow_id TEXT NOT NULL DEFAULT '',
               input_json TEXT NOT NULL,
@@ -900,6 +1043,7 @@ class LocalStore:
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
               account_id TEXT NOT NULL DEFAULT '',
+              site TEXT NOT NULL DEFAULT '',
               started_at INTEGER,
               completed_at INTEGER,
               status TEXT NOT NULL,
@@ -922,6 +1066,17 @@ class LocalStore:
             )
             """
         )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_inbound_updates (
+              update_id INTEGER PRIMARY KEY,
+              received_at INTEGER NOT NULL,
+              status TEXT NOT NULL DEFAULT '',
+              task_id TEXT NOT NULL DEFAULT '',
+              detail TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         self._migrate_schema()
         self._db.commit()
         self._interrupt_incomplete()
@@ -936,6 +1091,12 @@ class LocalStore:
             self._db.execute("ALTER TABLE tasks ADD COLUMN error_detail TEXT NOT NULL DEFAULT '{}'")
         if "stage_logs_json" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN stage_logs_json TEXT NOT NULL DEFAULT '[]'")
+        if "submission_source" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN submission_source TEXT NOT NULL DEFAULT 'local'")
+            self._db.execute(
+                "UPDATE tasks SET submission_source='telegram' "
+                "WHERE stage_logs_json LIKE '%已从 Telegram 接收图片并提交工作流%'"
+            )
         if "random_noise_json" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN random_noise_json TEXT NOT NULL DEFAULT '{}'")
         if "resolution_json" not in columns:
@@ -961,6 +1122,8 @@ class LocalStore:
         usage_columns = {str(row[1]) for row in self._db.execute("PRAGMA table_info(usage_records)").fetchall()}
         if "account_id" not in usage_columns:
             self._db.execute("ALTER TABLE usage_records ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+        if "site" not in usage_columns:
+            self._db.execute("ALTER TABLE usage_records ADD COLUMN site TEXT NOT NULL DEFAULT ''")
         self._backfill_dispatch_credential_snapshots()
 
     def _infer_key_account_id(self, key: dict[str, Any], accounts: list[dict[str, Any]]) -> str:
@@ -1336,6 +1499,28 @@ class LocalStore:
         self._write_json_file(data)
         return str(path)
 
+    def media_library_root(self) -> str:
+        value = self._read_json_file().get("media_library_root")
+        if isinstance(value, str) and value.strip():
+            return str(Path(value).expanduser().resolve())
+        return ""
+
+    def set_media_library_root(self, value: str) -> str:
+        raw_path = str(value or "").strip()
+        if not raw_path:
+            raise RhCliError("INVALID_MEDIA_LIBRARY_ROOT", "媒体库 ref 文件夹不能为空。")
+        path = Path(raw_path).expanduser().resolve()
+        if not path.is_dir():
+            raise RhCliError("INVALID_MEDIA_LIBRARY_ROOT", f"媒体库 ref 文件夹不存在：{path}")
+        data = self._read_json_file()
+        data["media_library_root"] = str(path)
+        # The single root is now authoritative; leave the old setters available
+        # for older clients, but prevent stale paths from taking precedence.
+        data.pop("action_resources_path", None)
+        data.pop("reference_resources_paths", None)
+        self._write_json_file(data)
+        return str(path)
+
     def prompt_library_path(self) -> str:
         value = self._read_json_file().get("prompt_library_path")
         if isinstance(value, str) and value.strip():
@@ -1398,6 +1583,21 @@ class LocalStore:
     def personal_capacity(self) -> int:
         return personal_capacity_value(self._read_json_file().get("personal_capacity", DEFAULT_PERSONAL_CAPACITY))
 
+    def api_key_strategy(self) -> str:
+        value = self._read_json_file().get("api_key_strategy", DEFAULT_API_KEY_STRATEGY)
+        try:
+            return normalize_api_key_strategy(value)
+        except RhCliError:
+            return DEFAULT_API_KEY_STRATEGY
+
+    def set_api_key_strategy(self, value: Any) -> str:
+        strategy = normalize_api_key_strategy(value)
+        data = self._read_json_file()
+        data["api_key_strategy"] = strategy
+        data.setdefault("output_dir", str(default_local_output_dir()))
+        self._write_json_file(data)
+        return strategy
+
     def set_personal_capacity(self, value: Any) -> int:
         try:
             capacity = int(str(value).strip())
@@ -1448,6 +1648,33 @@ class LocalStore:
         self._write_json_file(data)
         return self.aliyun_translation_settings()
 
+    def aliyun_vision_api_key(self) -> str:
+        """Return the local DashScope key, falling back to the standard environment variable."""
+        data = self._read_json_file()
+        local_key = str(data.get("aliyun_vision_api_key") or "").strip()
+        return local_key or str(os.environ.get("DASHSCOPE_API_KEY") or os.environ.get("ALIYUN_VISION_API_KEY") or "").strip()
+
+    def aliyun_vision_settings(self) -> dict[str, Any]:
+        data = self._read_json_file()
+        local_key = str(data.get("aliyun_vision_api_key") or "").strip()
+        environment_key = str(os.environ.get("DASHSCOPE_API_KEY") or os.environ.get("ALIYUN_VISION_API_KEY") or "").strip()
+        key = local_key or environment_key
+        return {
+            "configured": bool(key),
+            "api_key_hint": mask_key(key) if key else "",
+            "model": "qwen-vl-max",
+            "source": "local" if local_key else "environment" if environment_key else "",
+        }
+
+    def set_aliyun_vision_api_key(self, api_key: str) -> dict[str, Any]:
+        api_key = str(api_key or "").strip()
+        if not api_key:
+            raise RhCliError("INVALID_VISION_CREDENTIALS", "阿里云百炼 API Key 不能为空。")
+        data = self._read_json_file()
+        data["aliyun_vision_api_key"] = api_key
+        self._write_json_file(data)
+        return self.aliyun_vision_settings()
+
     def telegram_settings(self) -> dict[str, Any]:
         return TelegramNotifier(self).settings()
 
@@ -1470,11 +1697,38 @@ class LocalStore:
         self._write_json_file(data)
         return self.telegram_settings()
 
+    def set_telegram_inbound_settings(self, workflow_id: str, enabled: Any) -> dict[str, Any]:
+        workflow_id = str(workflow_id or "").strip()
+        enabled_value = str(enabled or "").strip().lower() in {"1", "true", "yes", "on"} if isinstance(enabled, str) else bool(enabled)
+        data = self._read_json_file()
+        if enabled_value:
+            token = str(data.get("telegram_bot_token") or os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
+            chat_id = str(data.get("telegram_chat_id") or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
+            if not token or not chat_id:
+                raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用图片入站前请先配置 Bot Token 和 Chat ID。")
+            if not workflow_id:
+                raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "请先选择 Telegram 入站工作流。")
+            detail = self.workflow_detail(workflow_id)
+            record = detail["record"]
+            if not str(record.get("account_id") or "").strip():
+                raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "Telegram 入站工作流必须先绑定账号。")
+            file_input = telegram_inbound_file_input(detail)
+            data["telegram_inbound_workflow_id"] = workflow_id
+            data["telegram_inbound_file_input_id"] = str(file_input.get("id") or "")
+        elif workflow_id:
+            data["telegram_inbound_workflow_id"] = workflow_id
+        data["telegram_inbound_enabled"] = enabled_value
+        self._write_json_file(data)
+        return self.telegram_settings()
+
     def clear_telegram_settings(self) -> dict[str, Any]:
         data = self._read_json_file()
         data.pop("telegram_bot_token", None)
         data.pop("telegram_chat_id", None)
         data["telegram_enabled"] = False
+        data.pop("telegram_inbound_workflow_id", None)
+        data.pop("telegram_inbound_file_input_id", None)
+        data["telegram_inbound_enabled"] = False
         self._write_json_file(data)
         return self.telegram_settings()
 
@@ -1532,6 +1786,7 @@ class LocalStore:
         account_id: str = "",
         remote_workflow_id: str = "",
         source_dir: str = "",
+        input_config: dict[str, Any] | None = None,
         register: bool = True,
     ) -> tuple[str, Path, dict[str, Any]]:
         try:
@@ -1566,6 +1821,7 @@ class LocalStore:
         account = self.get_account(account_id) if account_id else None
         if account_id and not account:
             raise RhCliError("ACCOUNT_NOT_FOUND", "找不到该工作流所属账号。")
+        normalized_input_config = normalize_workflow_input_config(workflow, input_config)
         if account_id:
             metadata["accountId"] = account_id
             workflow[WORKFLOW_META_KEY] = metadata
@@ -1584,6 +1840,7 @@ class LocalStore:
                     "source_dir": str(source_dir or "").strip(),
                     "created_at": now_ms(),
                     "updated_at": now_ms(),
+                    "input_config": normalized_input_config,
                 }
             )
         return workflow_id, path, analysis
@@ -1684,6 +1941,21 @@ class LocalStore:
         detail = self.workflow_detail(workflow_id)
         current = detail["record"]
         workflow = detail["workflow"]
+        if "content" in changes:
+            raw_content = changes.get("content")
+            if isinstance(raw_content, dict):
+                candidate = raw_content
+            else:
+                try:
+                    candidate = json.loads(str(raw_content or ""))
+                except (TypeError, ValueError) as exc:
+                    raise RhCliError("INVALID_WORKFLOW", "工作流 JSON 格式无效。") from exc
+            if not isinstance(candidate, dict):
+                raise RhCliError("INVALID_WORKFLOW", "工作流顶层必须是 API 格式节点字典。")
+            inspect_workflow(candidate)
+            workflow = candidate
+        if "input_defaults" in changes:
+            apply_workflow_input_defaults(workflow, changes.get("input_defaults"))
         account_id = str(changes["account_id"]).strip() if "account_id" in changes else str(current.get("account_id") or "")
         account = self.get_account(account_id) if account_id else None
         if account_id and not account:
@@ -1733,6 +2005,12 @@ class LocalStore:
             raise RhCliError("WORKFLOW_DELETE_FAILED", f"删除工作流失败：{path}") from exc
         records = [item for item in self._read_workflow_registry() if str(item.get("id") or "") != str(workflow_id)]
         self._write_workflow_registry(records)
+        data = self._read_json_file()
+        if str(data.get("telegram_inbound_workflow_id") or "").strip() == str(workflow_id):
+            data.pop("telegram_inbound_workflow_id", None)
+            data.pop("telegram_inbound_file_input_id", None)
+            data["telegram_inbound_enabled"] = False
+            self._write_json_file(data)
 
     @staticmethod
     def task_snapshot_path(task: dict[str, Any]) -> Path:
@@ -1774,7 +2052,7 @@ class LocalStore:
         except OSError:
             candidates = []
         for path in candidates:
-            if not path.is_file() or path.name == "workflow_api.json" or path.name.endswith(".json.tmp") or path.name.startswith("."):
+            if not path.is_file() or path.name in {"workflow_api.json", PROMPT_GROUP_SNAPSHOT_FILENAME} or path.name.endswith(".json.tmp") or path.name.startswith("."):
                 continue
             resolved = path.resolve()
             if resolved in known_paths:
@@ -1801,6 +2079,48 @@ class LocalStore:
         temporary.write_text(json.dumps(workflow, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(snapshot_path)
         return snapshot_path
+
+    def task_prompt_group_snapshot_path(self, task: dict[str, Any]) -> Path:
+        return self.task_output_path(task) / PROMPT_GROUP_SNAPSHOT_FILENAME
+
+    def save_task_prompt_group_snapshot(self, task: dict[str, Any], group: dict[str, Any]) -> Path:
+        if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+            raise RhCliError("INVALID_PROMPT_GROUP", "当前提示词组状态格式无效，无法保存任务快照。")
+        snapshot_path = self.task_prompt_group_snapshot_path(task)
+        if not snapshot_path.parent.name or not snapshot_path.parent.parent:
+            raise RhCliError("INVALID_OUTPUT_DIR", "任务输出目录无效，无法保存提示词组状态快照。")
+        document = {
+            "version": 1,
+            "group": {
+                "id": str(group.get("id") or "").strip(),
+                "name": str(group.get("name") or "任务提交时组装台").strip() or "任务提交时组装台",
+                "updated_at": int(group.get("updated_at") or now_ms()),
+                "items": group["items"],
+            },
+        }
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = snapshot_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(snapshot_path)
+        return snapshot_path
+
+    def load_task_prompt_group_snapshot(self, task: dict[str, Any]) -> dict[str, Any] | None:
+        snapshot_path = self.task_prompt_group_snapshot_path(task)
+        if not snapshot_path.is_file():
+            return None
+        try:
+            document = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        group = document.get("group") if isinstance(document, dict) else None
+        if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+            return None
+        return {
+            "id": str(group.get("id") or "").strip(),
+            "name": str(group.get("name") or "任务提交时组装台").strip() or "任务提交时组装台",
+            "updated_at": int(group.get("updated_at") or 0),
+            "items": group["items"],
+        }
 
     def task_workflow_path(self, task: dict[str, Any]) -> Path:
         snapshot_path = self.task_snapshot_path(task)
@@ -1842,6 +2162,7 @@ class LocalStore:
             "workflow": workflow,
             "analysis": configured_workflow_analysis(workflow, task.get("input_config")),
             "input_config": task.get("input_config"),
+            "prompt_group": self.load_task_prompt_group_snapshot(task),
             "task": task,
         }
 
@@ -1860,6 +2181,7 @@ class LocalStore:
             "dispatch_key_name": str(task.get("dispatch_key_name") or "").strip(),
             "dispatch_key_site": str(task.get("dispatch_key_site") or "").strip(),
             "dispatch_key_api_type": str(task.get("dispatch_key_api_type") or "").strip(),
+            "submission_source": "telegram" if str(task.get("submission_source") or "").strip().lower() == "telegram" else "local",
             "remote_task_id": None,
             "remote_workflow_id": str(task.get("remote_workflow_id") or "").strip(),
             "input_json": json.dumps(task["files"], ensure_ascii=False),
@@ -1891,9 +2213,9 @@ class LocalStore:
         }
         with self._lock:
             self._db.execute(
-                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,account_id,instance_type,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,remote_task_id,remote_workflow_id,"
+                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,account_id,instance_type,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,submission_source,remote_task_id,remote_workflow_id,"
                 "input_json,prompt_json,custom_json,input_config_json,bypass_json,random_noise_json,resolution_json,workflow_snapshot_path,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
-                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:account_id,:instance_type,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:remote_task_id,:remote_workflow_id,"
+                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:account_id,:instance_type,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:submission_source,:remote_task_id,:remote_workflow_id,"
                 ":input_json,:prompt_json,:custom_json,:input_config_json,:bypass_json,:random_noise_json,:resolution_json,:workflow_snapshot_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
                 fields,
             )
@@ -1918,7 +2240,7 @@ class LocalStore:
 
     def _sync_usage_record_locked(self, task_id: str) -> None:
         row = self._db.execute(
-            "SELECT id, created_at, updated_at, account_id, started_at, completed_at, status, workflow_name, cost_type, cost, duration, outputs_json FROM tasks WHERE id=?",
+            "SELECT id, created_at, updated_at, account_id, dispatch_key_site, started_at, completed_at, status, workflow_name, cost_type, cost, duration, outputs_json FROM tasks WHERE id=?",
             (task_id,),
         ).fetchone()
         if not row:
@@ -1930,16 +2252,21 @@ class LocalStore:
         output_count = len(outputs) if isinstance(outputs, list) else 0
         task = dict(row)
         elapsed_ms = task_elapsed_ms(task)
+        site = str(row["dispatch_key_site"] or "").strip()
+        if site not in {"cn", "ai"}:
+            account = self.get_account(str(row["account_id"] or "").strip())
+            site = str(account.get("site") or "").strip() if account else ""
         self._db.execute(
             """
             INSERT INTO usage_records (
-              task_id, created_at, updated_at, account_id, started_at, completed_at, status,
+              task_id, created_at, updated_at, account_id, site, started_at, completed_at, status,
               workflow_name, cost_type, cost, duration, elapsed_ms, output_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
               created_at=excluded.created_at,
               updated_at=excluded.updated_at,
               account_id=excluded.account_id,
+              site=excluded.site,
               started_at=excluded.started_at,
               completed_at=excluded.completed_at,
               status=excluded.status,
@@ -1955,6 +2282,7 @@ class LocalStore:
                 int(row["created_at"] or 0),
                 int(row["updated_at"] or 0),
                 str(row["account_id"] or "").strip(),
+                site,
                 row["started_at"],
                 row["completed_at"],
                 str(row["status"] or ""),
@@ -2020,6 +2348,23 @@ class LocalStore:
             self._db.execute(
                 "INSERT OR IGNORE INTO telegram_deliveries (task_id, delivery_key, sent_at) VALUES (?, ?, ?)",
                 (str(task_id), str(delivery_key), now_ms()),
+            )
+            self._db.commit()
+
+    def claim_telegram_inbound_update(self, update_id: int) -> bool:
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT OR IGNORE INTO telegram_inbound_updates (update_id, received_at, status) VALUES (?, ?, ?)",
+                (int(update_id), now_ms(), "processing"),
+            )
+            self._db.commit()
+        return cursor.rowcount == 1
+
+    def finish_telegram_inbound_update(self, update_id: int, status: str, task_id: str = "", detail: str = "") -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE telegram_inbound_updates SET status=?, task_id=?, detail=? WHERE update_id=?",
+                (str(status or "")[:40], str(task_id or "")[:120], str(detail or "")[:500], int(update_id)),
             )
             self._db.commit()
 
@@ -2133,6 +2478,43 @@ class LocalStore:
             )
             self._db.commit()
 
+    def recent_logs(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Flatten persisted task stage logs for the local platform log viewer."""
+        try:
+            requested = int(limit)
+        except (TypeError, ValueError):
+            requested = 500
+        requested = max(1, min(requested, 2000))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, workflow_name, stage_logs_json, updated_at FROM tasks"
+            ).fetchall()
+        logs: list[dict[str, Any]] = []
+        for row in rows:
+            task_id = str(row[0] or "")
+            workflow_name = canonical_workflow_name(row[1] or "workflow.json")
+            try:
+                entries = json.loads(row[2] or "[]")
+            except (TypeError, ValueError):
+                entries = []
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                logs.append(
+                    {
+                        "at": int(entry.get("at") or row[3] or 0),
+                        "level": str(entry.get("level") or "info").lower(),
+                        "stage": str(entry.get("stage") or "task"),
+                        "message": str(entry.get("message") or ""),
+                        "task_id": task_id,
+                        "task_name": workflow_name,
+                    }
+                )
+        logs.sort(key=lambda item: int(item.get("at") or 0))
+        return logs[-requested:]
+
     def set_error_detail(self, task_id: str, detail: Any) -> None:
         self.update_task(task_id, error_detail=detail_json(detail))
 
@@ -2172,7 +2554,7 @@ class LocalStore:
     def usage_records(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT task_id, created_at, updated_at, account_id, started_at, completed_at, status, workflow_name, cost_type, cost, duration, elapsed_ms, output_count "
+                "SELECT task_id, created_at, updated_at, account_id, site, started_at, completed_at, status, workflow_name, cost_type, cost, duration, elapsed_ms, output_count "
                 "FROM usage_records ORDER BY created_at DESC"
             ).fetchall()
         return [dict(row) for row in rows]
@@ -2195,26 +2577,144 @@ class TaskManager:
         self._executor = ThreadPoolExecutor(max_workers=100, thread_name_prefix="rh-web")
         self._telegram_notifier = TelegramNotifier(store)
         self._telegram_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rh-telegram")
+        self._telegram_upload_lock = threading.Lock()
+        self._telegram_uploading: set[tuple[str, int]] = set()
         self._recover_tasks_on_startup()
         self._dispatcher = threading.Thread(target=self._dispatch_loop, name="rh-web-dispatcher", daemon=True)
         self._dispatcher.start()
+        self._telegram_inbound = threading.Thread(target=self._telegram_inbound_loop, name="rh-telegram-inbound", daemon=True)
+        self._telegram_inbound.start()
 
     def close(self) -> None:
         self._stop.set()
         self._wake.set()
         self._dispatcher.join(timeout=1.5)
+        self._telegram_inbound.join(timeout=1.5)
         self._executor.shutdown(wait=False, cancel_futures=False)
         self._telegram_executor.shutdown(wait=False, cancel_futures=False)
 
     def test_telegram_connection(self) -> dict[str, Any]:
         return self._telegram_notifier.test_connection()
 
-    def _queue_telegram_delivery(self, task_id: str, outputs: list[dict[str, Any]]) -> None:
-        self._telegram_executor.submit(self._deliver_telegram_outputs, task_id, list(outputs))
+    def _telegram_switchable_workflows(self) -> list[dict[str, str]]:
+        """Return workflows that can accept one required Telegram image input."""
+        result: list[dict[str, str]] = []
+        for record in self.store.workflows():
+            workflow_id = str(record.get("id") or "").strip()
+            if not workflow_id or not str(record.get("account_id") or "").strip():
+                continue
+            try:
+                detail = self.store.workflow_detail(workflow_id)
+                telegram_inbound_file_input(detail)
+            except (RhCliError, OSError, ValueError):
+                continue
+            name = str(record.get("name") or workflow_id).strip() or workflow_id
+            account_name = str(record.get("account_name") or "").strip()
+            result.append({"id": workflow_id, "name": name, "account_name": account_name})
+        return result
 
-    def _deliver_telegram_outputs(self, task_id: str, outputs: list[dict[str, Any]]) -> None:
+    @staticmethod
+    def _telegram_switch_menu(
+        workflows: list[dict[str, str]], current_workflow_id: str = "",
+    ) -> tuple[str, dict[str, Any] | None]:
+        current_id = str(current_workflow_id or "").strip()
+        current = next((item for item in workflows if item.get("id") == current_id), None)
+        current_label = str(current.get("name") or "") if current else "未选择"
+        if not workflows:
+            return "当前没有可用的单输入图片工作流。请先在工作流页面配置一个入站工作流。", None
+        rows = []
+        for item in workflows:
+            label = ("✓ " if item.get("id") == current_id else "") + str(item.get("name") or item.get("id") or "工作流")
+            account_name = str(item.get("account_name") or "").strip()
+            if account_name:
+                label += f" · {account_name}"
+            rows.append([{
+                "text": label[:64],
+                "callback_data": f"rh_switch:{item.get('id')}",
+            }])
+        return f"请选择 Telegram 入站工作流：\n当前：{current_label}", {"inline_keyboard": rows}
+
+    def _send_telegram_switch_menu(
+        self, settings: dict[str, Any], chat_id: str, message_id: int | None = None,
+    ) -> None:
+        workflows = self._telegram_switchable_workflows()
+        text, reply_markup = self._telegram_switch_menu(workflows, settings.get("inbound_workflow_id"))
+        if message_id is not None:
+            self._telegram_notifier.edit_message_text(chat_id, message_id, text, reply_markup)
+        else:
+            self._telegram_notifier.send_message(text, chat_id, reply_markup)
+
+    def _handle_telegram_callback(
+        self, update: dict[str, Any], settings: dict[str, Any], message: dict[str, Any], chat_id: str,
+    ) -> str:
+        callback = update.get("callback_query") if isinstance(update, dict) else None
+        if not isinstance(callback, dict):
+            return ""
+        callback_id = str(callback.get("id") or "").strip()
+        data = str(callback.get("data") or "").strip()
+        if not data.startswith("rh_switch:"):
+            if callback_id:
+                self._telegram_notifier.answer_callback_query(callback_id, "不支持的操作。", True)
+            return ""
+        workflow_id = data.split(":", 1)[1].strip()
+        available = {item["id"]: item for item in self._telegram_switchable_workflows()}
+        if workflow_id not in available:
+            if callback_id:
+                self._telegram_notifier.answer_callback_query(callback_id, "该工作流当前不可用，请重新发送 /switch。", True)
+            return ""
         try:
-            result = self._telegram_notifier.notify_task(task_id, outputs)
+            self.store.set_telegram_inbound_settings(workflow_id, True)
+        except RhCliError as exc:
+            if callback_id:
+                self._telegram_notifier.answer_callback_query(callback_id, exc.message[:200], True)
+            return ""
+        if callback_id:
+            try:
+                # A blank callback answer clears Telegram's loading state
+                # without showing the native bottom toast.
+                self._telegram_notifier.answer_callback_query(callback_id)
+            except TelegramDeliveryError:
+                pass
+        message_id = message.get("message_id")
+        try:
+            if message_id is not None:
+                self._telegram_notifier.delete_message(chat_id, int(message_id))
+            self._telegram_notifier.send_message(f"已切换到：{available[workflow_id]['name']}", chat_id)
+        except (TelegramDeliveryError, TypeError, ValueError):
+            # The workflow has already been switched; a stale menu should not
+            # make Telegram retry the callback as if the switch had failed.
+            pass
+        return ""
+
+    @staticmethod
+    def _telegram_command(update: dict[str, Any]) -> str:
+        message = update.get("message") if isinstance(update, dict) else None
+        if not isinstance(message, dict):
+            return ""
+        text = str(message.get("text") or "").strip()
+        if not text.startswith("/"):
+            return ""
+        return text.split(None, 1)[0].split("@", 1)[0].lower()
+
+    def _queue_telegram_delivery(
+        self,
+        task_id: str,
+        outputs: list[dict[str, Any]],
+        *,
+        force: bool = False,
+        output_indices: list[int] | None = None,
+    ) -> None:
+        self._telegram_executor.submit(self._deliver_telegram_outputs, task_id, list(outputs), force, output_indices)
+
+    def _deliver_telegram_outputs(
+        self,
+        task_id: str,
+        outputs: list[dict[str, Any]],
+        force: bool = False,
+        output_indices: list[int] | None = None,
+    ) -> None:
+        try:
+            result = self._telegram_notifier.notify_task(task_id, outputs, force=force, output_indices=output_indices)
             if result.get("status") == "disabled":
                 return
             if result.get("status") == "not_configured":
@@ -2229,6 +2729,155 @@ class TaskManager:
             )
         except Exception as exc:  # pragma: no cover - background safety net
             self._log_stage(task_id, "telegram", f"Telegram 推送异常：{exc}", level="warning")
+
+    def upload_task_to_telegram(self, task_id: str, output_index: Any) -> dict[str, Any]:
+        task = self.store.task(task_id)
+        if not task:
+            raise RhCliError("TASK_NOT_FOUND", "找不到任务。")
+        settings = self._telegram_notifier.settings()
+        if not settings.get("configured"):
+            raise RhCliError("TELEGRAM_NOT_CONFIGURED", "请先配置 Telegram Bot Token 和 Chat ID。")
+        try:
+            index = int(output_index)
+        except (TypeError, ValueError) as exc:
+            raise RhCliError("TELEGRAM_OUTPUT_NOT_FOUND", "请选择一个有效的成片。") from exc
+        outputs = task.get("outputs") or []
+        if not isinstance(outputs, list) or index < 0 or index >= len(outputs) or not isinstance(outputs[index], dict):
+            raise RhCliError("TELEGRAM_OUTPUT_NOT_FOUND", "找不到要上传的成片。")
+        output = outputs[index]
+        output_name = str(output.get("name") or "成片").strip() or "成片"
+        upload_key = (str(task_id), index)
+        with self._telegram_upload_lock:
+            if upload_key in self._telegram_uploading:
+                raise RhCliError("TELEGRAM_UPLOAD_IN_PROGRESS", "该成片正在上传，请稍候。")
+            self._telegram_uploading.add(upload_key)
+        try:
+            future = self._telegram_executor.submit(
+                self._telegram_notifier.notify_task,
+                task_id,
+                [output],
+                force=True,
+                output_indices=[index],
+            )
+            result = future.result()
+            failed = int(result.get("failed") or 0)
+            if result.get("status") in {"disabled", "not_configured"} or failed:
+                self._log_stage(task_id, "telegram", f"Telegram 上传失败：{output_name}", level="warning")
+                raise RhCliError("TELEGRAM_DELIVERY_FAILED", f"「{output_name}」上传到 Telegram 失败，请重试。")
+            self._log_stage(task_id, "telegram", f"Telegram 上传完成：{output_name}")
+            return {"status": "sent", "message": f"「{output_name}」已上传到 Telegram。"}
+        except Exception as exc:
+            if isinstance(exc, RhCliError) and exc.code == "TELEGRAM_DELIVERY_FAILED":
+                raise
+            self._log_stage(task_id, "telegram", f"Telegram 上传失败：{output_name}", level="warning")
+            raise
+        finally:
+            with self._telegram_upload_lock:
+                self._telegram_uploading.discard(upload_key)
+
+    def _telegram_inbound_loop(self) -> None:
+        """Poll the configured private chat and turn each image into a normal task."""
+        offset: int | None = None
+        while not self._stop.is_set():
+            settings = self._telegram_notifier.settings()
+            if not settings.get("configured"):
+                self._stop.wait(2)
+                continue
+            try:
+                updates = self._telegram_notifier.poll_updates(offset)
+                for update in updates:
+                    if self._stop.is_set():
+                        break
+                    update_id = update.get("update_id")
+                    try:
+                        update_id = int(update_id)
+                    except (TypeError, ValueError):
+                        continue
+                    offset = max(offset or update_id, update_id + 1)
+                    if not self.store.claim_telegram_inbound_update(update_id):
+                        continue
+                    current_settings = self._telegram_notifier.settings()
+                    if not current_settings.get("configured"):
+                        self.store.finish_telegram_inbound_update(update_id, "ignored", detail="Telegram 入站已关闭或未配置")
+                        continue
+                    task_id = ""
+                    status = "ignored"
+                    detail = ""
+                    try:
+                        task_id = self._handle_telegram_update(update, current_settings) or ""
+                        status = "submitted" if task_id else "ignored"
+                    except Exception as exc:  # pragma: no cover - background safety net
+                        status = "failed"
+                        detail = exc.message if isinstance(exc, RhCliError) else str(exc)
+                    finally:
+                        self.store.finish_telegram_inbound_update(update_id, status, task_id, detail)
+            except TelegramDeliveryError:
+                self._stop.wait(5)
+
+    def _handle_telegram_update(self, update: dict[str, Any], settings: dict[str, Any]) -> str:
+        callback = update.get("callback_query") if isinstance(update, dict) else None
+        message = callback.get("message") if isinstance(callback, dict) else update.get("message") if isinstance(update, dict) else None
+        if not isinstance(message, dict):
+            return ""
+        chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+        chat_id = str(chat.get("id") or "").strip()
+        if chat_id != str(settings.get("chat_id") or "").strip():
+            return ""
+        if isinstance(callback, dict):
+            return self._handle_telegram_callback(update, settings, message, chat_id)
+        if self._telegram_command(update) == "/switch":
+            self._send_telegram_switch_menu(settings, chat_id)
+            return ""
+        if not settings.get("inbound_enabled") or not settings.get("inbound_workflow_id"):
+            return ""
+        reference = self._telegram_notifier.image_file_reference(update)
+        if not reference:
+            return ""
+        workflow_id = str(settings.get("inbound_workflow_id") or "").strip()
+        try:
+            detail = self.store.workflow_detail(workflow_id)
+            record = detail["record"]
+            configured_input_id = str(settings.get("inbound_file_input_id") or "").strip()
+            input_id = str(telegram_inbound_file_input(detail).get("id") or "").strip()
+            if configured_input_id and configured_input_id != input_id:
+                raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "入站工作流的图片输入配置已变化，请重新设置。")
+            if not input_id:
+                raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "没有找到入站图片输入节点。")
+            target_path = self._telegram_notifier.download_image(
+                int(update.get("update_id") or 0), reference, DATA_ROOT / "telegram-inputs"
+            )
+            task = self.submit_task(
+                workflow_id=workflow_id,
+                files={input_id: str(target_path)},
+                prompts={},
+                key_id=None,
+                output_dir=None,
+                remote_workflow_id=str(record.get("remote_workflow_id") or "").strip(),
+                workflow_name=str(record.get("name") or "").strip(),
+                workflow_account_id=str(record.get("account_id") or "").strip(),
+                workflow_input_config=record.get("input_config"),
+                custom_inputs={},
+                random_noise={},
+                resolution={},
+                force_workflow_account=True,
+                submission_source="telegram",
+            )
+        except Exception as exc:
+            message = exc.message if isinstance(exc, RhCliError) else "Telegram 图片任务提交失败，请查看本机任务日志。"
+            try:
+                self._telegram_notifier.send_message(f"图片任务未提交：{message}")
+            except TelegramDeliveryError:
+                pass
+            raise
+        task_id = str(task.get("id") or "")
+        self._log_stage(task_id, "telegram", "已从 Telegram 接收图片并提交工作流")
+        try:
+            self._telegram_notifier.send_message(
+                f"已收到图片，工作流已排队：{task.get('workflow_name') or record.get('name') or workflow_id}\n任务 ID：{task_id}"
+            )
+        except TelegramDeliveryError:
+            self._log_stage(task_id, "telegram", "任务已提交，但 Telegram 回执发送失败", level="warning")
+        return task_id
 
     def _recover_tasks_on_startup(self) -> None:
         """Resolve files left by a previous process before resuming remote polling."""
@@ -2400,6 +3049,34 @@ class TaskManager:
         self._wake.set()
         return public_key(record)
 
+    def refresh_balances(self) -> dict[str, Any]:
+        """Refresh every saved API Key so aggregate dashboard balances are current."""
+        records = self.store.keys()
+        refreshed: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for record in records:
+            try:
+                data = self._fetch_account_data(record)
+                self._update_balance(record, data)
+                refreshed.append(public_key(record))
+            except Exception as exc:
+                errors.append(
+                    {
+                        "id": str(record.get("id") or ""),
+                        "name": str(record.get("name") or "未命名 API Key"),
+                        "message": exc.message if isinstance(exc, RhCliError) else str(exc),
+                    }
+                )
+        if records:
+            self.store.save_keys(records)
+        self._wake.set()
+        return {
+            "refreshed": len(refreshed),
+            "failed": len(errors),
+            "keys": refreshed,
+            "errors": errors,
+        }
+
     @staticmethod
     def _has_balance(data: dict[str, Any]) -> bool:
         for field in ("remainMoney", "remainCoins"):
@@ -2436,6 +3113,9 @@ class TaskManager:
         workflow_account_id: str | None = None,
         workflow_input_config: dict[str, Any] | None = None,
         custom_inputs: dict[str, Any] | None = None,
+        prompt_group: dict[str, Any] | None = None,
+        force_workflow_account: bool = False,
+        submission_source: str = "local",
     ) -> dict[str, Any]:
         if workflow_data is not None:
             if not isinstance(workflow_data, dict):
@@ -2450,7 +3130,7 @@ class TaskManager:
         if key_id and not selected_key:
             raise RhCliError("KEY_NOT_FOUND", "指定的 API Key 不存在。")
         selected_key_account_id = str(selected_key.get("account_id") or "").strip() if selected_key else ""
-        account_restricted = current_account_id not in {"", GENERAL_ACCOUNT_ID}
+        account_restricted = not force_workflow_account and current_account_id not in {"", GENERAL_ACCOUNT_ID}
         if key_id and account_restricted and selected_key_account_id != current_account_id:
             raise RhCliError("KEY_ACCOUNT_MISMATCH", "所选 API Key 不属于当前使用账号，请切换账号或重新选择 API Key。")
         bound_workflow_account_id = str(workflow_account_id or "").strip()
@@ -2498,6 +3178,10 @@ class TaskManager:
                 json.dumps(workflow_data, ensure_ascii=False),
                 register=False,
             )
+        submission_source = str(submission_source or "local").strip().lower()
+        if submission_source not in {"local", "telegram"}:
+            submission_source = "local"
+        files = apply_default_file_inputs(workflow, analysis, files, bypassed_set, workflow_path)
         required = {
             item["id"]
             for item in analysis["file_inputs"]
@@ -2521,6 +3205,7 @@ class TaskManager:
             "workflow_path": str(workflow_path),
             "workflow_name": workflow_name_from_path(workflow_path, workflow_id),
             "remote_workflow_id": remote_id,
+            "submission_source": submission_source,
             "files": files,
             "prompts": prompts,
             "custom_inputs": normalized_custom_inputs,
@@ -2529,7 +3214,7 @@ class TaskManager:
             "random_noise": normalized_random_noise,
             "resolution": normalized_resolution,
             "key_id": key_id or None,
-            "account_id": current_account_id or selected_key_account_id or bound_workflow_account_id,
+            "account_id": bound_workflow_account_id if force_workflow_account else current_account_id or selected_key_account_id or bound_workflow_account_id,
             "instance_type": instance_type,
             "output_dir": str(root),
         }
@@ -2557,6 +3242,8 @@ class TaskManager:
             snapshot_workflow[WORKFLOW_META_KEY] = metadata
         snapshot_path = self.store.save_task_workflow_snapshot(task, snapshot_workflow)
         task["workflow_snapshot_path"] = str(snapshot_path)
+        if prompt_group is not None:
+            self.store.save_task_prompt_group_snapshot(task, prompt_group)
         self.store.create_task(task)
         self._wake.set()
         return self.store.task(task_id) or task
@@ -2648,6 +3335,24 @@ class TaskManager:
             return keys
         return [item for item in keys if str(item.get("account_id") or "").strip() == account_id]
 
+    def _automatic_candidates(self, keys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return ready Keys with capacity, honoring the configured tier policy."""
+        with self._lock:
+            available = [
+                item
+                for item in keys
+                if item.get("status") == "ready"
+                and self._active_by_key.get(item["id"], 0) < int(item.get("capacity") or 3)
+            ]
+        strategy = self.store.api_key_strategy()
+        personal = [item for item in available if not is_shared_api_key_type(item.get("api_type"))]
+        shared = [item for item in available if is_shared_api_key_type(item.get("api_type"))]
+        if strategy == "personal_only":
+            return personal
+        if strategy == "shared_only":
+            return shared
+        return personal or shared
+
     def _queue_wait_message(
         self,
         task: dict[str, Any],
@@ -2661,14 +3366,20 @@ class TaskManager:
                 capacity = int(record.get("capacity") or 3)
                 return f"本地等待队列 · {record['name']} 并发已满（{active}/{capacity}）"
             return "本地等待队列 · 等待指定 API Key 可用"
-        ready = [item for item in keys if item.get("status") == "ready"]
-        if ready:
+        candidates = self._automatic_candidates(keys)
+        if candidates:
             capacities = ", ".join(
                 f"{item['name']} {self._active_by_key.get(item['id'], 0)}/{int(item.get('capacity') or 3)}"
-                for item in ready
+                for item in candidates
             )
             return f"本地等待队列 · 等待并发槽位（{capacities}）"
-        return "本地等待队列 · 等待可用 API Key"
+        strategy = self.store.api_key_strategy()
+        labels = {
+            "personal_only": "个人 API Key",
+            "shared_only": "共享/企业 API Key",
+            "personal_then_shared": "个人或共享/企业 API Key",
+        }
+        return f"本地等待队列 · 等待可用的{labels.get(strategy, 'API Key')}"
 
     def _select_key(
         self,
@@ -2687,12 +3398,7 @@ class TaskManager:
                 if self._active_by_key.get(candidate["id"], 0) >= int(candidate.get("capacity") or 3):
                     return None
                 return candidate
-            candidates = [
-                item
-                for item in keys
-                if item.get("status") == "ready"
-                and self._active_by_key.get(item["id"], 0) < int(item.get("capacity") or 3)
-            ]
+            candidates = self._automatic_candidates(keys)
             if not candidates:
                 return None
             return min(candidates, key=lambda item: (self._active_by_key.get(item["id"], 0), item.get("created_at", 0)))
@@ -2942,11 +3648,13 @@ def public_state(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
             "output_dir": store.output_dir(),
             "douyin_cookie_path": store.douyin_cookie_path(),
             "personal_capacity": store.personal_capacity(),
+            "api_key_strategy": store.api_key_strategy(),
             "current_account_id": current_account_id,
             "current_mode": "general" if current_account_id == GENERAL_ACCOUNT_ID else "account",
             "data_dir": str(DATA_ROOT),
             "native_file_picker": native_file_picker_available(),
             "aliyun_translation": store.aliyun_translation_settings(),
+            "aliyun_vision": store.aliyun_vision_settings(),
             "telegram": store.telegram_settings(),
         },
         "current_account": public_account(current_account) if current_account else None,
@@ -3045,6 +3753,15 @@ def _dashboard_records_in_range(
     return scoped
 
 
+def _usage_record_site(record: dict[str, Any], account_by_id: dict[str, dict[str, Any]]) -> str:
+    site = str(record.get("site") or "").strip()
+    if site in {"cn", "ai"}:
+        return site
+    account = account_by_id.get(str(record.get("account_id") or "").strip())
+    account_site = str(account.get("site") or "").strip() if account else ""
+    return account_site if account_site in {"cn", "ai"} else ""
+
+
 def _dashboard_daily_buckets(
     records: list[dict[str, Any]],
     start_day: datetime,
@@ -3098,16 +3815,17 @@ def public_dashboard(
     account_id = str(account_id or "").strip()
     now = int(current_time if current_time is not None else now_ms())
     now_day = datetime.fromtimestamp(now / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_day = now_day - timedelta(days=days - 1)
-    start_ms = int(start_day.timestamp() * 1000)
-    end_ms = int((now_day + timedelta(days=1)).timestamp() * 1000)
+    range_start_ms = now - days * 86_400_000
+    range_end_ms = now + 1
+    range_start_day = datetime.fromtimestamp(range_start_ms / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
 
     records = store.usage_records()
-    active_records = _dashboard_records_in_range(records, start_ms, end_ms, account_id)
+    active_records = _dashboard_records_in_range(records, range_start_ms, range_end_ms, account_id)
     heatmap_days = 365
     heatmap_start_day = now_day - timedelta(days=heatmap_days - 1)
     heatmap_start_ms = int(heatmap_start_day.timestamp() * 1000)
-    heatmap_records = _dashboard_records_in_range(records, heatmap_start_ms, end_ms, account_id)
+    heatmap_end_ms = int((now_day + timedelta(days=1)).timestamp() * 1000)
+    heatmap_records = _dashboard_records_in_range(records, heatmap_start_ms, heatmap_end_ms, account_id)
     heatmap_daily = _dashboard_daily_buckets(heatmap_records, heatmap_start_day, heatmap_days, now)
     account_records = {
         str(record.get("account_id") or "").strip()
@@ -3141,9 +3859,12 @@ def public_dashboard(
         account_filter_name = str(selected_account.get("name") if selected_account else next((item["name"] for item in account_options if item["id"] == account_id), "账号已删除"))
     current_tasks = manager.public_tasks()
     current_task_ids = {str(task.get("id") or "") for task in current_tasks}
-    buckets = _dashboard_daily_buckets(active_records, start_day, days, now)
+    range_end_day = datetime.fromtimestamp(max(range_start_ms, range_end_ms - 1) / 1000).replace(hour=0, minute=0, second=0, microsecond=0)
+    bucket_days = max(1, (range_end_day - range_start_day).days + 1)
+    buckets = _dashboard_daily_buckets(active_records, range_start_day, bucket_days, now)
 
     total_coins = 0.0
+    money_spent: dict[str, dict[str, Any]] = {}
     total_seconds = 0.0
     completed = 0
     failed = 0
@@ -3155,6 +3876,18 @@ def public_dashboard(
         cost = _decimal_value(record.get("cost"))
         if str(record.get("cost_type") or "") == "coins" and cost is not None:
             total_coins += cost
+        elif str(record.get("cost_type") or "") == "money" and cost is not None:
+            site = _usage_record_site(record, account_by_id)
+            bucket_key = site or "unknown"
+            bucket = money_spent.setdefault(
+                bucket_key,
+                {
+                    "site": site,
+                    "symbol": "¥" if site == "cn" else "$" if site == "ai" else "",
+                    "value": 0.0,
+                },
+            )
+            bucket["value"] += cost
         status = str(record.get("status") or "")
         if status == "completed":
             completed += 1
@@ -3163,11 +3896,6 @@ def public_dashboard(
 
     keys = manager.public_keys()
     selected_balance_keys = _select_balance_keys(keys)
-    accounts = {
-        str(account.get("id") or ""): account
-        for account in store.accounts()
-        if str(account.get("id") or "").strip()
-    }
     coin_balance = 0.0
     money_balances: dict[str, dict[str, Any]] = {}
     balances: list[dict[str, Any]] = []
@@ -3185,7 +3913,7 @@ def public_dashboard(
         checked_at = int(key.get("balance_checked_at") or 0)
         latest_balance_checked_at = max(latest_balance_checked_at, checked_at)
         account_id = str(key.get("account_id") or "").strip()
-        account = accounts.get(account_id)
+        account = account_by_id.get(account_id)
         balances.append({
             "account_id": account_id,
             "account_name": str(account.get("name") if account else ("未绑定账号" if not account_id else "账号已删除")),
@@ -3219,14 +3947,14 @@ def public_dashboard(
         "heatmap": {
             "days": heatmap_days,
             "start": heatmap_start_ms,
-            "end": end_ms,
+            "end": heatmap_end_ms,
             "daily": heatmap_daily,
         },
         "account_filter": account_id,
         "account_filter_name": account_filter_name,
         "accounts": account_options,
-        "range_start": start_ms,
-        "range_end": end_ms,
+        "range_start": range_start_ms,
+        "range_end": range_end_ms,
         "source": {
             "type": "usage_records",
             "label": "独立用量记录",
@@ -3235,6 +3963,14 @@ def public_dashboard(
         },
         "summary": {
             "coins_spent": _format_metric(total_coins, 4),
+            "money_spent": [
+                {
+                    "site": value["site"],
+                    "symbol": value["symbol"],
+                    "value": _format_metric(value["value"], 4),
+                }
+                for value in (money_spent[key] for key in sorted(money_spent))
+            ],
             "submissions": len(active_records),
             "processing_seconds": _format_metric(total_seconds),
             "completed": completed,

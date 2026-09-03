@@ -170,6 +170,253 @@ def test_personal_capacity_setting_changes_personal_keys_but_not_shared_keys(tmp
         store._db.close()
 
 
+def test_api_key_strategy_persists_and_rejects_unknown_values(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        assert store.api_key_strategy() == "personal_then_shared"
+        assert store.set_api_key_strategy("shared_only") == "shared_only"
+        assert store.api_key_strategy() == "shared_only"
+        with pytest.raises(RhCliError) as excinfo:
+            store.set_api_key_strategy("anything_else")
+        assert excinfo.value.code == "INVALID_API_KEY_STRATEGY"
+        assert store.api_key_strategy() == "shared_only"
+    finally:
+        store._db.close()
+
+
+def test_api_key_strategy_prefers_personal_and_falls_back_then_returns(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        personal = {**_saved_key(), "id": "key_personal", "name": "个人 Key", "api_type": "PERSONAL"}
+        shared = {**_saved_key(), "id": "key_shared", "name": "共享 Key", "api_type": "SHARED", "capacity": 100}
+        store.save_keys([personal, shared])
+        keys = store.keys()
+        records = {item["id"]: item for item in keys}
+        manager._active_by_key["key_personal"] = 2
+
+        assert manager._select_key({}, keys, records)["id"] == "key_personal"
+
+        manager._active_by_key["key_personal"] = 3
+        assert manager._select_key({}, keys, records)["id"] == "key_shared"
+
+        store.set_api_key_strategy("personal_only")
+        assert manager._select_key({}, keys, records) is None
+
+        store.set_api_key_strategy("shared_only")
+        assert manager._select_key({}, keys, records)["id"] == "key_shared"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_telegram_inbound_settings_bind_one_image_workflow(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account = store.add_account("入站账号", "ai")
+        workflow = {
+            "__rh_meta__": {"workflowId": "2075188854994329602"},
+            "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
+            "2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "output"}},
+        }
+        workflow_id, _, _ = store.save_workflow(
+            "Qwen单图编辑.json",
+            json.dumps(workflow),
+            account_id=account["id"],
+            remote_workflow_id="2075188854994329602",
+        )
+        store._write_json_file({"telegram_bot_token": "123456:secret", "telegram_chat_id": "5468961835"})
+
+        settings = store.set_telegram_inbound_settings(workflow_id, True)
+
+        assert settings["inbound_enabled"] is True
+        assert settings["inbound_workflow_id"] == workflow_id
+        assert settings["inbound_file_input_id"] == "1:image"
+    finally:
+        store._db.close()
+
+
+def test_telegram_inbound_settings_allows_optional_file_inputs(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account = store.add_account("入站账号", "ai")
+        workflow = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
+            "2": {"class_type": "LoadImage", "inputs": {"image": "reference.png"}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        workflow_id, _, _ = store.save_workflow(
+            "optional-input-api.json",
+            json.dumps(workflow),
+            account_id=account["id"],
+            remote_workflow_id="2075188854994329602",
+            input_config={
+                "mode": "manual",
+                "items": [
+                    {"id": "1:image", "kind": "file", "required": True},
+                    {"id": "2:image", "kind": "file", "required": False},
+                ],
+            },
+        )
+        store._write_json_file({"telegram_bot_token": "123456:secret", "telegram_chat_id": "5468961835"})
+
+        settings = store.set_telegram_inbound_settings(workflow_id, True)
+
+        assert settings["inbound_enabled"] is True
+        assert settings["inbound_workflow_id"] == workflow_id
+        assert settings["inbound_file_input_id"] == "1:image"
+    finally:
+        store._db.close()
+
+
+def test_manual_telegram_upload_rejects_duplicate_while_in_flight():
+    output = {"kind": "file", "name": "result.png", "path": "/tmp/result.png"}
+
+    class UploadStore:
+        def task(self, task_id):
+            return {"id": task_id, "outputs": [output]}
+
+    class UploadNotifier:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def settings(self):
+            return {"configured": True}
+
+        def notify_task(self, task_id, outputs, **kwargs):
+            self.started.set()
+            assert self.release.wait(2)
+            return {"status": "sent", "sent": 1, "failed": 0}
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = UploadStore()
+    manager._telegram_notifier = UploadNotifier()
+    manager._telegram_executor = web_app.ThreadPoolExecutor(max_workers=1)
+    manager._telegram_upload_lock = threading.Lock()
+    manager._telegram_uploading = set()
+    manager._log_stage = lambda *args, **kwargs: None
+    result = {}
+    error = {}
+
+    def upload_first():
+        try:
+            result["value"] = manager.upload_task_to_telegram("task-1", 0)
+        except Exception as exc:  # pragma: no cover - failure assertion below
+            error["value"] = exc
+
+    worker = threading.Thread(target=upload_first)
+    worker.start()
+    try:
+        assert manager._telegram_notifier.started.wait(1)
+        with pytest.raises(RhCliError) as excinfo:
+            manager.upload_task_to_telegram("task-1", 0)
+        assert excinfo.value.code == "TELEGRAM_UPLOAD_IN_PROGRESS"
+    finally:
+        manager._telegram_notifier.release.set()
+        worker.join(timeout=2)
+        manager._telegram_executor.shutdown(wait=True)
+
+    assert "value" in result
+    assert "value" not in error
+
+
+def test_telegram_inbound_loop_uses_current_settings_for_each_update():
+    class InboundStore:
+        def __init__(self):
+            self.finished = []
+
+        def claim_telegram_inbound_update(self, update_id):
+            return True
+
+        def finish_telegram_inbound_update(self, update_id, status, task_id="", detail=""):
+            self.finished.append((update_id, status, task_id, detail))
+
+    class InboundNotifier:
+        def __init__(self):
+            self.settings_calls = 0
+
+        def settings(self):
+            self.settings_calls += 1
+            workflow_id = "old-workflow" if self.settings_calls == 1 else "new-workflow"
+            return {
+                "configured": True,
+                "inbound_enabled": True,
+                "inbound_workflow_id": workflow_id,
+                "chat_id": "chat",
+            }
+
+        def poll_updates(self, offset):
+            return [{"update_id": 1}]
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = InboundStore()
+    manager._telegram_notifier = InboundNotifier()
+    manager._stop = threading.Event()
+    received_settings = []
+
+    def handle_update(update, settings):
+        received_settings.append(settings["inbound_workflow_id"])
+        manager._stop.set()
+        return "task-1"
+
+    manager._handle_telegram_update = handle_update
+    manager._telegram_inbound_loop()
+
+    assert received_settings == ["new-workflow"]
+    assert manager.store.finished == [(1, "submitted", "task-1", "")]
+
+
+def test_telegram_switch_callback_updates_workflow_and_refreshes_menu():
+    class SwitchStore:
+        def __init__(self):
+            self.selected = ""
+
+        def set_telegram_inbound_settings(self, workflow_id, enabled):
+            self.selected = workflow_id
+            return {}
+
+    class SwitchNotifier:
+        def __init__(self):
+            self.answers = []
+            self.deleted = []
+            self.sent = []
+
+        def answer_callback_query(self, callback_id, text="", show_alert=False):
+            self.answers.append((callback_id, text, show_alert))
+
+        def settings(self):
+            return {"inbound_workflow_id": "wf-new"}
+
+        def delete_message(self, chat_id, message_id):
+            self.deleted.append((chat_id, message_id))
+
+        def send_message(self, text, chat_id=None, reply_markup=None):
+            self.sent.append((text, chat_id, reply_markup))
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = SwitchStore()
+    manager._telegram_notifier = SwitchNotifier()
+    manager._telegram_switchable_workflows = lambda: [{"id": "wf-new", "name": "新工作流", "account_name": "账号 A"}]
+    update = {
+        "callback_query": {
+            "id": "callback-1",
+            "data": "rh_switch:wf-new",
+            "message": {"message_id": 8, "chat": {"id": "chat"}},
+        }
+    }
+
+    assert manager._handle_telegram_update(update, {"chat_id": "chat"}) == ""
+    assert manager.store.selected == "wf-new"
+    assert manager._telegram_notifier.answers == [("callback-1", "", False)]
+    assert manager._telegram_notifier.deleted == [("chat", 8)]
+    assert manager._telegram_notifier.sent == [("已切换到：新工作流", "chat", None)]
+
+
 def test_action_resources_path_setting_persists_and_validates(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     source = tmp_path / "pose.md"
@@ -224,6 +471,20 @@ def test_prompt_resource_paths_setting_persists_all_library_sources(tmp_path, mo
         assert store.reference_resources_paths() == {
             kind: str(path.resolve()) for kind, path in sources.items()
         }
+    finally:
+        store._db.close()
+
+
+def test_media_library_root_setting_replaces_legacy_resource_paths(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    root = tmp_path / "ref"
+    root.mkdir()
+    store = web_app.LocalStore()
+    try:
+        assert store.set_media_library_root(str(root)) == str(root.resolve())
+        assert store.media_library_root() == str(root.resolve())
+        assert store._read_json_file().get("action_resources_path") is None
+        assert store._read_json_file().get("reference_resources_paths") is None
     finally:
         store._db.close()
 
@@ -416,6 +677,41 @@ def test_dashboard_can_filter_usage_ledger_by_account(tmp_path, monkeypatch):
         store._db.close()
 
 
+def test_dashboard_counts_rolling_telegram_usage_and_money_spend(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account = store.add_account("Telegram 账号", "ai")
+        now = int(datetime(2026, 9, 4, 0, 4).timestamp() * 1000)
+        created_at = int(datetime(2026, 9, 3, 23, 42).timestamp() * 1000)
+        task_id = "task_telegram_usage"
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": created_at,
+                "account_id": account["id"],
+                "dispatch_key_site": "ai",
+                "submission_source": "telegram",
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "telegram.json",
+                "files": {},
+                "prompts": {},
+                "output_dir": str(tmp_path / "outputs"),
+            }
+        )
+        store.update_task(task_id, status="completed", cost_type="money", cost="1.25", duration="4")
+        manager = SimpleNamespace(public_tasks=lambda: [], public_keys=lambda: [])
+
+        result = web_app.public_dashboard(store, manager, days=1, account_id=account["id"], current_time=now)
+
+        assert result["summary"]["submissions"] == 1
+        assert result["summary"]["coins_spent"] == "0"
+        assert result["summary"]["money_spent"] == [{"site": "ai", "symbol": "$", "value": "1.25"}]
+        assert store.usage_records()[0]["site"] == "ai"
+    finally:
+        store._db.close()
+
+
 def test_submit_task_rejects_key_from_other_account(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -533,6 +829,35 @@ def test_refresh_balance_failure_preserves_previous_values(tmp_path, monkeypatch
         assert saved["status"] == "ready"
         assert saved["checked_at"] == 111
         assert saved["balance_checked_at"] == 222
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_refresh_balances_updates_all_keys_and_reports_partial_failures(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        first = _saved_key()
+        second = {**_saved_key(), "id": "key_failed", "name": "失败 Key", "coins": "20"}
+        store.save_keys([first, second])
+
+        def fetch(record):
+            if record["id"] == "key_failed":
+                raise RhCliError("API_ERROR", "余额接口暂时不可用")
+            return {"remainMoney": "9.75", "remainCoins": "88"}
+
+        monkeypatch.setattr(manager, "_fetch_account_data", fetch)
+
+        result = manager.refresh_balances()
+
+        assert result["refreshed"] == 1
+        assert result["failed"] == 1
+        assert [item["id"] for item in result["keys"]] == ["key_test"]
+        assert result["errors"] == [{"id": "key_failed", "name": "失败 Key", "message": "余额接口暂时不可用"}]
+        assert store.get_key("key_test")["coins"] == "88"
+        assert store.get_key("key_failed")["coins"] == "20"
     finally:
         manager.close()
         store._db.close()
@@ -756,9 +1081,48 @@ def test_workflow_library_records_can_be_bound_updated_and_deleted(tmp_path, mon
         saved = json.loads(workflow_path.read_text(encoding="utf-8"))
         assert saved["__rh_meta__"] == {"workflowId": "654321", "accountId": account["id"]}
 
+        replacement = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "edited.png"}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        content_updated = store.update_workflow(workflow_id, {"content": json.dumps(replacement)})
+        assert content_updated["file_count"] == 1
+        assert content_updated["name"] == "人物修复.json"
+        assert content_updated["account_id"] == account["id"]
+        saved = json.loads(workflow_path.read_text(encoding="utf-8"))
+        assert saved["1"]["inputs"]["image"] == "edited.png"
+        assert saved["__rh_meta__"] == {"workflowId": "654321", "accountId": account["id"]}
+
+        with pytest.raises(RhCliError) as excinfo:
+            store.update_workflow(workflow_id, {"content": "not json"})
+        assert excinfo.value.code == "INVALID_WORKFLOW"
+
         store.delete_workflow(workflow_id)
         assert not workflow_path.exists()
         assert store.workflows() == []
+    finally:
+        store._db.close()
+
+
+def test_save_workflow_persists_manual_input_config(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        config = {
+            "mode": "manual",
+            "items": [
+                {"id": "2:steps", "label": "采样步数", "kind": "number", "required": True},
+            ],
+        }
+        workflow_id, _, _ = store.save_workflow(
+            "sampler_api.json",
+            json.dumps({"2": {"class_type": "KSampler", "inputs": {"steps": 20, "cfg": 7.0}}}),
+            input_config=config,
+        )
+
+        record = store.workflow_record(workflow_id)
+        assert record["input_config"]["mode"] == "manual"
+        assert record["input_config"]["items"][0]["id"] == "2:steps"
     finally:
         store._db.close()
 
@@ -779,11 +1143,14 @@ def test_library_workflow_input_config_is_saved_and_replayed_in_task_snapshot(tm
                 {"id": "2:steps", "label": "采样步数", "kind": "number", "required": True},
             ],
         }
-        updated = store.update_workflow(workflow_id, {"input_config": config})
+        updated = store.update_workflow(workflow_id, {
+            "input_config": config,
+            "input_defaults": [{"node_id": "2", "field": "steps", "default": 12}],
+        })
         assert updated["input_config"]["mode"] == "manual"
         assert updated["input_config"]["items"][0]["id"] == "2:steps"
         assert "input_config" in json.loads((store._workflow_registry_path()).read_text(encoding="utf-8"))["workflows"][0]
-        assert json.loads(workflow_path.read_text(encoding="utf-8"))["2"]["inputs"]["steps"] == 20
+        assert json.loads(workflow_path.read_text(encoding="utf-8"))["2"]["inputs"]["steps"] == 12
 
         task = manager.submit_task(
             workflow_id,
@@ -954,6 +1321,88 @@ def test_submit_task_saves_modified_workflow_with_random_noise(tmp_path, monkeyp
         snapshot = Path(task["output_dir"]) / task["id"] / "workflow_api.json"
         assert snapshot.is_file()
         assert loaded["task"]["workflow_snapshot_path"] == str(snapshot.resolve())
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_submit_task_saves_and_loads_prompt_group_snapshot(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        group = {
+            "id": "task-group-test",
+            "name": "首帧提示词",
+            "updated_at": 123456,
+            "items": [{"instance_id": "item-1", "kind": "text", "text": "A cinematic opening shot."}],
+        }
+        task = manager.submit_task(
+            "unused",
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="123456",
+            workflow_data={"2": {"class_type": "SaveImage", "inputs": {}}},
+            workflow_name="prompt_group_api.json",
+            prompt_group=group,
+        )
+
+        snapshot = Path(task["output_dir"]) / task["id"] / "prompt_group.json"
+        assert snapshot.is_file()
+        assert json.loads(snapshot.read_text(encoding="utf-8"))["group"] == group
+        loaded = store.load_task_workflow(task["id"])
+        assert loaded["prompt_group"] == group
+        assert web_app.LocalStore.existing_task_outputs({**task, "outputs": []}) == []
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_submit_task_uses_optional_file_defaults_when_not_overridden(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    required_file = tmp_path / "incoming.png"
+    optional_file = tmp_path / "reference.png"
+    required_file.write_bytes(b"incoming")
+    optional_file.write_bytes(b"reference")
+    workflow = {
+        "1": {"class_type": "LoadImage", "inputs": {"image": "incoming.png"}},
+        "2": {"class_type": "LoadImage", "inputs": {"image": str(optional_file)}},
+        "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+    }
+    try:
+        workflow_id, workflow_path, _ = store.save_workflow(
+            "optional-default-api.json",
+            json.dumps(workflow),
+            remote_workflow_id="123456",
+            input_config={
+                "mode": "manual",
+                "items": [
+                    {"id": "1:image", "kind": "file", "required": True},
+                    {"id": "2:image", "kind": "file", "required": False},
+                ],
+            },
+        )
+
+        task = manager.submit_task(
+            workflow_id,
+            {"1:image": str(required_file)},
+            {},
+            None,
+            None,
+            remote_workflow_id="123456",
+            submission_source="telegram",
+        )
+
+        assert task["files"] == {
+            "1:image": str(required_file),
+            "2:image": str(optional_file.resolve()),
+        }
+        assert task["submission_source"] == "telegram"
+        assert Path(workflow_path).is_file()
     finally:
         manager.close()
         store._db.close()
