@@ -133,7 +133,7 @@
     $("workflowTotal").textContent = String(state.workflows.length);
     $("workflowBound").textContent = String(state.workflows.filter(function (item) { return Boolean(item.account_id); }).length);
     $("accountTotal").textContent = String(state.accounts.length);
-    var folderHeader = activeFolder ? '<div class="workflow-folder-breadcrumb"><button class="workflow-folder-back" type="button" data-action="back-to-folders">文件夹</button><span aria-hidden="true">/</span><strong>' + esc(activeFolder.name) + '</strong></div>' : '<div class="workflow-folder-browser-title"><strong>文件夹</strong><span>将工作流按用途整理到不同文件夹</span></div>';
+    var folderHeader = activeFolder ? '<div class="workflow-folder-breadcrumb"><button class="workflow-folder-back" type="button" data-action="back-to-folders">文件夹</button><span aria-hidden="true">/</span><strong>' + esc(activeFolder.name) + '</strong></div>' : '<div class="workflow-folder-browser-title"><strong>文件夹</strong><span>可将 API JSON 直接拖到本区域添加，卡片可拖入文件夹</span></div>';
     var folderHeaderActions = activeFolder ? "" : '<div class="workflow-folder-header-actions"><span class="workflow-folder-count">' + state.folders.length + ' 个文件夹</span><button id="createWorkflowFolder" class="secondary-button button-compact workflow-folder-create-button" type="button"><span aria-hidden="true">＋</span> 新建文件夹</button></div>';
     var folderCards = state.folders.length ? state.folders.map(workflowFolderCard).join("") : '<div class="workflow-folder-empty">还没有文件夹。点击“新建文件夹”开始整理。</div>';
     if (activeFolder) {
@@ -219,7 +219,7 @@
     if (state.editingPromptGroupFolderId) focusPromptGroupFolderNameInput();
   }
   function refreshWorkflows() {
-    return Promise.all([request("/api/workflows"), request("/api/workflow-folders"), request("/api/state"), request("/api/prompt/groups")]).then(function (results) {
+    return Promise.all([request("/api/workflows"), request("/api/workflow-folders"), request("/api/state?scope=workflows"), request("/api/prompt/groups")]).then(function (results) {
       state.workflows = results[0].workflows || [];
       state.folders = results[1].folders || [];
       state.accounts = results[2].accounts || [];
@@ -994,6 +994,23 @@
       element.classList.remove("is-folder-drop-target");
     });
   }
+  function clearWorkflowLibraryFileDropState() {
+    $("workflowGroups").classList.remove("is-external-file-drop-target");
+  }
+  function hasExternalWorkflowFileDrag(event) {
+    var transfer = event && event.dataTransfer;
+    if (!transfer) return false;
+    if (transfer.files && transfer.files.length) return true;
+    return Boolean(transfer.types && Array.prototype.indexOf.call(transfer.types, "Files") !== -1);
+  }
+  function workflowFileFromTransfer(transfer) {
+    var files = transfer && transfer.files ? transfer.files : [];
+    for (var index = 0; index < files.length; index += 1) {
+      var file = files[index];
+      if (/\.json$/i.test(String(file.name || "")) || file.type === "application/json") return file;
+    }
+    return null;
+  }
   function handleWorkflowDragStart(event) {
     var card = event.target.closest("[data-workflow-drag-id]");
     if (!card) return;
@@ -1016,10 +1033,25 @@
     clearFolderDropState();
     target.classList.add("is-folder-drop-target");
   }
+  function handleWorkflowLibraryDragOver(event) {
+    if (hasExternalWorkflowFileDrag(event)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      clearFolderDropState();
+      $("workflowGroups").classList.add("is-external-file-drop-target");
+      return;
+    }
+    handleFolderDragOver(event);
+  }
   function handleFolderDragLeave(event) {
     var target = dropTargetFromEvent(event);
     if (!target || (event.relatedTarget && target.contains(event.relatedTarget))) return;
     target.classList.remove("is-folder-drop-target");
+  }
+  function handleWorkflowLibraryDragLeave(event) {
+    var container = $("workflowGroups");
+    if (!event.relatedTarget || !container.contains(event.relatedTarget)) clearWorkflowLibraryFileDropState();
+    handleFolderDragLeave(event);
   }
   function handleFolderDrop(event) {
     if (event.dataTransfer.types && Array.prototype.indexOf.call(event.dataTransfer.types, "text/x-rh-prompt-group") !== -1) return;
@@ -1030,6 +1062,21 @@
     var folderId = target.dataset.folderDropId || "";
     clearFolderDropState();
     moveWorkflowToFolder(workflowId, folderId);
+  }
+  function handleWorkflowLibraryDrop(event) {
+    if (hasExternalWorkflowFileDrag(event)) {
+      event.preventDefault();
+      clearWorkflowLibraryFileDropState();
+      clearFolderDropState();
+      var file = workflowFileFromTransfer(event.dataTransfer);
+      if (!file) {
+        showToast("请拖入 API JSON 工作流文件", true);
+        return;
+      }
+      importWorkflowFile(file);
+      return;
+    }
+    handleFolderDrop(event);
   }
   function movePromptGroupToFolder(groupId, folderId) {
     var group = state.promptGroups.find(function (item) { return item.id === groupId; });
@@ -1191,9 +1238,9 @@
     });
     $("workflowGroups").addEventListener("dragstart", handleWorkflowDragStart);
     $("workflowGroups").addEventListener("dragend", handleWorkflowDragEnd);
-    $("workflowGroups").addEventListener("dragover", handleFolderDragOver);
-    $("workflowGroups").addEventListener("dragleave", handleFolderDragLeave);
-    $("workflowGroups").addEventListener("drop", handleFolderDrop);
+    $("workflowGroups").addEventListener("dragover", handleWorkflowLibraryDragOver);
+    $("workflowGroups").addEventListener("dragleave", handleWorkflowLibraryDragLeave);
+    $("workflowGroups").addEventListener("drop", handleWorkflowLibraryDrop);
     $("promptGroupGroups").addEventListener("dragstart", handlePromptGroupDragStart);
     $("promptGroupGroups").addEventListener("dragend", handlePromptGroupDragEnd);
     $("promptGroupGroups").addEventListener("dragover", handlePromptGroupDragOver);

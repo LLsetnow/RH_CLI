@@ -113,7 +113,10 @@
                 <button class="compare-source-filter" type="button" data-source-filter="video" role="tab" aria-selected="false">视频</button>
               </div>
             </div>
-            <div id="compareAssetList" class="compare-asset-list" aria-live="polite"></div>
+            <div id="compareAssetList" class="compare-asset-list" aria-live="polite">
+              <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取可对比成片</strong></div>
+            </div>
+            <nav id="compareAssetPagination" class="output-pagination compare-asset-pagination" aria-label="对比素材分页" hidden></nav>
           </aside>
 
           <section class="panel compare-workspace" aria-label="内容对比工作区">

@@ -97,6 +97,26 @@ def test_settings_entry_is_the_same_route_on_every_page():
         assert 'href="/settings"' in markup, filename
 
 
+def test_page_loaders_show_progress_and_request_only_page_state():
+    scoped_requests = {
+        "index.html": ("app.js", "/api/state?scope=submit"),
+        "workflows.html": ("workflows.js", "/api/state?scope=workflows"),
+        "prompt.html": ("prompt.js", "/api/state?scope=prompt"),
+        "outputs.html": ("outputs.js", "/api/state?scope=outputs"),
+        "settings.html": ("settings.js", "/api/state?scope=settings"),
+    }
+    for page_name, (script_name, state_url) in scoped_requests.items():
+        markup = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
+        script = (STATIC_ROOT / script_name).read_text(encoding="utf-8")
+        assert "page-loading-state" in markup, page_name
+        assert state_url in script, script_name
+
+    motion_css = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+    assert "page-loading-shimmer" in motion_css
+    assert "translate3d(24px, 0, 0)" in motion_css
+    assert "translate3d(-24px, 0, 0)" in motion_css
+
+
 def test_settings_exposes_shortcut_and_color_reference():
     markup = (STATIC_ROOT / "settings.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "settings.js").read_text(encoding="utf-8")
@@ -151,7 +171,7 @@ def test_ui_removes_horizontal_section_dividers():
 def test_settings_switches_share_one_capsule_control():
     markup = (STATIC_ROOT / "settings.html").read_text(encoding="utf-8")
     styles = (STATIC_ROOT / "settings.css").read_text(encoding="utf-8")
-    assert len(re.findall(r'class="settings-switch(?:\s|\")', markup)) == 3
+    assert len(re.findall(r'class="settings-switch(?:\s|\")', markup)) == 4
     assert 'class="settings-switch-track"' in markup
     assert ".settings-switch input:checked + .settings-switch-track" in styles
     assert ".settings-switch input:focus-visible + .settings-switch-track" in styles
@@ -193,6 +213,11 @@ def test_telegram_inbound_settings_offer_fixed_and_folder_random_modes():
     assert 'class="settings-switch-label">启用图片入站</span>' in markup
     assert 'class="telegram-inbound-panel is-disabled"' in markup
     assert 'classList.toggle("is-disabled", !inboundEnabled)' in script
+    assert 'id="telegramVideoInboundEnabled"' in markup
+    assert 'id="telegramVideoInboundWorkflow"' in markup
+    assert "telegram_video_inbound_enabled" in script
+    assert "telegram_video_inbound_workflow_id" in script
+    assert "state.videoInboundWorkflows" in script
 
 
 def test_prompt_resource_editor_supports_vision_fill_and_new_categories():
@@ -517,6 +542,13 @@ def test_workflow_library_uses_folder_hierarchy_and_drag_targets():
     assert "moveWorkflowToFolder" in script
     assert ".workflow-folder-grid { display: grid;" in styles
     assert ".workflow-folder-context-menu, .workflow-card-context-menu { position: fixed;" in styles
+    assert "function hasExternalWorkflowFileDrag(event)" in script
+    assert "function handleWorkflowLibraryDrop(event)" in script
+    assert 'importWorkflowFile(file);' in script
+    assert 'classList.add("is-external-file-drop-target")' in script
+    assert ".workflow-groups.is-external-file-drop-target {" in styles
+    assert "松开鼠标导入 API JSON 工作流" in styles
+    assert "可将 API JSON 直接拖到本区域添加" in script
     assert ".workflow-card { display: flex;" in styles
     assert ".workflow-card.is-selected { border-color: var(--type-accent);" in styles
     assert ".workflow-card-body.is-selected" not in styles
@@ -529,8 +561,17 @@ def test_workflow_library_uses_folder_hierarchy_and_drag_targets():
 def test_queue_running_cards_are_highlighted_and_main_area_loads_task():
     app_script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
     app_styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+    app_markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
     assert 'function isActiveTask(task)' in app_script
     assert 'function activeTaskCount(tasks)' in app_script
+    assert "var TASK_PAGE_SIZE = 20;" in app_script
+    assert 'id="queuePagination"' in app_markup
+    assert "function renderTaskPagination(totalItems)" in app_script
+    assert "slice(start, start + TASK_PAGE_SIZE)" in app_script
+    assert "function handleQueuePagination(event)" in app_script
+    assert 'queuePagination").addEventListener("click", handleQueuePagination)' in app_script
+    assert ".queue-pagination" in app_styles
+    assert ".queue-page-button, .queue-page-number" in app_styles
     assert '$("queueCount").textContent = activeTaskCount(tasks);' in app_script
     assert 'class="task-card-main" data-action="load-task"' in app_script
     assert 'class="task-load-button"' not in app_script
@@ -791,7 +832,7 @@ def test_dynamic_fixed_states_use_css_classes_and_focus_does_not_scroll():
         assert all(style.startswith("animation-delay:") for style in styles), filename
 
 
-def test_video_inputs_support_douyin_download_and_cookie_setting():
+def test_video_inputs_support_social_video_download_and_cookie_setting():
     markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
     css = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
@@ -799,13 +840,13 @@ def test_video_inputs_support_douyin_download_and_cookie_setting():
     assert 'id="douyinCookiePath"' in markup
     assert 'id="chooseDouyinCookie"' in markup
     assert 'id="saveDouyinCookie"' in markup
-    assert 'class="douyin-url"' in script
-    assert 'data-action="download-douyin"' in script
-    assert '"/api/download-douyin", "POST"' in script
+    assert 'class="social-video-url"' in script
+    assert 'data-action="download-social-video"' in script
+    assert '"/api/download-social-video", "POST"' in script
     assert '"/api/pick-douyin-cookie", "POST"' in script
     assert "douyin_cookie_path" in script
     assert ".video-source-row { display: flex; align-items: stretch;" in css
-    assert ".video-source-row .douyin-download-button { min-height: var(--control-height);" in css
+    assert ".video-source-row .social-video-download-button { align-self: flex-start; height: var(--control-height); min-height: var(--control-height);" in css
 
 
 def test_prompt_free_text_has_english_translation_flow():
@@ -1037,11 +1078,25 @@ def test_free_text_library_card_uses_aligned_text_icon():
     assert ".block-type-dot.text { display: grid; place-items: center; width: 20px; height: 20px;" in styles
 
 
-def test_task_input_file_picker_is_labeled_select_file():
+def test_task_input_file_picker_and_social_video_download_are_labeled():
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
-    assert '>选择文件</button></div>' in script
+    assert 'class="file-button native-file-button" data-action="pick-native-file"' in script
     assert '点击“选择文件”查看图片' in script
+    assert '<button class="file-button" data-action="pick-file" data-input-id="' not in script
+    assert 'data-action="open-file-folder"' in script
+    assert '>打开文件</button>' in script
+    assert 'function openInputFileFolder(inputId, button)' in script
+    assert '"/api/open-file-folder"' in script
+    assert 'class="social-video-url"' in script
+    assert 'aria-label="视频链接"' in script
+    assert '社交平台视频链接' not in script
+    assert '粘贴 Bilibili、X 或抖音视频链接（可选）' in script
+    assert 'data-action="download-social-video"' in script
+    assert '>下载视频</button>' in script
+    assert 'function downloadSocialVideo(inputId, button)' in script
+    assert '"/api/download-social-video"' in script
+    assert 'downloadDouyinVideo' not in script
 
 
 def test_task_input_images_use_prompt_workshop_preview_modal():

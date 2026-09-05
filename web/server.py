@@ -30,7 +30,13 @@ from .prompt_writer import AliyunPromptWriter
 from .reference_store import ReferenceStore
 from .translation import AliyunTranslationClient
 from .vision import AliyunVisionClient
-from .video_downloader import download_douyin_video
+from .video_downloader import (
+    SOCIAL_PLATFORM_LABELS,
+    download_douyin_video,
+    download_workflow_social_video,
+    normalize_social_video_url,
+    social_video_platform,
+)
 
 
 STATIC_ROOT = WEB_ROOT / "static"
@@ -753,7 +759,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/state":
             store, manager = self.state
-            state = public_state(store, manager)
+            scope = parse_qs(parsed_url.query).get("scope", ["full"])[0]
+            state = public_state(store, manager, scope=scope)
             state["settings"]["prompt_library_path"] = str(self.server.prompt_store.library_path)  # type: ignore[attr-defined]
             state["settings"]["action_resources_path"] = str(self.server.action_store.source_path)  # type: ignore[attr-defined]
             state["settings"]["reference_resources_paths"] = self.server.reference_store.source_paths()  # type: ignore[attr-defined]
@@ -763,6 +770,10 @@ class LocalHandler(BaseHTTPRequestHandler):
         if path == "/api/outputs":
             store, manager = self.state
             self._json(200, public_outputs(store, manager))
+            return
+        if path == "/api/projects":
+            store, _ = self.state
+            self._json(200, {"projects": store.project_folders()})
             return
         if path == "/api/outputs/export/case":
             _, manager = self.state
@@ -919,8 +930,17 @@ class LocalHandler(BaseHTTPRequestHandler):
                 selected = pick_local_file_on_macos()
                 self._json(200, self._local_file_preview(str(selected)))
                 return
+            if path == "/api/open-file-folder":
+                body = self._body()
+                file_path = Path(str(body.get("path") or "")).expanduser().resolve()
+                if not file_path.is_file():
+                    raise RhCliError("FILE_NOT_FOUND", f"本地文件不存在：{file_path}")
+                if not open_local_directory(file_path.parent):
+                    raise RhCliError("OPEN_FOLDER_UNAVAILABLE", "当前系统无法打开文件所在文件夹")
+                self._json(200, {"opened": True, "message": "已打开文件所在文件夹"})
+                return
             if path == "/api/pick-douyin-cookie":
-                selected = pick_local_file_on_macos("选择抖音 Cookie 文件")
+                selected = pick_local_file_on_macos("选择社交视频 Cookie 文件")
                 self._json(200, {"path": str(selected), "name": selected.name})
                 return
             if path == "/api/download-douyin":
@@ -932,6 +952,24 @@ class LocalHandler(BaseHTTPRequestHandler):
                     DATA_ROOT,
                 )
                 self._json(200, self._local_file_preview(str(downloaded)))
+                return
+            if path == "/api/download-social-video":
+                body = self._body()
+                store, _ = self.state
+                raw_url = str(body.get("url") or "")
+                normalized_url = normalize_social_video_url(raw_url)
+                platform = social_video_platform(normalized_url)
+                downloaded = download_workflow_social_video(
+                    normalized_url,
+                    DATA_ROOT,
+                    store.douyin_cookie_path(),
+                )
+                preview = self._local_file_preview(str(downloaded))
+                preview.update({
+                    "platform": platform,
+                    "platform_label": SOCIAL_PLATFORM_LABELS[platform],
+                })
+                self._json(200, preview)
                 return
             if path == "/api/paste-file":
                 self._json(200, save_pasted_image(self._body()))
@@ -1094,6 +1132,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 folder = store.create_workflow_folder(str(self._body().get("name") or ""))
                 self._json(201, {"folder": folder})
                 return
+            if path == "/api/projects":
+                store, _ = self.state
+                project = store.create_project_folder(str(self._body().get("name") or ""))
+                self._json(201, {"project": project})
+                return
             if path == "/api/workflows/analyze":
                 body = self._body()
                 content = body.get("content")
@@ -1188,12 +1231,20 @@ class LocalHandler(BaseHTTPRequestHandler):
                 bypassed_nodes = body.get("bypassed_nodes")
                 if not isinstance(bypassed_nodes, (list, dict)):
                     bypassed_nodes = body.get("bypassed_inputs") if isinstance(body.get("bypassed_inputs"), (list, dict)) else None
+                project = body.get("project") if isinstance(body.get("project"), dict) else None
+                if project is None and any(key in body for key in ("project_id", "project_name", "project_path")):
+                    project = {
+                        "project_id": body.get("project_id"),
+                        "project_name": body.get("project_name"),
+                        "project_path": body.get("project_path"),
+                    }
                 task = manager.submit_task(
                     str(body.get("workflow_id") or ""),
                     body.get("files") if isinstance(body.get("files"), dict) else {},
                     body.get("prompts") if isinstance(body.get("prompts"), dict) else {},
                     str(body.get("key_id") or "") or None,
                     str(body.get("output_dir") or "") or None,
+                    output_prefix=str(body.get("output_prefix") or "") or None,
                     remote_workflow_id=str(body.get("remote_workflow_id") or "") or None,
                     random_noise=body.get("random_noise") if isinstance(body.get("random_noise"), dict) else {},
                     resolution=body.get("resolution") if isinstance(body.get("resolution"), dict) else {},
@@ -1205,6 +1256,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     workflow_input_config=body.get("workflow_input_config") if isinstance(body.get("workflow_input_config"), dict) else None,
                     custom_inputs=body.get("custom_inputs") if isinstance(body.get("custom_inputs"), dict) else {},
                     prompt_group=prompt_group,
+                    project=project,
                 )
                 self._json(202, {"task": task})
                 return
@@ -1240,6 +1292,23 @@ class LocalHandler(BaseHTTPRequestHandler):
                 reference = reference_store.update_reference_rating(reference_id, self._body().get("rating"))
                 public_reference = next(item for item in reference_store.public_references() if item["id"] == reference["id"])
                 self._json(200, {"reference": public_reference})
+                return
+            if path.startswith("/api/tasks/") and path.endswith("/project"):
+                parts = path.split("/")
+                if len(parts) != 5 or not parts[3]:
+                    self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
+                    return
+                task_id = parts[3]
+                body = self._body()
+                project = body.get("project") if isinstance(body.get("project"), dict) else body
+                store, _ = self.state
+                self._json(200, {"task": store.set_task_project(task_id, project)})
+                return
+            if path.startswith("/api/projects/"):
+                project_id = path.rsplit("/", 1)[-1]
+                store, _ = self.state
+                project = store.rename_project_folder(project_id, str(self._body().get("name") or ""))
+                self._json(200, {"project": project})
                 return
             if path.startswith("/api/tasks/") and "/outputs/" in path:
                 parts = path.split("/")
@@ -1336,6 +1405,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                         body.get("telegram_inbound_enabled"),
                         mode=body.get("telegram_inbound_mode"),
                         folder_id=str(body.get("telegram_inbound_folder_id") or ""),
+                    )
+                if any(key in body for key in ("telegram_video_inbound_workflow_id", "telegram_video_inbound_enabled")):
+                    result["telegram"] = store.set_telegram_video_inbound_settings(
+                        str(body.get("telegram_video_inbound_workflow_id") or ""),
+                        body.get("telegram_video_inbound_enabled"),
                     )
                 self._json(200, result)
                 return
@@ -1448,6 +1522,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 store, _ = self.state
                 store.delete_workflow_folder(folder_id)
                 self._json(200, {"ok": True})
+                return
+            if path.startswith("/api/projects/"):
+                project_id = path.rsplit("/", 1)[-1]
+                store, _ = self.state
+                self._json(200, store.delete_project_folder(project_id))
                 return
             if path.startswith("/api/prompt/group-folders/"):
                 folder_id = path.rsplit("/", 1)[-1]

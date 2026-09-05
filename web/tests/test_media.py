@@ -116,6 +116,77 @@ def test_output_folder_can_be_opened_for_a_task_over_http(tmp_path, monkeypatch)
         server.server_close()
 
 
+def test_input_file_folder_can_be_opened_over_http(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    source = tmp_path / "inputs" / "reference.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"png")
+    opened = []
+    monkeypatch.setattr(web_server, "open_local_directory", lambda path: opened.append(path) or True)
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        body = json.dumps({"path": str(source)}).encode("utf-8")
+        connection.request(
+            "POST",
+            "/api/open-file-folder",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload == {"opened": True, "message": "已打开文件所在文件夹"}
+        assert opened == [source.parent.resolve()]
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_social_video_download_can_be_requested_for_supported_platforms(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    downloaded = tmp_path / "data" / "downloaded-inputs" / "bilibili-video.mp4"
+    downloaded.parent.mkdir(parents=True)
+    downloaded.write_bytes(b"video")
+    calls = []
+
+    def fake_download(url, data_root, cookie_path):
+        calls.append((url, data_root, cookie_path))
+        return downloaded
+
+    monkeypatch.setattr(web_server, "download_workflow_social_video", fake_download)
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        body = json.dumps({"url": "https://www.bilibili.com/video/BV1public"}).encode("utf-8")
+        connection.request(
+            "POST",
+            "/api/download-social-video",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["platform"] == "bilibili"
+        assert payload["platform_label"] == "Bilibili"
+        assert payload["name"] == "bilibili-video.mp4"
+        assert calls == [("https://www.bilibili.com/video/BV1public", web_server.DATA_ROOT, "")]
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
 def test_output_case_tags_can_be_updated_over_http_and_are_counted(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     output_dir = tmp_path / "outputs" / "task_tags_http"

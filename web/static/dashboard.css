@@ -51,8 +51,10 @@
 .dashboard-workflow-score-panel { margin-top: 14px; padding: 21px; }
 .dashboard-workflow-score-actions { display: flex; align-items: center; gap: 12px; }
 .dashboard-workflow-score-note { margin-top: 17px; color: var(--muted); font-size: 11px; line-height: 1.6; text-wrap: pretty; }
-.dashboard-workflow-score-list { display: grid; gap: 0; margin-top: 9px; }
-.dashboard-workflow-score-item { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 65px; padding: 11px 0; }
+.dashboard-workflow-score-list { display: grid; gap: 0; margin: 9px -21px 0; }
+.dashboard-workflow-score-item { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 65px; padding: 11px 21px; border-radius: 10px; color: inherit; text-decoration: none; }
+.dashboard-workflow-score-item:hover, .dashboard-workflow-score-item:focus-visible { background: var(--accent-soft); }
+.dashboard-workflow-score-item:focus-visible { border-radius: 10px; outline: 2px solid var(--accent); outline-offset: 3px; }
 .dashboard-workflow-score-rank { color: var(--subtle); font-family: "SFMono-Regular", Consolas, monospace; font-size: 16px; font-weight: 650; letter-spacing: -.06em; }
 .dashboard-workflow-score-item:first-child .dashboard-workflow-score-rank { color: var(--accent); }
 .dashboard-workflow-score-identity { display: grid; min-width: 0; gap: 5px; }
@@ -141,6 +143,8 @@
   .dashboard-response-value { margin-top: 24px; }
   .dashboard-response-stats { grid-template-columns: 1fr; }
   .dashboard-workflow-score-actions { align-items: flex-end; flex-direction: column; gap: 7px; }
+  .dashboard-workflow-score-list { margin-right: -19px; margin-left: -19px; }
+  .dashboard-workflow-score-item { padding-right: 19px; padding-left: 19px; }
   .dashboard-recent-item { grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; }
   .dashboard-recent-item > :nth-child(2) { grid-column: 2; grid-row: 1; }
   .dashboard-recent-item > :nth-child(3), .dashboard-recent-item > :nth-child(4) { grid-column: span 1; }

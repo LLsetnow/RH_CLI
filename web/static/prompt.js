@@ -648,7 +648,7 @@
       jsonRequest("/api/prompt/actions").catch(function () { return { actions: [] }; }),
       jsonRequest("/api/prompt/references").catch(function () { return { references: [] }; }),
       jsonRequest("/api/prompt/state"),
-      jsonRequest("/api/state").catch(function () { return { settings: {} }; }),
+      jsonRequest("/api/state?scope=prompt").catch(function () { return { settings: {} }; }),
     ]).then(function (snapshots) {
       applyActionSnapshot(snapshots[0]);
       applyReferenceSnapshot(snapshots[1]);

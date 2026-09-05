@@ -160,12 +160,13 @@
             </div>
             <div class="queue-caption"><span class="live-line"></span>自动更新 · 数字统计进行中任务 · 历史记录持续保留</div>
             <div id="queueList" class="queue-list">
-              <div class="empty-queue">
-                <div class="empty-line"></div>
-                <strong>队列还是空的</strong>
-                <span>导入一个工作流，准备第一次提交。</span>
+              <div class="page-loading-state" role="status">
+                <span class="page-loading-mark" aria-hidden="true"></span>
+                <strong>正在读取任务队列</strong>
+                <span>正在同步本机任务记录…</span>
               </div>
             </div>
+            <nav id="queuePagination" class="queue-pagination" aria-label="任务队列分页" hidden></nav>
           </section>
         </aside>
       </div>
@@ -194,14 +195,14 @@
         </div>
         <div class="credential-heading video-download-heading">
           <div>
-            <span class="field-label">抖音视频下载</span>
-            <span class="field-hint">可选。只保存 Cookie 文件路径，下载时由本机 yt-dlp 读取，不会上传或写入 Cookie 内容。</span>
+            <span class="field-label">社交视频下载</span>
+            <span class="field-hint">支持 Bilibili、X 和抖音。可选配置 Cookie 文件路径，下载时由本机 yt-dlp 读取，不会上传或写入 Cookie 内容。</span>
           </div>
         </div>
         <div class="setting-grid douyin-cookie-setting">
           <label class="field-group">
-            <span class="field-label">Cookie 文件路径</span>
-            <input id="douyinCookiePath" type="text" autocomplete="off" placeholder="例如 /Users/apple/Documents/VideoMake/douyin-cookies.txt" />
+            <span class="field-label">Cookie 文件路径（可选）</span>
+            <input id="douyinCookiePath" type="text" autocomplete="off" placeholder="例如 /Users/apple/Documents/VideoMake/social-cookies.txt" />
           </label>
           <div class="setting-actions">
             <button id="chooseDouyinCookie" class="secondary-button" type="button">选择文件</button>

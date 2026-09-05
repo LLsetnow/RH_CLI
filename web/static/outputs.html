@@ -95,6 +95,23 @@
           </div>
         </section>
 
+        <section class="panel output-project-panel" aria-labelledby="outputProjectTitle">
+          <div class="output-project-browser-head">
+            <div id="outputProjectBreadcrumb" class="output-project-breadcrumb">
+              <div class="section-kicker">PROJECT FOLDERS</div>
+              <h2 id="outputProjectTitle">按项目浏览</h2>
+            </div>
+            <div class="output-project-header-actions">
+              <span id="outputProjectCount" class="output-project-count"></span>
+              <button id="createOutputProject" class="primary-button button-compact" type="button">新建项目</button>
+              <button id="showAllOutputProjects" class="secondary-button button-compact" type="button" hidden>全部项目</button>
+            </div>
+          </div>
+          <div id="outputProjectGrid" class="output-project-grid" aria-live="polite">
+            <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取项目</strong></div>
+          </div>
+        </section>
+
         <section class="panel outputs-toolbar" aria-label="产物筛选">
           <div class="outputs-toolbar-top">
             <div>
@@ -141,13 +158,25 @@
             <button class="output-filter" type="button" data-output-type="text" role="tab" aria-selected="false">文本 <span>0</span></button>
             <button class="output-filter" type="button" data-output-type="other" role="tab" aria-selected="false">其他 <span>0</span></button>
             <div id="outputTagFilters" class="output-tag-filters" role="group" aria-label="按标签筛选">
-              <button class="output-tag-filter" type="button" data-output-tag="案例" aria-label="筛选案例" aria-pressed="false">案例</button>
-              <button class="output-tag-filter" type="button" data-output-tag="H" aria-label="筛选 H 标签" aria-pressed="false">H</button>
+              <span class="output-tag-filter-group" role="group" aria-label="案例标签筛选">
+                <span class="output-tag-filter-label">案例</span>
+                <span class="output-tag-filter-options">
+                  <button class="output-tag-filter active" type="button" data-output-tag="案例" data-output-tag-mode="off" aria-label="案例：不启用" aria-pressed="false">不启用</button>
+                </span>
+              </span>
+              <span class="output-tag-filter-group" role="group" aria-label="H 标签筛选">
+                <span class="output-tag-filter-label">H</span>
+                <span class="output-tag-filter-options">
+                  <button class="output-tag-filter active" type="button" data-output-tag="H" data-output-tag-mode="off" aria-label="H：不启用" aria-pressed="false">不启用</button>
+                </span>
+              </span>
             </div>
           </div>
         </section>
 
-        <section id="outputGrid" class="output-grid" aria-live="polite"></section>
+        <section id="outputGrid" class="output-grid" aria-live="polite">
+          <div class="page-loading-state" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取成片</strong><span>正在整理本机产物…</span></div>
+        </section>
         <nav id="outputPagination" class="output-pagination" aria-label="成片分页" hidden></nav>
       </main>
     </div>
@@ -184,10 +213,68 @@
         </div>
       </section>
     </div>
+    <div id="outputProjectMoveModal" class="modal-backdrop" hidden>
+      <section class="output-project-move-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="outputProjectMoveTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">PROJECT CLASSIFICATION</div>
+            <h2 id="outputProjectMoveTitle">移动到项目</h2>
+          </div>
+          <button id="closeOutputProjectMove" class="close-button" type="button" aria-label="关闭项目归类">×</button>
+        </div>
+        <p id="outputProjectMoveDescription" class="modal-description">只修改任务的项目归类，不会移动或复制成片文件。</p>
+        <div id="outputProjectMoveOptions" class="output-project-move-options" role="radiogroup" aria-label="项目列表"></div>
+        <div class="output-import-actions">
+          <button id="cancelOutputProjectMove" class="secondary-button" type="button">取消</button>
+          <button id="confirmOutputProjectMove" class="primary-button" type="button" disabled>移动任务</button>
+        </div>
+      </section>
+    </div>
+    <div id="outputProjectEditorModal" class="modal-backdrop" hidden>
+      <section class="output-project-editor-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="outputProjectEditorTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">PROJECT FOLDER</div>
+            <h2 id="outputProjectEditorTitle">新建项目</h2>
+          </div>
+          <button id="closeOutputProjectEditor" class="close-button" type="button" aria-label="关闭项目编辑">×</button>
+        </div>
+        <p id="outputProjectEditorDescription" class="modal-description">新项目只用于成片归类，不会创建或移动媒体文件。</p>
+        <label class="output-project-name-field" for="outputProjectName">
+          <span>项目名称</span>
+          <input id="outputProjectName" type="text" maxlength="80" autocomplete="off" placeholder="例如：千夏角色样片" />
+        </label>
+        <div class="output-import-actions">
+          <button id="cancelOutputProjectEditor" class="secondary-button" type="button">取消</button>
+          <button id="confirmOutputProjectEditor" class="primary-button" type="button">新建项目</button>
+        </div>
+      </section>
+    </div>
+    <div id="outputProjectDeleteModal" class="modal-backdrop" hidden>
+      <section class="output-project-delete-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="outputProjectDeleteTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">PROJECT FOLDER</div>
+            <h2 id="outputProjectDeleteTitle">删除项目</h2>
+          </div>
+          <button id="closeOutputProjectDelete" class="close-button" type="button" aria-label="关闭删除项目">×</button>
+        </div>
+        <p id="outputProjectDeleteDescription" class="modal-description">项目中的任务会归入未归类，不会删除任何媒体文件。</p>
+        <div class="output-import-actions">
+          <button id="cancelOutputProjectDelete" class="secondary-button" type="button">取消</button>
+          <button id="confirmOutputProjectDelete" class="secondary-button danger-button" type="button">删除项目</button>
+        </div>
+      </section>
+    </div>
+    <div id="outputProjectContextMenu" class="output-project-context-menu" role="menu" aria-label="项目文件夹操作" hidden>
+      <button type="button" role="menuitem" data-output-project-menu-action="rename">重命名</button>
+      <button type="button" role="menuitem" data-output-project-menu-action="delete">删除文件夹</button>
+    </div>
     <div id="artifactContextMenu" class="artifact-context-menu" role="menu" aria-label="成片操作" hidden>
       <button type="button" role="menuitem" data-artifact-menu-action="upload">上传</button>
       <button type="button" role="menuitem" data-artifact-menu-action="import">导入媒体</button>
       <button type="button" role="menuitem" data-artifact-menu-action="open-folder">打开所在文件夹</button>
+      <button type="button" role="menuitem" data-artifact-menu-action="move-project">移动到项目</button>
       <button type="button" role="menuitem" data-artifact-menu-action="delete">删除任务</button>
     </div>
     <script>window.RHMotion.startPageEnter();</script>

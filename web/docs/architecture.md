@@ -41,7 +41,7 @@ server.py  ── HTTP API / 静态文件
 
 - `data/keys.json`：本地 API Key 和 `api_key_strategy` 调度策略；仪表盘余额按 `account_id` 每个账号只选最近一次成功查询的一个 API Key，同一账号的其他 Key 不参与余额累加，无法识别账号的旧 Key 按站点归并。
 - `data/accounts.json`：账号名称、站点和签到状态，不保存密码或 token。
-- `data/tasks.sqlite3`：任务历史、状态、远程 taskId、注册工作流关联、任务级工作流/提示词组/manifest 快照路径、阶段日志、消耗和脱敏错误详情。
+- `data/tasks.sqlite3`：任务历史、状态、远程 taskId、注册工作流关联、项目归属、任务级工作流/提示词组/manifest 快照路径、阶段日志、消耗和脱敏错误详情。
 - `data/tasks.sqlite3` 中的 `usage_records`：独立用量台账，保存提交次数、RH 币消耗、处理时长和产物数量；任务删除后仍保留。
 - `data/workflows/`：工作流库副本、每个工作流可选的 `*.prompt_group.json` 提示词组快照和提交期间的工作流快照。
 - `data/workflow-registry.json`：工作流库轻量主索引，只保存本地工作流 ID 和详细记录文件路径。
@@ -54,9 +54,13 @@ server.py  ── HTTP API / 静态文件
 
 任务调度策略由 `TaskManager._automatic_candidates()` 统一处理：任务提交页不再选择 API Key，所有普通提交按策略在个人/共享企业 Key 中选择可用槽位；个人优先模式只有在个人槽位全部占用时才使用共享/企业 Key，个人槽位释放后新任务会重新优先个人。后端仍保留 `key_id` 字段以兼容旧任务记录和内部调用。
 
-本地队列按入库顺序先进先出，任务列表中的排队序号与实际调度顺序一致。调度占用会在 SQLite 事务中同时校验 API Key 并发上限和本地 worker 上限；远程鉴权失败或余额不足会自动将对应 Key 暂停在调度候选之外，重新检测成功后才恢复。远程队列返回 421 时会释放本地 Key 槽位，任务按退避时间重新进入本地队列，避免一个远程拥堵任务长期占住本地并发。
+本地队列按入库顺序先进先出，任务列表中的排队序号与实际调度顺序一致。调度占用会在 SQLite 事务中同时校验 API Key 并发上限和本地 worker 上限；远程鉴权失败或余额不足会自动将对应 Key 暂停在调度候选之外，重新检测成功后才恢复。远程队列返回 421 时，个人 Key 与共享/企业 Key（包括 100 并发上限）都会关闭该 Key 的本地提交闸门，任务留在 FIFO 队列，直到已提交的前序任务完成后再由队首任务提交，不使用按时间退避。
 
-每个任务的产物目录会保存本次提交的 API 工作流快照、提示词组快照和 `manifest.json`，通常分别为 `<输出目录>/<task_id>/workflow_api.json`、`prompt_group.json` 和 `manifest.json`。manifest 只记录输入文件路径，不复制输入文件。普通提交保存当前组装台或请求显式提供的提示词组；Telegram 入站提交保存所选工作流包关联的提示词组。任务加载接口会返回任务自己的工作流快照、提示词组快照和路径字段；旧任务在快照文件仍存在时会自动补写路径清单。
+任务轮询返回 805 时，Standard（24GB，内部值为 `default`）只切换到 Plus（48GB）重新提交一次；已经是 Plus 的任务仍使用 Plus 重试一次。第二次 805 或其他机型不进入无限重试。
+
+每个任务的产物目录会保存本次提交的 API 工作流快照、提示词组快照和 `manifest.json`，通常分别为 `<输出目录>/<task_id>/workflow_api.json`、`prompt_group.json` 和 `manifest.json`。manifest 只记录输入文件路径，不复制输入文件。普通提交保存当前组装台或请求显式提供的提示词组；Telegram 入站提交保存所选工作流包关联的提示词组。任务提交 API 可通过可选的 `output_prefix` 指定下载产物的文件名前缀，文件会按 `<output_prefix>_<序号>.<扩展名>` 保存；省略时继续使用 `output_<序号>.<扩展名>`。任务加载接口会返回任务自己的工作流快照、提示词组快照和路径字段；旧任务在快照文件仍存在时会自动补写路径清单。
+
+任务项目默认从输出目录或工作流路径中的 `.../projects/<项目名>/...` 推断，也可以由提交 API 显式传入 `project` 覆盖。成片页按任务项目展示项目文件夹和任务卡片；可将任意成片卡片拖到项目文件夹，或使用“移动到项目”菜单，这些操作只更新 SQLite 任务元数据及 manifest 的 `project` 字段，不移动或复制任何媒体文件。应用启动时会为已有任务回填可推断的项目归属，并同步已有 manifest。
 
 工作流库保存的是工作流 JSON、独立登记 sidecar 与可选提示词组快照的组合：工作流登记主索引保存于 `workflow-registry.json`，每个工作流的详细元数据保存于 `data/workflow-registry/<workflow_id>.json`，提示词组保存为 `data/workflows/<workflow_id>.prompt_group.json`。从工作流页面加载时，工作流写入任务提交页草稿，提示词组写入提示词工坊的一次性恢复缓存；用户进入提示词工坊后会自动恢复该组装台。旧工作流没有快照时只加载工作流本身。
 

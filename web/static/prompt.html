@@ -126,7 +126,9 @@
             <div id="categoryFilters" class="category-filters" aria-label="按一级分类筛选"></div>
             <div class="library-filter-label">二级标签</div>
             <div id="tagFilters" class="tag-filters" aria-label="按标签筛选"></div>
-            <div id="libraryList" class="library-list"></div>
+            <div id="libraryList" class="library-list">
+              <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取积木库</strong></div>
+            </div>
             <input id="mediaBlockPicker" class="media-block-picker" type="file" accept="image/*,audio/*,video/*" hidden />
             <div class="library-footer"><span id="libraryCount">0 个固定积木</span><span id="libraryFooterHint">拖动卡片加入</span><button id="refreshActions" class="library-refresh-button" type="button" hidden>重新扫描</button></div>
             <div class="library-drop-hint" aria-hidden="true"><span class="library-drop-hint-mark">×</span><strong>松开以移除当前积木</strong><span>积木库里的原始内容不会被删除</span></div>
@@ -161,7 +163,9 @@
                     <button id="saveGroup" class="secondary-button button-compact" type="submit">新建提示词组</button>
                   </form>
                 </div>
-                <div id="stageList" class="stage-list" aria-live="polite"></div>
+                <div id="stageList" class="stage-list" aria-live="polite">
+                  <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在恢复组装台</strong></div>
+                </div>
                 <div class="assembly-hint"><span>抓住卡片空白处上下拖动排序；拖到左侧积木库即可移除当前积木。</span></div>
               </div>
             </section>

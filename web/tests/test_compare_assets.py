@@ -64,3 +64,19 @@ def test_output_cards_can_be_dragged_into_content_comparison():
     assert 'data-compare-draggable="' in script
     assert 'draggable="' in script
     assert 'application/x-rh-compare-asset' in script
+
+
+def test_compare_source_cards_are_limited_and_paged_at_20_per_page():
+    page = (STATIC_ROOT / "compare.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "compare.js").read_text(encoding="utf-8")
+
+    assert 'id="compareAssetPagination"' in page
+    assert 'class="output-pagination compare-asset-pagination"' in page
+    assert "var COMPARE_PAGE_SIZE = 20;" in script
+    assert "function comparePageItems(items)" in script
+    assert "slice(start, start + COMPARE_PAGE_SIZE)" in script
+    assert "function renderComparePagination(totalItems)" in script
+    assert 'data-compare-page="previous"' in script
+    assert 'data-compare-page="next"' in script
+    assert '$("compareAssetPagination").addEventListener("click"' in script
+    assert "resetCompareAssetPage" in script

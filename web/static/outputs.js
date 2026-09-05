@@ -2,8 +2,15 @@
   "use strict";
 
   var OUTPUT_PAGE_SIZE = 64;
-  var state = { outputs: [], summary: {}, type: "all", rating: 0, tags: [], search: "", sort: "newest", page: 1, telegramConfigured: false, contextArtifactId: "", selectedArtifactId: "" };
+  var UNCLASSIFIED_PROJECT_ID = "__unclassified__";
+  var UNBOUND_ACCOUNT_ID = "__unbound__";
+  var OUTPUT_TAG_FILTER_TAGS = ["案例", "H"];
+  var OUTPUT_TAG_FILTER_MODES = ["off", "include", "exclude"];
+  var state = { outputs: [], projects: [], summary: {}, type: "all", rating: 0, tagFilters: { "案例": "off", "H": "off" }, search: "", sort: "newest", page: 1, projectId: "", telegramConfigured: false, contextRangeStart: 0, contextRangeEnd: 0, contextRangeDays: 0, contextAccountId: "", contextWorkflowName: "", contextArtifactId: "", contextProjectId: "", selectedArtifactId: "" };
   var outputImport = { item: null, path: "" };
+  var projectMove = { item: null, projectId: "" };
+  var projectEditor = { mode: "", projectId: "" };
+  var projectDelete = { projectId: "" };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
   var pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1";
   var ratingBusy = {};
@@ -30,6 +37,49 @@
   function showToast(message, isError) {
     var toast = $("outputToast");
     if (window.RHMotion && window.RHMotion.showToast) window.RHMotion.showToast(toast, message, isError);
+  }
+  function copyTextFallback(text) {
+    return new Promise(function (resolve, reject) {
+      var input = document.createElement("textarea");
+      input.value = text;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.left = "-9999px";
+      document.body.appendChild(input);
+      input.select();
+      var copied = false;
+      try { copied = document.execCommand("copy"); } catch (error) { copied = false; }
+      input.remove();
+      if (copied) resolve();
+      else reject(new Error("剪贴板不可用"));
+    });
+  }
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      return navigator.clipboard.writeText(text).catch(function () { return copyTextFallback(text); });
+    }
+    return copyTextFallback(text);
+  }
+  function copyTaskId(taskId, button) {
+    var value = String(taskId || "").trim();
+    if (!value || !button || button.disabled) return;
+    var original = button.textContent;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    copyTextToClipboard(value).then(function () {
+      button.textContent = "已复制";
+      button.classList.add("is-copied");
+      showToast("完整任务 ID 已复制");
+      window.setTimeout(function () {
+        button.textContent = original;
+        button.classList.remove("is-copied");
+      }, 1200);
+    }).catch(function () {
+      showToast("复制任务 ID 失败：剪贴板不可用", true);
+    }).finally(function () {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    });
   }
   function queuePromptGroupSnapshot(group) {
     try {
@@ -65,6 +115,28 @@
   function typeLabel(type) {
     return { image: "IMAGE", video: "VIDEO", audio: "AUDIO", text: "TEXT", other: "FILE" }[type] || "FILE";
   }
+  function readOutputContext() {
+    var params = new URLSearchParams(window.location.search || "");
+    state.contextRangeStart = Number(params.get("range_start") || 0) || 0;
+    state.contextRangeEnd = Number(params.get("range_end") || 0) || 0;
+    state.contextRangeDays = Number(params.get("range_days") || 0) || 0;
+    state.contextAccountId = String(params.get("account_id") || "").trim();
+    state.contextWorkflowName = String(params.get("workflow_name") || "").trim();
+    state.search = state.contextWorkflowName;
+    var searchInput = $("outputSearch");
+    if (searchInput) searchInput.value = state.search;
+  }
+  function hasOutputContext() {
+    return Boolean(state.contextWorkflowName || state.contextRangeStart || state.contextRangeEnd || state.contextAccountId);
+  }
+  function contextOutputMatches(item) {
+    var createdAt = Number(item && item.task_created_at || 0);
+    if (state.contextRangeStart && createdAt < state.contextRangeStart) return false;
+    if (state.contextRangeEnd && createdAt >= state.contextRangeEnd) return false;
+    if (state.contextAccountId === UNBOUND_ACCOUNT_ID && String(item && item.account_id || "").trim()) return false;
+    if (state.contextAccountId && state.contextAccountId !== UNBOUND_ACCOUNT_ID && String(item && item.account_id || "").trim() !== state.contextAccountId) return false;
+    return true;
+  }
   function normalizedOutputTags(value) {
     var raw = value && Array.isArray(value.tags) ? value.tags : [];
     var tags = [];
@@ -77,11 +149,132 @@
   function hasOutputTag(item, tag) {
     return normalizedOutputTags(item).indexOf(String(tag || "").trim()) !== -1;
   }
+  function outputTagFilterMode(tag) {
+    var mode = state.tagFilters && state.tagFilters[tag];
+    return OUTPUT_TAG_FILTER_MODES.indexOf(mode) === -1 ? "off" : mode;
+  }
+  function outputTagFilterMatches(item, tag) {
+    var mode = outputTagFilterMode(tag);
+    if (mode === "include") return hasOutputTag(item, tag);
+    if (mode === "exclude") return !hasOutputTag(item, tag);
+    return true;
+  }
+  function matchesOutputTagFilters(item) {
+    return OUTPUT_TAG_FILTER_TAGS.every(function (tag) { return outputTagFilterMatches(item, tag); });
+  }
   function isMediaOutput(item) {
     return item && item.kind === "file" && ["image", "video", "audio"].indexOf(item.display_type) !== -1;
   }
   function caseMediaOutputs() {
     return state.outputs.filter(function (item) { return isMediaOutput(item) && hasOutputTag(item, "案例"); });
+  }
+  function outputProjectId(item) {
+    return String(item && item.project_id || "").trim();
+  }
+  function belongsToProject(item, projectId) {
+    if (!projectId) return true;
+    var itemProjectId = outputProjectId(item);
+    return projectId === UNCLASSIFIED_PROJECT_ID ? !itemProjectId : itemProjectId === projectId;
+  }
+  function outputProjectRecords() {
+    var records = {};
+    state.projects.forEach(function (project) {
+      var id = String(project && project.id || "").trim();
+      if (!id) return;
+      records[id] = {
+        id: id,
+        name: String(project.name || "").trim() || "未命名项目",
+        path: String(project.path || "").trim(),
+        outputs: 0,
+        taskIds: {},
+        taskCount: Number(project.task_count || 0),
+        latest: Number(project.updated_at || project.created_at || 0)
+      };
+    });
+    state.outputs.forEach(function (item) {
+      if (!contextOutputMatches(item)) return;
+      var id = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
+      if (!records[id]) {
+        records[id] = { id: id, name: id === UNCLASSIFIED_PROJECT_ID ? "未归类" : "", path: "", outputs: 0, taskIds: {}, taskCount: 0, latest: 0 };
+      }
+      var record = records[id];
+      if (id !== UNCLASSIFIED_PROJECT_ID && !record.name) record.name = String(item.project_name || "").trim();
+      if (id !== UNCLASSIFIED_PROJECT_ID && !record.path) record.path = String(item.project_path || "").trim();
+      record.outputs += 1;
+      var taskId = String(item.task_id || "").trim();
+      if (taskId) record.taskIds[taskId] = true;
+      record.latest = Math.max(record.latest, Number(item.modified_at || item.task_completed_at || item.task_created_at || 0));
+    });
+    return Object.keys(records).map(function (id) {
+      var record = records[id];
+      record.tasks = Math.max(Number(record.taskCount || 0), Object.keys(record.taskIds).length);
+      delete record.taskIds;
+      delete record.taskCount;
+      if (!record.name) record.name = record.id === UNCLASSIFIED_PROJECT_ID ? "未归类" : "未命名项目";
+      return record;
+    }).sort(function (left, right) {
+      if (left.id === UNCLASSIFIED_PROJECT_ID) return 1;
+      if (right.id === UNCLASSIFIED_PROJECT_ID) return -1;
+      if (left.latest !== right.latest) return right.latest - left.latest;
+      return left.name.localeCompare(right.name, "zh-CN");
+    });
+  }
+  function outputProjectRecord(projectId) {
+    return outputProjectRecords().find(function (record) { return record.id === projectId; }) || null;
+  }
+  function outputProjectTaskCount(projectId) {
+    var record = projectId ? outputProjectRecord(projectId) : null;
+    if (record) return Number(record.tasks || 0);
+    if (!projectId && state.summary && !hasOutputContext()) return Number(state.summary.tasks || 0);
+    var taskIds = {};
+    state.outputs.forEach(function (item) {
+      if (belongsToProject(item, projectId)) {
+        var taskId = String(item.task_id || "").trim();
+        if (taskId) taskIds[taskId] = true;
+      }
+    });
+    return Object.keys(taskIds).length;
+  }
+  function outputProjectCard(record, selected) {
+    var unclassified = record.id === UNCLASSIFIED_PROJECT_ID;
+    var icon = unclassified ? "–" : "▰";
+    var detail = record.tasks + " 个任务 · " + record.outputs + " 个成片";
+    var context = unclassified ? "" : ' data-output-project-context="' + esc(record.id) + '"';
+    var drop = ' data-output-project-drop="' + esc(record.id) + '"';
+    var label = (unclassified ? "未归类" : record.name) + "，可接收拖入的成片卡片";
+    return '<button class="output-project-card' + (unclassified ? ' is-unclassified' : '') + (selected ? ' is-selected' : '') + '" type="button" data-output-project="' + esc(record.id) + '"' + context + drop + ' aria-pressed="' + (selected ? "true" : "false") + '" aria-label="' + esc(label) + '">' +
+      '<span class="output-project-icon" aria-hidden="true">' + icon + '</span>' +
+      '<span class="output-project-card-copy"><strong>' + esc(record.name) + '</strong><small>' + esc(detail) + '</small>' + (record.path ? '<span class="output-project-path" title="' + esc(record.path) + '">' + esc(record.path) + '</span>' : '') + '</span>' +
+      '<span class="output-project-card-date">' + esc(formatTime(record.latest)) + '</span>' +
+      '</button>';
+  }
+  function renderProjectBrowser() {
+    var grid = $("outputProjectGrid");
+    var breadcrumb = $("outputProjectBreadcrumb");
+    var count = $("outputProjectCount");
+    var showAll = $("showAllOutputProjects");
+    if (!grid || !breadcrumb || !count) return;
+    var records = outputProjectRecords();
+    var selected = state.projectId ? outputProjectRecord(state.projectId) : null;
+    if (state.projectId && state.projectId !== UNCLASSIFIED_PROJECT_ID && !selected) {
+      state.projectId = "";
+      selected = null;
+    }
+    if (selected || state.projectId === UNCLASSIFIED_PROJECT_ID) {
+      var current = selected || { id: UNCLASSIFIED_PROJECT_ID, name: "未归类", path: "", outputs: state.outputs.filter(function (item) { return !outputProjectId(item); }).length, tasks: 0, latest: 0 };
+      current.tasks = outputProjectTaskCount(state.projectId);
+      breadcrumb.innerHTML = '<button class="output-project-back" type="button" data-output-project="">全部成片</button><span class="output-project-separator" aria-hidden="true">/</span><strong title="' + esc(current.name) + '">' + esc(current.name) + '</strong>';
+      count.textContent = current.tasks + " 个任务 · " + current.outputs + " 个成片";
+      if (showAll) showAll.hidden = false;
+      grid.innerHTML = '<div class="output-project-current' + (state.projectId === UNCLASSIFIED_PROJECT_ID ? ' is-unclassified' : '') + '" data-output-project-drop="' + esc(current.id) + '"' + (state.projectId === UNCLASSIFIED_PROJECT_ID ? '' : ' data-output-project-context="' + esc(current.id) + '"') + '><span class="output-project-current-kicker">CURRENT PROJECT</span><strong>' + esc(current.name) + '</strong><span>' + esc(current.tasks + " 个任务 · " + current.outputs + " 个成片") + '</span>' + (current.path ? '<small title="' + esc(current.path) + '">' + esc(current.path) + '</small>' : '') + '</div>';
+      return;
+    }
+    var namedCount = records.filter(function (record) { return record.id !== UNCLASSIFIED_PROJECT_ID; }).length;
+    var unclassified = records.find(function (record) { return record.id === UNCLASSIFIED_PROJECT_ID; });
+    breadcrumb.innerHTML = '<div class="section-kicker">PROJECT FOLDERS</div><h2 id="outputProjectTitle">全部成片</h2>';
+    count.textContent = namedCount + " 个项目" + (unclassified ? " · " + unclassified.outputs + " 未归类成片" : "");
+    if (showAll) showAll.hidden = true;
+    grid.innerHTML = records.length ? records.map(function (record) { return outputProjectCard(record, false); }).join("") : '<div class="output-project-empty"><strong>还没有项目</strong><span>新建项目后，可从成片右键菜单将任务归入其中。</span></div>';
   }
   function costLabel(item) {
     if (!item.cost) return "";
@@ -103,12 +296,14 @@
   function filteredOutputs() {
     var query = state.search.trim().toLowerCase();
     var result = state.outputs.filter(function (item) {
+      if (!contextOutputMatches(item)) return false;
+      if (!belongsToProject(item, state.projectId)) return false;
       if (state.type !== "all" && item.display_type !== state.type) return false;
       if (state.rating === "unrated" && normalizedRating(item.rating) !== 0) return false;
       if (typeof state.rating === "number" && state.rating && normalizedRating(item.rating) !== state.rating) return false;
-      if (state.tags.length && !state.tags.every(function (tag) { return hasOutputTag(item, tag); })) return false;
+      if (!matchesOutputTagFilters(item)) return false;
       if (!query) return true;
-      return String(item.name || "").toLowerCase().indexOf(query) !== -1 || String(item.task_name || "").toLowerCase().indexOf(query) !== -1;
+      return String(item.name || "").toLowerCase().indexOf(query) !== -1 || String(item.task_name || "").toLowerCase().indexOf(query) !== -1 || String(item.project_name || "").toLowerCase().indexOf(query) !== -1;
     });
     result.sort(function (left, right) {
       if (state.sort === "name") return String(left.name || "").localeCompare(String(right.name || ""), "zh-CN");
@@ -186,9 +381,13 @@
     });
     document.querySelectorAll(".output-tag-filter").forEach(function (button) {
       var tag = button.dataset.outputTag || "";
-      var active = state.tags.indexOf(tag) !== -1;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-pressed", active ? "true" : "false");
+      var mode = outputTagFilterMode(tag);
+      var label = { off: "不启用", include: "包含", exclude: "不包含" }[mode] || "不启用";
+      button.dataset.outputTagMode = mode;
+      button.textContent = label;
+      button.classList.add("active");
+      button.setAttribute("aria-label", tag + "：" + label);
+      button.setAttribute("aria-pressed", mode === "off" ? "false" : "true");
     });
     var deleteOneStarButton = $("deleteOneStarOutputs");
     if (deleteOneStarButton) {
@@ -439,6 +638,12 @@
     if (!taskId || (item && item.workflow_available === false)) return esc(taskName);
     return '<button class="artifact-workflow-link" type="button" data-load-task-workflow="' + esc(taskId) + '" title="加载此次工作流草稿" aria-label="加载工作流 ' + esc(taskName) + '">' + esc(taskName) + '</button>';
   }
+  function taskIdLabel(item) {
+    var taskId = String(item && item.task_id || "").trim();
+    if (!taskId) return "";
+    var compact = taskId.length > 12 ? taskId.slice(0, 8) + "…" + taskId.slice(-4) : taskId;
+    return '<button class="artifact-task-id" type="button" data-copy-task-id="' + esc(taskId) + '" title="点击复制完整任务 ID" aria-label="复制完整任务 ID">' + esc(compact) + '</button>';
+  }
   function telegramUploadKey(taskId, outputIndex) {
     return String(taskId || "") + ":" + String(outputIndex);
   }
@@ -491,6 +696,13 @@
     var count = columns && columns !== "none" ? columns.split(/\s+/).filter(Boolean).length : 1;
     return Math.max(1, count);
   }
+  function outputKeyboardNavigationAllowed(event) {
+    var target = event && event.target;
+    if (!target || !target.closest) return true;
+    if (target.closest("input, select, textarea, [contenteditable=\"true\"], audio, video")) return false;
+    if (target.closest(".artifact-card")) return true;
+    return !target.closest("button, a");
+  }
   function navigateSelectedArtifact(direction) {
     var cards = Array.prototype.slice.call(document.querySelectorAll("#outputGrid .artifact-card"));
     if (!cards.length) return false;
@@ -500,14 +712,37 @@
       selectArtifactCard(firstItem, true);
       return Boolean(firstItem);
     }
+    var items = filteredOutputs();
+    var currentPage = Math.min(Math.max(Number(state.page) || 1, 1), outputPageCount(items));
+    var totalPages = outputPageCount(items);
     var columns = gridColumnCount();
     var targetIndex = currentIndex;
+    var targetPage = currentPage;
+    var targetPageIndex = -1;
     if (direction === "left" && currentIndex % columns > 0) targetIndex = currentIndex - 1;
     if (direction === "right" && currentIndex % columns < columns - 1 && currentIndex + 1 < cards.length) targetIndex = currentIndex + 1;
     if (direction === "up" || direction === "down") {
       var step = direction === "up" ? -columns : columns;
       var indexedTarget = currentIndex + step;
       if (indexedTarget >= 0 && indexedTarget < cards.length) targetIndex = indexedTarget;
+    }
+    if (targetIndex === currentIndex && currentPage > 1 && (direction === "left" && currentIndex === 0 || direction === "up" && currentIndex < columns)) {
+      targetPage = currentPage - 1;
+      targetPageIndex = OUTPUT_PAGE_SIZE - 1;
+    } else if (targetIndex === currentIndex && currentPage < totalPages && (direction === "right" && currentIndex === cards.length - 1 || direction === "down" && currentIndex + columns >= cards.length)) {
+      targetPage = currentPage + 1;
+      targetPageIndex = direction === "down" ? currentIndex % columns : 0;
+    }
+    if (targetPage !== currentPage) {
+      var pageStart = (targetPage - 1) * OUTPUT_PAGE_SIZE;
+      var targetPageItems = items.slice(pageStart, pageStart + OUTPUT_PAGE_SIZE);
+      var pageTarget = targetPageItems[targetPageIndex] || targetPageItems[0];
+      if (!pageTarget) return false;
+      closeArtifactContextMenu();
+      state.page = targetPage;
+      render();
+      selectArtifactCard(pageTarget, true);
+      return true;
     }
     if (targetIndex === currentIndex) return true;
     var targetItem = artifactById(cards[targetIndex].dataset.artifactId);
@@ -580,6 +815,7 @@
     var uploadAction = menu.querySelector('[data-artifact-menu-action="upload"]');
     var importAction = menu.querySelector('[data-artifact-menu-action="import"]');
     var folderAction = menu.querySelector('[data-artifact-menu-action="open-folder"]');
+    var moveProjectAction = menu.querySelector('[data-artifact-menu-action="move-project"]');
     var canUpload = state.telegramConfigured && item.kind === "file";
     if (uploadAction) {
       var uploadBusy = Boolean(telegramUploadBusy[telegramUploadKey(item.task_id, item.output_index)]);
@@ -591,6 +827,7 @@
     }
     if (importAction) importAction.hidden = item.kind !== "file";
     if (folderAction) folderAction.hidden = item.kind !== "file";
+    if (moveProjectAction) moveProjectAction.hidden = !String(item.task_id || "").trim();
     menu.hidden = false;
     positionArtifactContextMenu(menu, event);
     var firstAction = menu.querySelector('button:not([hidden])');
@@ -611,6 +848,7 @@
     if (action === "upload") uploadArtifactToTelegram(item, button);
     if (action === "import") openOutputImport(item, button);
     if (action === "open-folder") openArtifactFolder(item, button);
+    if (action === "move-project") openOutputProjectMove(item);
     if (action === "delete") deleteArtifactTask(item, button);
   }
   function openArtifactFolder(item, button) {
@@ -862,6 +1100,339 @@
     outputImport.path = "";
     window.RHMotion.closeModal("outputImportModal");
   }
+  function projectFolderRecord(projectId) {
+    var id = String(projectId || "").trim();
+    return state.projects.find(function (project) { return String(project && project.id || "") === id; }) || null;
+  }
+  function mergeProjectFolder(project) {
+    if (!project || !String(project.id || "").trim()) return;
+    var id = String(project.id);
+    var index = state.projects.findIndex(function (item) { return String(item && item.id || "") === id; });
+    if (index >= 0) state.projects[index] = project;
+    else state.projects.push(project);
+  }
+  function outputProjectEditorIsOpen() {
+    var modal = $("outputProjectEditorModal");
+    return Boolean(modal && !modal.hidden && modal.classList.contains("is-open"));
+  }
+  function openOutputProjectEditor(mode, project) {
+    projectEditor.mode = mode === "rename" ? "rename" : "create";
+    projectEditor.projectId = projectEditor.mode === "rename" && project ? String(project.id || "") : "";
+    var input = $("outputProjectName");
+    var title = $("outputProjectEditorTitle");
+    var description = $("outputProjectEditorDescription");
+    var confirm = $("confirmOutputProjectEditor");
+    if (!input || !title || !description || !confirm) return;
+    title.textContent = projectEditor.mode === "rename" ? "重命名项目" : "新建项目";
+    description.textContent = projectEditor.mode === "rename"
+      ? "只修改成片页中的项目名称，不会重命名磁盘目录或移动媒体文件。"
+      : "新项目是成片页的归类文件夹；创建后可从成片右键菜单将任务移入。不会创建或复制媒体文件。";
+    confirm.textContent = projectEditor.mode === "rename" ? "保存名称" : "新建项目";
+    input.value = projectEditor.mode === "rename" && project ? String(project.name || "") : "";
+    input.disabled = false;
+    window.RHMotion.openModal("outputProjectEditorModal", "closeOutputProjectEditor");
+    window.requestAnimationFrame(function () {
+      input.focus();
+      if (projectEditor.mode === "rename") input.select();
+    });
+  }
+  function closeOutputProjectEditor() {
+    projectEditor.mode = "";
+    projectEditor.projectId = "";
+    window.RHMotion.closeModal("outputProjectEditorModal");
+  }
+  function submitOutputProjectEditor() {
+    var input = $("outputProjectName");
+    var button = $("confirmOutputProjectEditor");
+    if (!input || !button || button.disabled) return;
+    var name = String(input.value || "").trim();
+    if (!name) {
+      input.focus();
+      showToast("请填写项目名称", true);
+      return;
+    }
+    var rename = projectEditor.mode === "rename";
+    var projectId = projectEditor.projectId;
+    if (rename && !projectFolderRecord(projectId)) {
+      closeOutputProjectEditor();
+      return showToast("项目已不存在，请刷新页面", true);
+    }
+    button.disabled = true;
+    input.disabled = true;
+    button.textContent = rename ? "保存中…" : "创建中…";
+    var path = rename ? "/api/projects/" + encodeURIComponent(projectId) : "/api/projects";
+    request(path, {
+      method: rename ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name })
+    }).then(function (data) {
+      var project = data && data.project;
+      if (!project) throw new Error(rename ? "项目重命名失败" : "项目创建失败");
+      mergeProjectFolder(project);
+      if (rename) {
+        state.outputs.forEach(function (item) {
+          if (outputProjectId(item) !== String(project.id || "")) return;
+          item.project_name = String(project.name || "");
+          item.project_path = String(project.path || "");
+        });
+      }
+      closeOutputProjectEditor();
+      render();
+      showToast(rename ? "项目已重命名" : "项目已新建，可从成片右键菜单将任务移入");
+    }).catch(function (error) {
+      showToast((rename ? "重命名项目失败：" : "新建项目失败：") + error.message, true);
+      input.disabled = false;
+      input.focus();
+      if (rename) input.select();
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = rename ? "保存名称" : "新建项目";
+    });
+  }
+  function outputProjectDeleteIsOpen() {
+    var modal = $("outputProjectDeleteModal");
+    return Boolean(modal && !modal.hidden && modal.classList.contains("is-open"));
+  }
+  function openOutputProjectDelete(project) {
+    if (!project) return;
+    projectDelete.projectId = String(project.id || "");
+    var description = $("outputProjectDeleteDescription");
+    var record = outputProjectRecord(projectDelete.projectId) || project;
+    if (description) {
+      description.textContent = "删除项目「" + String(project.name || "") + "」后，其中 " + Number(record.tasks || 0) + " 个任务会归入未归类。不会删除任务、外部项目目录或任何成片文件。";
+    }
+    window.RHMotion.openModal("outputProjectDeleteModal", "closeOutputProjectDelete");
+  }
+  function closeOutputProjectDelete() {
+    projectDelete.projectId = "";
+    window.RHMotion.closeModal("outputProjectDeleteModal");
+  }
+  function confirmOutputProjectDelete() {
+    var projectId = projectDelete.projectId;
+    var project = projectFolderRecord(projectId);
+    var button = $("confirmOutputProjectDelete");
+    if (!projectId || !project || !button || button.disabled) return;
+    button.disabled = true;
+    button.textContent = "删除中…";
+    request("/api/projects/" + encodeURIComponent(projectId), { method: "DELETE" }).then(function (data) {
+      state.projects = state.projects.filter(function (item) { return String(item && item.id || "") !== projectId; });
+      state.outputs.forEach(function (item) {
+        if (outputProjectId(item) !== projectId) return;
+        item.project_id = "";
+        item.project_name = "";
+        item.project_path = "";
+      });
+      if (state.projectId === projectId) state.projectId = "";
+      closeOutputProjectDelete();
+      resetOutputPage();
+      render();
+      showToast("项目已删除，" + Number(data && data.affected_task_count || 0) + " 个任务已归入未归类");
+    }).catch(function (error) {
+      showToast("删除项目失败：" + error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = "删除项目";
+    });
+  }
+  function closeOutputProjectContextMenu() {
+    var menu = $("outputProjectContextMenu");
+    if (menu) menu.hidden = true;
+    state.contextProjectId = "";
+  }
+  function openOutputProjectContextMenu(event, projectId) {
+    var project = projectFolderRecord(projectId);
+    var menu = $("outputProjectContextMenu");
+    if (!project || !menu) return;
+    event.preventDefault();
+    closeArtifactContextMenu();
+    closeOutputProjectContextMenu();
+    state.contextProjectId = String(project.id || "");
+    menu.hidden = false;
+    positionArtifactContextMenu(menu, event);
+    var firstAction = menu.querySelector("button");
+    if (firstAction) firstAction.focus();
+  }
+  function handleOutputProjectContextMenu(event) {
+    var target = event.target.closest("[data-output-project-context]");
+    if (!target || !$("outputProjectGrid").contains(target)) return;
+    openOutputProjectContextMenu(event, target.dataset.outputProjectContext);
+  }
+  function handleOutputProjectContextAction(event) {
+    var button = event.target.closest("[data-output-project-menu-action]");
+    if (!button) return;
+    var project = projectFolderRecord(state.contextProjectId);
+    var action = button.dataset.outputProjectMenuAction;
+    closeOutputProjectContextMenu();
+    if (!project) return;
+    if (action === "rename") openOutputProjectEditor("rename", project);
+    if (action === "delete") openOutputProjectDelete(project);
+  }
+  function hasOutputTaskDrag(event) {
+    var types = event.dataTransfer && event.dataTransfer.types;
+    return Boolean(types && Array.prototype.indexOf.call(types, "application/x-rh-output-task") !== -1);
+  }
+  function outputProjectDropTargetFromEvent(event) {
+    var target = event.target.closest("[data-output-project-drop]");
+    return target && $("outputProjectGrid").contains(target) ? target : null;
+  }
+  function clearOutputProjectDropState() {
+    $("outputProjectGrid").querySelectorAll(".is-output-project-drop-target").forEach(function (element) {
+      element.classList.remove("is-output-project-drop-target");
+    });
+  }
+  function outputTaskPayloadFromDrop(event) {
+    if (!event.dataTransfer) return null;
+    var raw = "";
+    try { raw = event.dataTransfer.getData("application/x-rh-output-task") || ""; } catch (error) {}
+    if (!raw) return null;
+    try {
+      var payload = JSON.parse(raw);
+      return payload && String(payload.task_id || "").trim() ? payload : null;
+    } catch (error) {
+      return null;
+    }
+  }
+  function updateOutputTaskProjectState(taskId, updated) {
+    state.outputs.forEach(function (output) {
+      if (String(output.task_id || "") !== String(taskId || "")) return;
+      output.project_id = String(updated.project_id || "");
+      output.project_name = String(updated.project_name || "");
+      output.project_path = String(updated.project_path || "");
+    });
+  }
+  function requestOutputTaskProject(item, targetId) {
+    var normalizedTargetId = String(targetId || "").trim();
+    var currentId = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
+    var target = normalizedTargetId === UNCLASSIFIED_PROJECT_ID ? null : outputProjectRecord(normalizedTargetId);
+    if (normalizedTargetId !== UNCLASSIFIED_PROJECT_ID && !target) return Promise.reject(new Error("目标项目不存在，请刷新页面"));
+    if (normalizedTargetId === currentId) return Promise.resolve({ same: true, project: target });
+    var project = target ? { project_id: target.id, project_name: target.name, project_path: target.path } : {};
+    return request("/api/tasks/" + encodeURIComponent(item.task_id) + "/project", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: project })
+    }).then(function (data) {
+      var updated = data.task || {};
+      updateOutputTaskProjectState(item.task_id, updated);
+      return { same: false, project: target, updated: updated };
+    });
+  }
+  function handleOutputProjectDragOver(event) {
+    if (!hasOutputTaskDrag(event)) return;
+    var target = outputProjectDropTargetFromEvent(event);
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    clearOutputProjectDropState();
+    target.classList.add("is-output-project-drop-target");
+  }
+  function handleOutputProjectDragLeave(event) {
+    var target = outputProjectDropTargetFromEvent(event);
+    if (!target || (event.relatedTarget && target.contains(event.relatedTarget))) return;
+    target.classList.remove("is-output-project-drop-target");
+  }
+  function handleOutputProjectDrop(event) {
+    if (!hasOutputTaskDrag(event)) return;
+    var target = outputProjectDropTargetFromEvent(event);
+    if (!target) return;
+    event.preventDefault();
+    var payload = outputTaskPayloadFromDrop(event);
+    var targetId = String(target.dataset.outputProjectDrop || "").trim();
+    clearOutputProjectDropState();
+    if (!payload || !targetId) return;
+    var item = state.outputs.find(function (output) {
+      return String(output.id || "") === String(payload.artifact_id || "") && String(output.task_id || "") === String(payload.task_id || "");
+    }) || state.outputs.find(function (output) { return String(output.task_id || "") === String(payload.task_id || ""); });
+    if (!item) return showToast("这个成片已不在当前列表，请刷新页面", true);
+    var currentId = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
+    if (targetId === currentId) return showToast("这个任务已经属于该项目");
+    target.classList.add("is-output-project-drop-saving");
+    requestOutputTaskProject(item, targetId).then(function (result) {
+      resetOutputPage();
+      render();
+      showToast("任务已移动到「" + (result.project ? result.project.name : "未归类") + "」");
+    }).catch(function (error) {
+      showToast("保存项目归类失败：" + error.message, true);
+    }).finally(function () {
+      target.classList.remove("is-output-project-drop-saving");
+    });
+  }
+  function outputProjectMoveIsOpen() {
+    var modal = $("outputProjectMoveModal");
+    return Boolean(modal && !modal.hidden && modal.classList.contains("is-open"));
+  }
+  function outputProjectMoveOptions() {
+    return [{ id: UNCLASSIFIED_PROJECT_ID, name: "未归类", path: "", outputs: 0, tasks: 0 }].concat(outputProjectRecords().filter(function (record) { return record.id !== UNCLASSIFIED_PROJECT_ID; }));
+  }
+  function renderOutputProjectMoveOptions() {
+    var list = $("outputProjectMoveOptions");
+    var confirm = $("confirmOutputProjectMove");
+    var item = projectMove.item;
+    if (!list || !confirm || !item) return;
+    var currentId = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
+    var selectedId = projectMove.projectId || currentId;
+    list.innerHTML = outputProjectMoveOptions().map(function (record) {
+      var checked = record.id === selectedId;
+      var current = record.id === currentId;
+      var detail = record.id === UNCLASSIFIED_PROJECT_ID ? "不属于任何项目文件夹" : record.tasks + " 个任务 · " + record.outputs + " 个成片";
+      return '<label class="output-project-move-option' + (current ? ' is-current' : '') + '">' +
+        '<input type="radio" name="output-project-target" value="' + esc(record.id) + '"' + (checked ? ' checked' : '') + ' />' +
+        '<span class="output-project-move-copy"><strong>' + esc(record.name) + '</strong><small>' + esc(detail) + (current ? ' · 当前项目' : '') + '</small>' + (record.path ? '<span title="' + esc(record.path) + '">' + esc(record.path) + '</span>' : '') + '</span>' +
+        '</label>';
+    }).join("");
+    confirm.disabled = selectedId === currentId;
+  }
+  function openOutputProjectMove(item) {
+    if (!item || !String(item.task_id || "").trim()) return showToast("这个产物没有关联的本地任务", true);
+    projectMove.item = item;
+    var currentId = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
+    var firstOther = outputProjectMoveOptions().find(function (record) { return record.id !== currentId; });
+    projectMove.projectId = firstOther ? firstOther.id : currentId;
+    var description = $("outputProjectMoveDescription");
+    if (description) description.textContent = "任务「" + String(item.task_name || item.task_id) + "」只会改变项目归类，不会移动或复制成片文件。";
+    renderOutputProjectMoveOptions();
+    window.RHMotion.openModal("outputProjectMoveModal", "closeOutputProjectMove");
+  }
+  function closeOutputProjectMove() {
+    projectMove.item = null;
+    projectMove.projectId = "";
+    window.RHMotion.closeModal("outputProjectMoveModal");
+  }
+  function confirmOutputProjectMove() {
+    var item = projectMove.item;
+    var targetId = projectMove.projectId;
+    if (!item || !targetId) return showToast("请选择一个项目", true);
+    var currentId = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
+    if (targetId === currentId) return showToast("任务已经属于这个项目", true);
+    var target = targetId === UNCLASSIFIED_PROJECT_ID ? null : outputProjectRecord(targetId);
+    if (targetId !== UNCLASSIFIED_PROJECT_ID && !target) return showToast("目标项目不存在，请刷新页面", true);
+    var button = $("confirmOutputProjectMove");
+    button.disabled = true;
+    button.textContent = "保存中…";
+    var project = target ? { project_id: target.id, project_name: target.name, project_path: target.path } : {};
+    request("/api/tasks/" + encodeURIComponent(item.task_id) + "/project", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project: project })
+    }).then(function (data) {
+      var updated = data.task || {};
+      state.outputs.forEach(function (output) {
+        if (String(output.task_id || "") !== String(item.task_id || "")) return;
+        output.project_id = String(updated.project_id || "");
+        output.project_name = String(updated.project_name || "");
+        output.project_path = String(updated.project_path || "");
+      });
+      closeOutputProjectMove();
+      rebuildSummary();
+      render();
+      showToast(target ? "任务已移动到「" + target.name + "」" : "任务已移出项目文件夹");
+    }).catch(function (error) {
+      showToast("保存项目归类失败：" + error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = "移动任务";
+    });
+  }
   function confirmOutputImport() {
     var selected = $("outputImportTargets").querySelector('input[name="output-import-target"]:checked');
     if (!outputImport.path || !selected) return showToast("请先选择一个文件输入节点", true);
@@ -970,21 +1541,27 @@
       return;
     }
     if (event.key === "Escape") {
-      var hasOverlay = outputPreviewIsOpen() || Boolean($("outputImportModal") && !$("outputImportModal").hidden) || Boolean($("artifactContextMenu") && !$("artifactContextMenu").hidden);
+      var hasOverlay = outputPreviewIsOpen() || Boolean($("outputImportModal") && !$("outputImportModal").hidden) || outputProjectMoveIsOpen() || outputProjectEditorIsOpen() || outputProjectDeleteIsOpen() || Boolean($("artifactContextMenu") && !$("artifactContextMenu").hidden) || Boolean($("outputProjectContextMenu") && !$("outputProjectContextMenu").hidden);
       closeOutputPreview();
       closeOutputImport();
+      closeOutputProjectMove();
+      closeOutputProjectEditor();
+      closeOutputProjectDelete();
       closeArtifactContextMenu();
+      closeOutputProjectContextMenu();
       if (hasOverlay) event.preventDefault();
       return;
     }
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-    if (event.target.closest && event.target.closest("button, a, input, select, textarea, [contenteditable=\"true\"]")) return;
-    var hasModal = Boolean(document.querySelector(".modal-backdrop.is-open:not([hidden])"));
     if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
-      if (hasModal) return;
+      var hasModal = Boolean(document.querySelector(".modal-backdrop.is-open:not([hidden])"));
+      if (hasModal || !outputKeyboardNavigationAllowed(event)) return;
       if (navigateSelectedArtifact(event.key.slice(5).toLowerCase())) event.preventDefault();
       return;
     }
+    if (event.target.closest && event.target.closest("button, a, input, select, textarea, [contenteditable=\"true\"]")) return;
+    var hasModal = Boolean(document.querySelector(".modal-backdrop.is-open:not([hidden])"));
+    if (hasModal) return;
     var selected = artifactById(state.selectedArtifactId);
     if (!selected) return;
     if (event.key === " ") {
@@ -1020,6 +1597,7 @@
   }
   function render() {
     renderSummary();
+    renderProjectBrowser();
     var items = filteredOutputs();
     if (!items.length) {
       state.selectedArtifactId = "";
@@ -1031,10 +1609,13 @@
     $("outputGrid").innerHTML = visibleItems.map(function (item, index) {
       var cost = costLabel(item);
       var canCompare = item.display_type === "image" || item.display_type === "video";
-      return '<article class="artifact-card' + (canCompare ? ' is-compare-draggable' : '') + '" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" data-compare-draggable="' + (canCompare ? 'true' : 'false') + '" draggable="' + (canCompare ? 'true' : 'false') + '" tabindex="0" role="button" aria-roledescription="' + (canCompare ? '可拖拽到内容对比' : '产物卡片') + '" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
+      var canProject = Boolean(String(item.task_id || "").trim());
+      var canDrag = canCompare || canProject;
+      var dragDescription = canCompare && canProject ? "可拖拽到项目文件夹或内容对比" : (canProject ? "可拖拽到项目文件夹" : (canCompare ? "可拖拽到内容对比" : "产物卡片"));
+      return '<article class="artifact-card' + (canCompare ? ' is-compare-draggable' : '') + (canProject ? ' is-project-draggable' : '') + '" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" data-compare-draggable="' + (canCompare ? 'true' : 'false') + '" data-project-draggable="' + (canProject ? 'true' : 'false') + '" draggable="' + (canDrag ? 'true' : 'false') + '" tabindex="0" role="button" aria-roledescription="' + dragDescription + '" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
         artifactCardHeadMarkup(item) +
         mediaMarkup(item) +
-        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页">任务 · ' + taskWorkflowLabel(item) + '</div><div class="artifact-foot"><div class="artifact-foot-info"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span>' + artifactResolutionMarkup(item) + '</div>' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + '</div></div>' +
+        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页"><span class="artifact-task-prefix">任务 ·</span>' + taskWorkflowLabel(item) + taskIdLabel(item) + '</div><div class="artifact-foot"><div class="artifact-foot-info"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span>' + artifactResolutionMarkup(item) + '</div>' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + '</div></div>' +
         '</article>';
     }).join("");
     syncArtifactSelection(visibleItems);
@@ -1044,10 +1625,11 @@
   }
   function loadOutputs(showMessage) {
     $("refreshOutputs").disabled = true;
-    Promise.all([request("/api/outputs"), request("/api/state")]).then(function (results) {
+    Promise.all([request("/api/outputs"), request("/api/state?scope=outputs")]).then(function (results) {
       var data = results[0];
       var settings = results[1] && results[1].settings && results[1].settings.telegram;
       state.outputs = Array.isArray(data.outputs) ? data.outputs : [];
+      state.projects = Array.isArray(data.projects) ? data.projects : [];
       state.summary = data.summary || {};
       state.telegramConfigured = Boolean(settings && settings.configured);
       render();
@@ -1109,6 +1691,30 @@
       themeButton.title = light ? "切换到夜间模式" : "切换到日间模式";
     });
     $("refreshOutputs").addEventListener("click", function () { loadOutputs(true); });
+    function chooseOutputProject(event) {
+      var button = event.target.closest("[data-output-project]");
+      if (!button) return;
+      event.preventDefault();
+      state.projectId = button.dataset.outputProject || "";
+      resetOutputPage();
+      closeArtifactContextMenu();
+      closeOutputProjectContextMenu();
+      render();
+    }
+    $("outputProjectGrid").addEventListener("click", chooseOutputProject);
+    $("outputProjectBreadcrumb").addEventListener("click", chooseOutputProject);
+    $("outputProjectGrid").addEventListener("contextmenu", handleOutputProjectContextMenu);
+    $("outputProjectGrid").addEventListener("dragover", handleOutputProjectDragOver);
+    $("outputProjectGrid").addEventListener("dragleave", handleOutputProjectDragLeave);
+    $("outputProjectGrid").addEventListener("drop", handleOutputProjectDrop);
+    $("outputProjectContextMenu").addEventListener("click", handleOutputProjectContextAction);
+    $("createOutputProject").addEventListener("click", function () { openOutputProjectEditor("create"); });
+    $("showAllOutputProjects").addEventListener("click", function () {
+      state.projectId = "";
+      resetOutputPage();
+      closeOutputProjectContextMenu();
+      render();
+    });
     $("exportCaseOutputs").addEventListener("click", exportCaseOutputs);
     $("deleteOneStarOutputs").addEventListener("click", deleteOneStarOutputs);
     $("outputGrid").addEventListener("pointerdown", function (event) {
@@ -1122,29 +1728,51 @@
       if (card) selectArtifactCard(artifactById(card.dataset.artifactId), false);
     });
     $("outputGrid").addEventListener("dragstart", function (event) {
-      var card = event.target.closest('.artifact-card[data-compare-draggable="true"]');
+      var card = event.target.closest('.artifact-card[draggable="true"]');
       if (!card || !event.dataTransfer) return;
       var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
       if (!item) return;
-      var payload = JSON.stringify({
-        id: String(item.id),
-        name: String(item.name || ""),
-        display_type: String(item.display_type || ""),
-        mime: String(item.mime || ""),
-        url: outputUrl(item),
-        task_name: String(item.task_name || ""),
-        source: "output"
-      });
-      event.dataTransfer.effectAllowed = "copy";
-      event.dataTransfer.setData("application/x-rh-compare-asset", payload);
-      event.dataTransfer.setData("text/plain", payload);
+      var canCompare = card.dataset.compareDraggable === "true";
+      var canProject = card.dataset.projectDraggable === "true";
+      event.dataTransfer.effectAllowed = "copyMove";
+      if (canProject) {
+        event.dataTransfer.setData("application/x-rh-output-task", JSON.stringify({
+          task_id: String(item.task_id || ""),
+          artifact_id: String(item.id || ""),
+          project_id: outputProjectId(item),
+          source: "output"
+        }));
+      }
+      if (canCompare) {
+        var comparePayload = JSON.stringify({
+          id: String(item.id),
+          name: String(item.name || ""),
+          display_type: String(item.display_type || ""),
+          mime: String(item.mime || ""),
+          url: outputUrl(item),
+          task_name: String(item.task_name || ""),
+          source: "output"
+        });
+        event.dataTransfer.setData("application/x-rh-compare-asset", comparePayload);
+        event.dataTransfer.setData("text/plain", comparePayload);
+      } else if (canProject) {
+        event.dataTransfer.setData("text/plain", String(item.task_id || ""));
+      }
       card.classList.add("is-dragging");
     });
     $("outputGrid").addEventListener("dragend", function (event) {
       var card = event.target.closest(".artifact-card");
       if (card) card.classList.remove("is-dragging");
+      clearOutputProjectDropState();
     });
     $("outputGrid").addEventListener("click", function (event) {
+      var copyTaskButton = event.target.closest("[data-copy-task-id]");
+      if (copyTaskButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        copyTaskId(copyTaskButton.dataset.copyTaskId, copyTaskButton);
+        return;
+      }
       var ratingButton = event.target.closest("[data-rate-output]");
       if (ratingButton) {
         var ratedItem = state.outputs.find(function (output) { return String(output.id) === String(ratingButton.dataset.rateOutput); });
@@ -1175,7 +1803,12 @@
       selectArtifactCard(item, false);
       openOutputPreview(item);
     });
-    $("outputSearch").addEventListener("input", function () { state.search = this.value; resetOutputPage(); render(); });
+    $("outputSearch").addEventListener("input", function () {
+      state.search = this.value;
+      if (state.contextWorkflowName) state.contextWorkflowName = state.search.trim();
+      resetOutputPage();
+      render();
+    });
     $("outputSort").addEventListener("change", function () { state.sort = this.value; resetOutputPage(); render(); });
     $("outputFilters").addEventListener("click", function (event) {
       var button = event.target.closest("[data-output-type]");
@@ -1195,9 +1828,10 @@
       var button = event.target.closest("[data-output-tag]");
       if (!button) return;
       var tag = button.dataset.outputTag || "";
-      var index = state.tags.indexOf(tag);
-      if (index === -1) state.tags.push(tag);
-      else state.tags.splice(index, 1);
+      var mode = outputTagFilterMode(tag);
+      var currentIndex = OUTPUT_TAG_FILTER_MODES.indexOf(mode);
+      if (OUTPUT_TAG_FILTER_TAGS.indexOf(tag) === -1 || currentIndex === -1) return;
+      state.tagFilters[tag] = OUTPUT_TAG_FILTER_MODES[(currentIndex + 1) % OUTPUT_TAG_FILTER_MODES.length];
       resetOutputPage();
       render();
     });
@@ -1227,12 +1861,37 @@
       if (event.target.name === "output-import-target") $("confirmOutputImport").disabled = false;
     });
     $("outputImportModal").addEventListener("click", function (event) { if (event.target === $("outputImportModal")) closeOutputImport(); });
+    $("closeOutputProjectMove").addEventListener("click", closeOutputProjectMove);
+    $("cancelOutputProjectMove").addEventListener("click", closeOutputProjectMove);
+    $("confirmOutputProjectMove").addEventListener("click", confirmOutputProjectMove);
+    $("outputProjectMoveOptions").addEventListener("change", function (event) {
+      if (event.target.name === "output-project-target") {
+        projectMove.projectId = event.target.value;
+        renderOutputProjectMoveOptions();
+      }
+    });
+    $("outputProjectMoveModal").addEventListener("click", function (event) { if (event.target === $("outputProjectMoveModal")) closeOutputProjectMove(); });
+    $("closeOutputProjectEditor").addEventListener("click", closeOutputProjectEditor);
+    $("cancelOutputProjectEditor").addEventListener("click", closeOutputProjectEditor);
+    $("confirmOutputProjectEditor").addEventListener("click", submitOutputProjectEditor);
+    $("outputProjectName").addEventListener("keydown", function (event) {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      submitOutputProjectEditor();
+    });
+    $("outputProjectEditorModal").addEventListener("click", function (event) { if (event.target === $("outputProjectEditorModal")) closeOutputProjectEditor(); });
+    $("closeOutputProjectDelete").addEventListener("click", closeOutputProjectDelete);
+    $("cancelOutputProjectDelete").addEventListener("click", closeOutputProjectDelete);
+    $("confirmOutputProjectDelete").addEventListener("click", confirmOutputProjectDelete);
+    $("outputProjectDeleteModal").addEventListener("click", function (event) { if (event.target === $("outputProjectDeleteModal")) closeOutputProjectDelete(); });
     document.addEventListener("keydown", handleOutputKeyboardShortcut);
     document.addEventListener("click", function (event) {
       if (!event.target.closest("#artifactContextMenu")) closeArtifactContextMenu();
+      if (!event.target.closest("#outputProjectContextMenu")) closeOutputProjectContextMenu();
     });
     window.addEventListener("resize", updateFilterSlider);
   }
+  readOutputContext();
   bindEvents();
   loadOutputs(false);
 }());

@@ -7,7 +7,6 @@
   var modalTimers = {};
   var modalReturnFocus = {};
   var pageEnterStarted = false;
-  var warmedPages = {};
   var pendingPageDirection = "forward";
   var nativePageTransition = Boolean(
     window.CSS &&
@@ -144,18 +143,6 @@
     }
   }
 
-  function warmPage(link) {
-    if (!link) return;
-    try {
-      var url = new URL(link.href, window.location.href);
-      if (url.origin !== window.location.origin || url.pathname === window.location.pathname || warmedPages[url.href]) return;
-      warmedPages[url.href] = true;
-      window.fetch(url.href, { credentials: "same-origin", cache: "no-store" }).catch(function () {
-        delete warmedPages[url.href];
-      });
-    } catch (error) {}
-  }
-
   function startPageEnter() {
     var root = document.documentElement;
     if (pageEnterStarted || prefersReducedMotion() || nativePageTransition) return;
@@ -188,7 +175,6 @@
 
   function startPageLeave(link, event) {
     if (!isInternalPageLink(link) || isModifiedClick(event) || prefersReducedMotion()) return false;
-    warmPage(link);
     rememberPageDirection(pageDirectionFor(link));
     // Let the browser navigate immediately. Native cross-document view
     // transitions keep both page snapshots visible, so there is no blank gap.
@@ -368,9 +354,6 @@
     document.addEventListener("click", function (event) {
       var link = event.target.closest && event.target.closest("a");
       if (link) startPageLeave(link, event);
-    });
-    document.querySelectorAll(".top-nav a, .brand-home-link").forEach(function (link) {
-      link.addEventListener("pointerenter", function () { warmPage(link); }, { once: true, passive: true });
     });
   });
 

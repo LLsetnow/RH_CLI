@@ -177,7 +177,7 @@
                 <span id="dashboardBalanceKeyCount" class="dashboard-panel-caption">0 个账号</span>
               </div>
               <div class="dashboard-coin-balance"><strong id="dashboardCoinBalance">—</strong><span>RH 币总计</span></div>
-              <div id="dashboardAccountBalances" class="dashboard-account-balances"></div>
+              <div id="dashboardAccountBalances" class="dashboard-account-balances"><div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取余额</strong></div></div>
               <div id="dashboardBalanceNote" class="dashboard-balance-note">余额来自最近一次成功查询。</div>
             </section>
 
@@ -208,7 +208,7 @@
             </div>
           </div>
           <p id="dashboardWorkflowScoreNote" class="dashboard-workflow-score-note">总得分 = 成片页可见产物的已评分星级之和。</p>
-          <div id="dashboardTopWorkflows" class="dashboard-workflow-score-list" aria-live="polite"></div>
+          <div id="dashboardTopWorkflows" class="dashboard-workflow-score-list" aria-live="polite"><div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取工作流表现</strong></div></div>
         </section>
 
         <section class="panel dashboard-recent-panel" aria-labelledby="recentUsageTitle">
@@ -219,7 +219,7 @@
             </div>
             <span class="dashboard-panel-caption">删除任务后仍保留</span>
           </div>
-          <div id="dashboardRecent" class="dashboard-recent-list" aria-live="polite"></div>
+          <div id="dashboardRecent" class="dashboard-recent-list" aria-live="polite"><div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取用量记录</strong></div></div>
         </section>
       </main>
     </div>

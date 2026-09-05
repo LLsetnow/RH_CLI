@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -39,6 +40,7 @@ from rh_cli.workflow.client import (
     _validate_api_workflow,
 )
 from .telegram import TelegramDeliveryError, TelegramNotifier
+from .video_downloader import extract_social_video_url, social_video_platform, download_social_video
 
 
 WEB_ROOT = Path(__file__).resolve().parent
@@ -96,6 +98,7 @@ TASK_MANIFEST_FILENAME = "manifest.json"
 WORKFLOW_PROMPT_GROUP_SUFFIX = ".prompt_group.json"
 GENERAL_ACCOUNT_ID = "__general__"
 UNBOUND_ACCOUNT_ID = "__unbound__"
+TELEGRAM_PROJECT_NAME = "Telegrame"
 INSTANCE_TYPES = {"default", "plus", "ultra"}
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 VIDEO_OUTPUT_SUFFIXES = {
@@ -234,6 +237,71 @@ def safe_name(value: str, fallback: str = "file") -> str:
     name = Path(str(value or "")).name.strip() or fallback
     name = re.sub(r"[^A-Za-z0-9._()\-\u4e00-\u9fff ]+", "_", name)
     return name[:160] or fallback
+
+
+def normalize_output_prefix(value: Any) -> str:
+    """Return a safe optional basename prefix for downloaded task outputs."""
+    raw = str(value or "").strip()
+    return safe_name(raw, "") if raw else ""
+
+
+def _stable_project_id(value: str) -> str:
+    digest = hashlib.sha1(str(value).encode("utf-8")).hexdigest()[:12]
+    return f"project_{digest}"
+
+
+def _infer_project_path(*values: str | Path) -> Path | None:
+    """Infer the owning VideoMake project without scanning or copying its files."""
+    for value in values:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        parts = path.parts
+        lowered = [part.casefold() for part in parts]
+        if "projects" not in lowered:
+            continue
+        marker = lowered.index("projects")
+        if marker + 1 >= len(parts):
+            continue
+        return Path(*parts[: marker + 2])
+    return None
+
+
+def normalize_project(
+    project: Any | None = None,
+    *,
+    output_dir: str | Path = "",
+    workflow_path: str | Path = "",
+    infer_from_paths: bool = True,
+) -> dict[str, str]:
+    """Return stable project metadata for a task; paths are metadata only."""
+    payload = project if isinstance(project, dict) else {}
+    project_id = str(payload.get("id") or payload.get("project_id") or "").strip()
+    project_name = str(payload.get("name") or payload.get("project_name") or "").strip()
+    project_path = str(payload.get("path") or payload.get("project_path") or "").strip()
+
+    has_explicit_metadata = bool(project_id or project_name or project_path)
+    if infer_from_paths and not has_explicit_metadata:
+        inferred_path = _infer_project_path(output_dir, workflow_path)
+        project_path = str(inferred_path) if inferred_path else ""
+    if project_path:
+        try:
+            project_path = str(Path(project_path).expanduser().resolve())
+        except OSError:
+            project_path = ""
+    if project_path and not project_name:
+        project_name = Path(project_path).name.strip()
+    project_name = re.sub(r"[\x00-\x1f\x7f]", "", project_name).strip()[:120]
+    if not project_id:
+        if project_path:
+            project_id = _stable_project_id(project_path)
+        elif project_name:
+            project_id = _stable_project_id(f"name:{project_name}")
+    return {"id": project_id, "name": project_name, "path": project_path}
 
 
 def canonical_workflow_name(value: str, fallback: str = "workflow.json") -> str:
@@ -756,8 +824,11 @@ def apply_default_file_inputs(
     return resolved
 
 
-def telegram_inbound_file_input(detail: dict[str, Any]) -> dict[str, Any]:
-    """Resolve the only required image input used by Telegram image intake."""
+def telegram_inbound_file_input(detail: dict[str, Any], media_type: str = "image") -> dict[str, Any]:
+    """Resolve the only required image or video input used by Telegram intake."""
+    media_type = str(media_type or "image").strip().lower()
+    if media_type not in {"image", "video"}:
+        raise RhCliError("INVALID_TELEGRAM_INBOUND_MEDIA", "Telegram 入站媒体类型无效。")
     workflow = detail.get("workflow") if isinstance(detail, dict) else None
     record = detail.get("record") if isinstance(detail, dict) else None
     if not isinstance(workflow, dict) or not isinstance(record, dict):
@@ -778,19 +849,29 @@ def telegram_inbound_file_input(detail: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict) and bool(item.get("required"))
         )
 
+    media_label = "视频" if media_type == "video" else "图片"
     if len(required_inputs) != 1 or required_inputs[0][0] != "file":
         raise RhCliError(
             "INVALID_TELEGRAM_INBOUND_WORKFLOW",
-            "Telegram 图片入站要求工作流恰好有一个必填输入节点，且该节点必须是图片节点；其他输入请设为非必填。",
+            f"Telegram {media_label}入站要求工作流恰好有一个必填输入节点，且该节点必须是{media_label}节点；其他输入请设为非必填。",
         )
     file_input = required_inputs[0][1]
     class_type = str(file_input.get("class_type") or "").lower()
-    if "loadimage" not in class_type and "image" not in str(file_input.get("field") or "").lower():
+    field = str(file_input.get("field") or "").lower()
+    if media_type == "video":
+        valid_media_input = "video" in class_type or "video" in field
+    else:
+        valid_media_input = "loadimage" in class_type or "image" in field
+    if not valid_media_input:
         raise RhCliError(
             "INVALID_TELEGRAM_INBOUND_WORKFLOW",
-            "Telegram 图片入站的唯一必填输入节点必须是图片节点。",
+            f"Telegram {media_label}入站的唯一必填输入节点必须是{media_label}节点。",
         )
     return file_input
+
+
+def telegram_video_inbound_file_input(detail: dict[str, Any]) -> dict[str, Any]:
+    return telegram_inbound_file_input(detail, "video")
 
 
 def normalize_custom_input_values(
@@ -1045,9 +1126,14 @@ class LocalStore:
               progress TEXT NOT NULL DEFAULT '',
               workflow_path TEXT NOT NULL,
               workflow_name TEXT NOT NULL,
+              project_id TEXT NOT NULL DEFAULT '',
+              project_name TEXT NOT NULL DEFAULT '',
+              project_path TEXT NOT NULL DEFAULT '',
+              project_inference_disabled INTEGER NOT NULL DEFAULT 0,
               key_id TEXT,
               account_id TEXT NOT NULL DEFAULT '',
               instance_type TEXT NOT NULL DEFAULT 'default',
+              output_prefix TEXT NOT NULL DEFAULT '',
               dispatch_key_name TEXT NOT NULL DEFAULT '',
               dispatch_key_site TEXT NOT NULL DEFAULT '',
               dispatch_key_api_type TEXT NOT NULL DEFAULT '',
@@ -1073,6 +1159,17 @@ class LocalStore:
               cost_type TEXT,
               cost TEXT,
               duration TEXT
+            )
+            """
+        )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              path TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
             )
             """
         )
@@ -1124,9 +1221,24 @@ class LocalStore:
             )
             """
         )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS remote_queue_cooldowns (
+              key_id TEXT PRIMARY KEY,
+              retry_after INTEGER NOT NULL DEFAULT 0,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              wait_for_predecessors INTEGER NOT NULL DEFAULT 0,
+              probe_task_id TEXT NOT NULL DEFAULT '',
+              updated_at INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         self._migrate_schema()
         self._db.commit()
         self._interrupt_incomplete()
+        self._backfill_task_projects()
+        self._backfill_project_registry()
+        self._backfill_telegram_projects()
         self._backfill_task_replay_snapshots()
         self._backfill_usage_records()
 
@@ -1173,6 +1285,24 @@ class LocalStore:
             self._db.execute("ALTER TABLE tasks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
         if "instance_type" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN instance_type TEXT NOT NULL DEFAULT 'default'")
+        if "output_prefix" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN output_prefix TEXT NOT NULL DEFAULT ''")
+        if "project_id" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
+        if "project_name" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN project_name TEXT NOT NULL DEFAULT ''")
+        if "project_path" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN project_path TEXT NOT NULL DEFAULT ''")
+        if "project_inference_disabled" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN project_inference_disabled INTEGER NOT NULL DEFAULT 0")
+        remote_queue_columns = {
+            str(row[1]) for row in self._db.execute("PRAGMA table_info(remote_queue_cooldowns)").fetchall()
+        }
+        if "wait_for_predecessors" not in remote_queue_columns:
+            self._db.execute(
+                "ALTER TABLE remote_queue_cooldowns "
+                "ADD COLUMN wait_for_predecessors INTEGER NOT NULL DEFAULT 0"
+            )
         delivery_columns = {str(row[1]) for row in self._db.execute("PRAGMA table_info(telegram_deliveries)").fetchall()}
         if "status" not in delivery_columns:
             self._db.execute("ALTER TABLE telegram_deliveries ADD COLUMN status TEXT NOT NULL DEFAULT 'sent'")
@@ -1875,6 +2005,35 @@ class LocalStore:
         self._write_json_file(data)
         return self.telegram_settings()
 
+    def set_telegram_video_inbound_settings(self, workflow_id: str, enabled: Any) -> dict[str, Any]:
+        """Configure a fixed workflow that receives one downloaded social video."""
+        workflow_id = str(workflow_id or "").strip()
+        enabled_value = str(enabled or "").strip().lower() in {"1", "true", "yes", "on"} if isinstance(enabled, str) else bool(enabled)
+        data = self._read_json_file()
+        if enabled_value:
+            token = str(data.get("telegram_bot_token") or os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
+            chat_id = str(data.get("telegram_chat_id") or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
+            if not token or not TelegramNotifier.parse_chat_ids(chat_id):
+                raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用视频链接入站前请先配置 Bot Token 和 Chat ID。")
+            if not workflow_id:
+                raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "请先选择 Telegram 视频入站工作流。")
+            candidate = next(
+                (item for item in self.telegram_video_inbound_workflows() if str(item.get("id") or "") == workflow_id),
+                None,
+            )
+            if candidate is None:
+                raise RhCliError(
+                    "INVALID_TELEGRAM_INBOUND_WORKFLOW",
+                    "固定视频入站工作流必须已绑定账号、workflowId，并且只有一个必填视频输入。",
+                )
+            data["telegram_video_inbound_workflow_id"] = workflow_id
+            data["telegram_video_inbound_file_input_id"] = str(candidate.get("file_input_id") or "")
+        elif workflow_id:
+            data["telegram_video_inbound_workflow_id"] = workflow_id
+        data["telegram_video_inbound_enabled"] = enabled_value
+        self._write_json_file(data)
+        return self.telegram_settings()
+
     def clear_telegram_settings(self) -> dict[str, Any]:
         data = self._read_json_file()
         data.pop("telegram_bot_token", None)
@@ -1885,6 +2044,9 @@ class LocalStore:
         data.pop("telegram_inbound_mode", None)
         data.pop("telegram_inbound_file_input_id", None)
         data["telegram_inbound_enabled"] = False
+        data.pop("telegram_video_inbound_workflow_id", None)
+        data.pop("telegram_video_inbound_file_input_id", None)
+        data["telegram_video_inbound_enabled"] = False
         self._write_json_file(data)
         return self.telegram_settings()
 
@@ -2421,8 +2583,10 @@ class LocalStore:
             raise RhCliError("WORKFLOW_NOT_FOUND", f"找不到工作流：{workflow_id}")
         return record
 
-    def telegram_inbound_workflows(self, folder_id: str = "") -> list[dict[str, Any]]:
-        """Return valid library workflows that can receive one Telegram image."""
+    def _telegram_inbound_workflows_for_media(
+        self, folder_id: str = "", media_type: str = "image",
+    ) -> list[dict[str, Any]]:
+        """Return valid library workflows for one required Telegram media input."""
         folder_id = str(folder_id or "").strip()
         result: list[dict[str, Any]] = []
         for record in self.workflows():
@@ -2432,7 +2596,7 @@ class LocalStore:
             if not str(record.get("account_id") or "").strip() or not str(record.get("remote_workflow_id") or "").strip():
                 continue
             try:
-                file_input = telegram_inbound_file_input(self.workflow_detail(workflow_id))
+                file_input = telegram_inbound_file_input(self.workflow_detail(workflow_id), media_type)
             except (RhCliError, OSError, ValueError):
                 continue
             result.append(
@@ -2445,6 +2609,14 @@ class LocalStore:
                 }
             )
         return sorted(result, key=lambda item: (str(item.get("name") or ""), str(item.get("id") or "")))
+
+    def telegram_inbound_workflows(self, folder_id: str = "") -> list[dict[str, Any]]:
+        """Return valid library workflows that can receive one Telegram image."""
+        return self._telegram_inbound_workflows_for_media(folder_id, "image")
+
+    def telegram_video_inbound_workflows(self, folder_id: str = "") -> list[dict[str, Any]]:
+        """Return valid library workflows that can receive one Telegram video."""
+        return self._telegram_inbound_workflows_for_media(folder_id, "video")
 
     def workflow_account_id(self, workflow_id: str) -> str:
         workflow_id = str(workflow_id or "").strip()
@@ -2605,11 +2777,19 @@ class LocalStore:
         records = [item for item in self._read_workflow_registry() if str(item.get("id") or "") != str(workflow_id)]
         self._write_workflow_registry(records)
         data = self._read_json_file()
+        changed = False
         if str(data.get("telegram_inbound_workflow_id") or "").strip() == str(workflow_id):
             data.pop("telegram_inbound_workflow_id", None)
             data.pop("telegram_inbound_file_input_id", None)
             if str(data.get("telegram_inbound_mode") or "fixed").strip().lower() != "folder_random":
                 data["telegram_inbound_enabled"] = False
+            changed = True
+        if str(data.get("telegram_video_inbound_workflow_id") or "").strip() == str(workflow_id):
+            data.pop("telegram_video_inbound_workflow_id", None)
+            data.pop("telegram_video_inbound_file_input_id", None)
+            data["telegram_video_inbound_enabled"] = False
+            changed = True
+        if changed:
             self._write_json_file(data)
 
     @staticmethod
@@ -2774,6 +2954,261 @@ class LocalStore:
             if changes:
                 self.update_task(task_id, **changes)
 
+    def _backfill_task_projects(self) -> None:
+        """Infer project metadata for legacy tasks from their existing paths."""
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM tasks").fetchall()
+
+        for row in rows:
+            task = self.row_to_task(row)
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                continue
+            if not bool(task.get("project_inference_disabled")):
+                inferred = normalize_project(
+                    None,
+                    output_dir=task.get("output_dir") or "",
+                    workflow_path=task.get("workflow_path") or "",
+                )
+                inferred_fields = {
+                    "project_id": inferred["id"],
+                    "project_name": inferred["name"],
+                    "project_path": inferred["path"],
+                }
+                changes = {
+                    field: inferred_fields[field]
+                    for field in ("project_id", "project_name", "project_path")
+                    if not str(task.get(field) or "").strip() and inferred_fields[field]
+                }
+                if changes:
+                    self.update_task(task_id, **changes)
+                    task = self.task(task_id) or {**task, **changes}
+            self._ensure_project_folder(task)
+            self._sync_task_manifest_project_metadata(task)
+
+    @staticmethod
+    def _clean_project_folder_name(name: str) -> str:
+        clean_name = re.sub(r"[\x00-\x1f\x7f]", "", str(name or "")).strip()
+        if not clean_name:
+            raise RhCliError("INVALID_PROJECT_FOLDER", "项目名称不能为空。")
+        if len(clean_name) > 80:
+            raise RhCliError("INVALID_PROJECT_FOLDER", "项目名称不能超过 80 个字符。")
+        if any(char in clean_name for char in "/\\"):
+            raise RhCliError("INVALID_PROJECT_FOLDER", "项目名称不能包含路径分隔符。")
+        if clean_name in {"未归类", "全部成片"}:
+            raise RhCliError("INVALID_PROJECT_FOLDER", f"“{clean_name}”是系统项目名称，不能使用。")
+        return clean_name
+
+    @staticmethod
+    def _project_payload(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(value.get("id") or "").strip(),
+            "name": str(value.get("name") or "").strip(),
+            "path": str(value.get("path") or "").strip(),
+            "created_at": int(value.get("created_at") or 0),
+            "updated_at": int(value.get("updated_at") or 0),
+        }
+
+    def _ensure_project_folder(self, project: dict[str, Any]) -> None:
+        """Register a task-backed project without overwriting a user rename."""
+        project_id = str(project.get("project_id") or project.get("id") or "").strip()
+        project_name = str(project.get("project_name") or project.get("name") or "").strip()
+        project_path = str(project.get("project_path") or project.get("path") or "").strip()
+        if not project_id or not project_name:
+            return
+        timestamp = now_ms()
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO projects (id,name,path,created_at,updated_at) VALUES (?,?,?,?,?)",
+                (project_id, project_name, project_path, timestamp, timestamp),
+            )
+            self._db.commit()
+
+    def _backfill_project_registry(self) -> None:
+        """Make every classified historical task visible as a persisted project folder."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT project_id,project_name,project_path FROM tasks "
+                "WHERE project_id != '' AND project_name != ''"
+            ).fetchall()
+        for row in rows:
+            self._ensure_project_folder(dict(row))
+
+    def telegram_project(self) -> dict[str, str]:
+        """Return the persisted project reserved for Telegram inbound tasks."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id,name,path FROM projects WHERE name = ? COLLATE NOCASE "
+                "ORDER BY updated_at DESC, id LIMIT 1",
+                (TELEGRAM_PROJECT_NAME,),
+            ).fetchone()
+        if row:
+            return {
+                "id": str(row["id"] or "").strip(),
+                "name": str(row["name"] or TELEGRAM_PROJECT_NAME).strip(),
+                "path": str(row["path"] or "").strip(),
+            }
+        return normalize_project({"name": TELEGRAM_PROJECT_NAME}, infer_from_paths=False)
+
+    def _backfill_telegram_projects(self) -> None:
+        """Recover every historical Telegram inbound task into the reserved project."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE tasks SET submission_source='telegram' "
+                "WHERE LOWER(TRIM(submission_source)) = 'telegram' "
+                "OR stage_logs_json LIKE '%已从 Telegram 接收%'"
+            )
+            self._db.commit()
+            rows = self._db.execute(
+                "SELECT * FROM tasks WHERE LOWER(TRIM(submission_source)) = 'telegram'"
+            ).fetchall()
+        if not rows:
+            return
+
+        project = self.telegram_project()
+        self._ensure_project_folder(project)
+        for row in rows:
+            task = self.row_to_task(row)
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                continue
+            changes = {
+                "project_id": project["id"],
+                "project_name": project["name"],
+                "project_path": project["path"],
+                "project_inference_disabled": 0,
+            }
+            if any(str(task.get(field) or "") != str(value or "") for field, value in changes.items()):
+                self.update_task(task_id, **changes)
+                task = self.task(task_id) or {**task, **changes}
+            self._sync_task_manifest_project_metadata(task)
+
+    def project_folders(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id,name,path,created_at,updated_at FROM projects ORDER BY updated_at DESC, name COLLATE NOCASE"
+            ).fetchall()
+            task_rows = self._db.execute(
+                "SELECT project_id,COUNT(*) AS task_count FROM tasks WHERE project_id != '' GROUP BY project_id"
+            ).fetchall()
+        task_counts = {str(row["project_id"] or ""): int(row["task_count"] or 0) for row in task_rows}
+        return [
+            {**self._project_payload(dict(row)), "task_count": task_counts.get(str(row["id"]), 0)}
+            for row in rows
+        ]
+
+    def project_folder(self, project_id: str) -> dict[str, Any] | None:
+        project_id = str(project_id or "").strip()
+        if not project_id:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id,name,path,created_at,updated_at FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+        return self._project_payload(dict(row)) if row else None
+
+    def create_project_folder(self, name: str) -> dict[str, Any]:
+        clean_name = self._clean_project_folder_name(name)
+        timestamp = now_ms()
+        project = {
+            "id": f"project_{uuid.uuid4().hex[:12]}",
+            "name": clean_name,
+            "path": "",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        with self._lock:
+            duplicate = self._db.execute(
+                "SELECT id FROM projects WHERE name = ? COLLATE NOCASE", (clean_name,)
+            ).fetchone()
+            if duplicate:
+                raise RhCliError("PROJECT_FOLDER_EXISTS", f"项目已存在：{clean_name}")
+            self._db.execute(
+                "INSERT INTO projects (id,name,path,created_at,updated_at) VALUES (?,?,?,?,?)",
+                (project["id"], project["name"], project["path"], timestamp, timestamp),
+            )
+            self._db.commit()
+        return project
+
+    def _sync_task_manifest_project_metadata(self, task: dict[str, Any]) -> None:
+        """Update only project metadata in an existing task manifest."""
+        manifest_path = self.task_manifest_path(task)
+        if not manifest_path.is_file():
+            return
+        expected_project = {
+            "id": str(task.get("project_id") or "").strip(),
+            "name": str(task.get("project_name") or "").strip(),
+            "path": str(task.get("project_path") or "").strip(),
+        }
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(manifest, dict) or manifest.get("project") == expected_project:
+            return
+        manifest["project"] = expected_project
+        temporary = manifest_path.with_suffix(".json.tmp")
+        try:
+            temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(manifest_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def rename_project_folder(self, project_id: str, name: str) -> dict[str, Any]:
+        project_id = str(project_id or "").strip()
+        clean_name = self._clean_project_folder_name(name)
+        current = self.project_folder(project_id)
+        if not current:
+            raise RhCliError("PROJECT_FOLDER_NOT_FOUND", f"找不到项目：{project_id}")
+        timestamp = now_ms()
+        with self._lock:
+            duplicate = self._db.execute(
+                "SELECT id FROM projects WHERE name = ? COLLATE NOCASE AND id != ?", (clean_name, project_id)
+            ).fetchone()
+            if duplicate:
+                raise RhCliError("PROJECT_FOLDER_EXISTS", f"项目已存在：{clean_name}")
+            task_rows = self._db.execute("SELECT * FROM tasks WHERE project_id=?", (project_id,)).fetchall()
+            self._db.execute("UPDATE projects SET name=?, updated_at=? WHERE id=?", (clean_name, timestamp, project_id))
+            self._db.execute(
+                "UPDATE tasks SET project_name=?, updated_at=? WHERE project_id=?",
+                (clean_name, timestamp, project_id),
+            )
+            self._db.commit()
+        for row in task_rows:
+            task = self.row_to_task(row)
+            task["project_name"] = clean_name
+            task["updated_at"] = timestamp
+            self._sync_task_manifest_project_metadata(task)
+        return self.project_folder(project_id) or {**current, "name": clean_name, "updated_at": timestamp}
+
+    def delete_project_folder(self, project_id: str) -> dict[str, Any]:
+        project_id = str(project_id or "").strip()
+        current = self.project_folder(project_id)
+        if not current:
+            raise RhCliError("PROJECT_FOLDER_NOT_FOUND", f"找不到项目：{project_id}")
+        timestamp = now_ms()
+        with self._lock:
+            task_rows = self._db.execute("SELECT * FROM tasks WHERE project_id=?", (project_id,)).fetchall()
+            self._db.execute("DELETE FROM projects WHERE id=?", (project_id,))
+            self._db.execute(
+                "UPDATE tasks SET project_id='', project_name='', project_path='', project_inference_disabled=1, updated_at=? "
+                "WHERE project_id=?",
+                (timestamp, project_id),
+            )
+            self._db.commit()
+        for row in task_rows:
+            task = self.row_to_task(row)
+            task.update({
+                "project_id": "",
+                "project_name": "",
+                "project_path": "",
+                "project_inference_disabled": 1,
+                "updated_at": timestamp,
+            })
+            self._sync_task_manifest_project_metadata(task)
+        return {"project": current, "affected_task_count": len(task_rows)}
+
     def save_task_manifest_snapshot(self, task: dict[str, Any], prompt_group: dict[str, Any]) -> Path:
         """Save the immutable, path-only replay manifest for one submission."""
         manifest_path = self.task_manifest_path(task)
@@ -2797,8 +3232,14 @@ class LocalStore:
                 "name": str(prompt_group.get("name") or "").strip(),
                 "snapshot_path": str(task.get("prompt_group_snapshot_path") or "").strip(),
             },
+            "project": {
+                "id": str(task.get("project_id") or "").strip(),
+                "name": str(task.get("project_name") or "").strip(),
+                "path": str(task.get("project_path") or "").strip(),
+            },
             "execution": {
                 "instance_type": normalize_instance_type(task.get("instance_type")),
+                "output_prefix": normalize_output_prefix(task.get("output_prefix")),
                 "account_id": str(task.get("account_id") or "").strip(),
                 "input_config": task.get("input_config") if isinstance(task.get("input_config"), dict) else {},
                 "bypassed_nodes": task.get("bypassed_nodes") if isinstance(task.get("bypassed_nodes"), list) else [],
@@ -2884,6 +3325,17 @@ class LocalStore:
         }
 
     def create_task(self, task: dict[str, Any]) -> None:
+        submission_source = "telegram" if str(task.get("submission_source") or "").strip().lower() == "telegram" else "local"
+        if submission_source == "telegram":
+            telegram_project = self.telegram_project()
+            task = {
+                **task,
+                "submission_source": submission_source,
+                "project_id": telegram_project["id"],
+                "project_name": telegram_project["name"],
+                "project_path": telegram_project["path"],
+                "project_inference_disabled": 0,
+            }
         fields = {
             "id": task["id"],
             "created_at": task["created_at"],
@@ -2895,10 +3347,11 @@ class LocalStore:
             "key_id": task.get("key_id"),
             "account_id": str(task.get("account_id") or "").strip(),
             "instance_type": normalize_instance_type(task.get("instance_type")),
+            "output_prefix": normalize_output_prefix(task.get("output_prefix")),
             "dispatch_key_name": str(task.get("dispatch_key_name") or "").strip(),
             "dispatch_key_site": str(task.get("dispatch_key_site") or "").strip(),
             "dispatch_key_api_type": str(task.get("dispatch_key_api_type") or "").strip(),
-            "submission_source": "telegram" if str(task.get("submission_source") or "").strip().lower() == "telegram" else "local",
+            "submission_source": submission_source,
             "remote_task_id": None,
             "remote_workflow_id": str(task.get("remote_workflow_id") or "").strip(),
             "registered_workflow_id": str(task.get("registered_workflow_id") or "").strip(),
@@ -2912,6 +3365,10 @@ class LocalStore:
             "workflow_snapshot_path": str(task.get("workflow_snapshot_path") or ""),
             "prompt_group_snapshot_path": str(task.get("prompt_group_snapshot_path") or ""),
             "manifest_path": str(task.get("manifest_path") or ""),
+            "project_id": str(task.get("project_id") or "").strip(),
+            "project_name": str(task.get("project_name") or "").strip(),
+            "project_path": str(task.get("project_path") or "").strip(),
+            "project_inference_disabled": 1 if task.get("project_inference_disabled") else 0,
             "output_dir": task["output_dir"],
             "outputs_json": "[]",
             "error": "",
@@ -2933,20 +3390,21 @@ class LocalStore:
         }
         with self._lock:
             self._db.execute(
-                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,key_id,account_id,instance_type,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,submission_source,remote_task_id,remote_workflow_id,registered_workflow_id,"
+                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,project_id,project_name,project_path,project_inference_disabled,key_id,account_id,instance_type,output_prefix,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,submission_source,remote_task_id,remote_workflow_id,registered_workflow_id,"
                 "input_json,prompt_json,custom_json,input_config_json,bypass_json,random_noise_json,resolution_json,workflow_snapshot_path,prompt_group_snapshot_path,manifest_path,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
-                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:key_id,:account_id,:instance_type,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:submission_source,:remote_task_id,:remote_workflow_id,:registered_workflow_id,"
+                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:project_id,:project_name,:project_path,:project_inference_disabled,:key_id,:account_id,:instance_type,:output_prefix,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:submission_source,:remote_task_id,:remote_workflow_id,:registered_workflow_id,"
                 ":input_json,:prompt_json,:custom_json,:input_config_json,:bypass_json,:random_noise_json,:resolution_json,:workflow_snapshot_path,:prompt_group_snapshot_path,:manifest_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
                 fields,
             )
             self._sync_usage_record_locked(task["id"])
             self._db.commit()
+        self._ensure_project_folder(fields)
 
     def update_task(self, task_id: str, **changes: Any) -> None:
         allowed = {
-            "status", "progress", "updated_at", "started_at", "completed_at", "key_id", "account_id", "dispatch_key_name", "dispatch_key_site", "dispatch_key_api_type", "remote_task_id", "remote_workflow_id",
+            "status", "progress", "updated_at", "started_at", "completed_at", "key_id", "account_id", "instance_type", "dispatch_key_name", "dispatch_key_site", "dispatch_key_api_type", "remote_task_id", "remote_workflow_id",
             "outputs_json", "error", "error_detail", "stage_logs_json", "cost_type", "cost", "duration", "output_dir", "workflow_snapshot_path",
-            "prompt_group_snapshot_path", "manifest_path",
+            "prompt_group_snapshot_path", "manifest_path", "project_id", "project_name", "project_path", "project_inference_disabled",
         }
         changes = {key: value for key, value in changes.items() if key in allowed}
         if not changes:
@@ -2958,6 +3416,31 @@ class LocalStore:
             self._db.execute(f"UPDATE tasks SET {assignments} WHERE id=:task_id", changes)
             self._sync_usage_record_locked(task_id)
             self._db.commit()
+
+    def set_task_project(self, task_id: str, project: dict[str, Any] | None) -> dict[str, Any]:
+        """Change only a task's project classification; never move its media."""
+        current = self.task(task_id)
+        if not current:
+            raise RhCliError("TASK_NOT_FOUND", "找不到这个任务。")
+        normalized = normalize_project(project, infer_from_paths=False)
+        if normalized["id"] and not normalized["name"]:
+            stored = self.project_folder(normalized["id"])
+            if not stored:
+                raise RhCliError("PROJECT_FOLDER_NOT_FOUND", "找不到目标项目。")
+            normalized = {"id": stored["id"], "name": stored["name"], "path": stored["path"]}
+        inference_disabled = 0 if normalized["id"] else 1
+        self.update_task(
+            task_id,
+            project_id=normalized["id"],
+            project_name=normalized["name"],
+            project_path=normalized["path"],
+            project_inference_disabled=inference_disabled,
+        )
+        updated = self.task(task_id) or {**current, **normalized}
+        updated["project_inference_disabled"] = inference_disabled
+        self._ensure_project_folder(updated)
+        self._sync_task_manifest_project_metadata(updated)
+        return self.task(task_id) or updated
 
     def _sync_usage_record_locked(self, task_id: str) -> None:
         row = self._db.execute(
@@ -3451,6 +3934,127 @@ class LocalStore:
             ).fetchone()
         return int(row["count"] if row else 0)
 
+    def remote_queue_states(self) -> dict[str, dict[str, Any]]:
+        """Return persisted remote-queue gate state for every API Key.
+
+        Web and Electron can run separate TaskManager processes against the
+        same task database. Keeping this state in SQLite, rather than a
+        process-local dictionary, prevents either process from bypassing a
+        personal-key predecessor gate created by the other.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT cooldown.key_id,cooldown.retry_after,cooldown.attempts,"
+                "cooldown.wait_for_predecessors,cooldown.probe_task_id,"
+                "cooldown.updated_at,probe.status AS probe_status "
+                "FROM remote_queue_cooldowns AS cooldown "
+                "LEFT JOIN tasks AS probe ON probe.id=cooldown.probe_task_id"
+            ).fetchall()
+        return {
+            str(row["key_id"]): {
+                "retry_after": int(row["retry_after"] or 0),
+                "attempts": int(row["attempts"] or 0),
+                "wait_for_predecessors": bool(row["wait_for_predecessors"]),
+                "probe_task_id": str(row["probe_task_id"] or ""),
+                "probe_active": str(row["probe_status"] or "") == "submitting",
+                "updated_at": int(row["updated_at"] or 0),
+            }
+            for row in rows
+            if str(row["key_id"] or "")
+        }
+
+    def defer_task_for_remote_queue(
+        self,
+        task_id: str,
+        key_id: str,
+        *,
+        automatic_dispatch: bool,
+    ) -> tuple[int, int]:
+        """Requeue a 421 task and atomically close its Key's submit gate.
+
+        A 421 belongs to the remote queue for the selected Key, not just the
+        one task that happened to receive it. Every Key type stays in the
+        local FIFO queue until its already-submitted tasks have completed;
+        this deliberately does not use a time-based submit retry.
+        """
+        normalized_key_id = str(key_id or "").strip()
+        if not normalized_key_id:
+            raise RhCliError("INVALID_KEY", "远程队列重试缺少 API Key。")
+        timestamp = now_ms()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                task_row = self._db.execute(
+                    "SELECT status FROM tasks WHERE id=?", (task_id,)
+                ).fetchone()
+                if not task_row or task_row["status"] not in {"queued", "submitting", "running"}:
+                    self._db.rollback()
+                    return 0, 0
+                state = self._db.execute(
+                    "SELECT attempts FROM remote_queue_cooldowns WHERE key_id=?",
+                    (normalized_key_id,),
+                ).fetchone()
+                attempts = int(state["attempts"] if state else 0) + 1
+                predecessor_row = self._db.execute(
+                    "SELECT COUNT(*) AS count FROM tasks "
+                    "WHERE key_id=? AND id<>? AND status IN ('submitting','running')",
+                    (normalized_key_id, task_id),
+                ).fetchone()
+                predecessor_count = int(predecessor_row["count"] if predecessor_row else 0)
+                delay_seconds = 0
+                retry_after = 0
+                wait_for_predecessors = 1
+                if predecessor_count:
+                    progress = (
+                        "RunningHub API Key 并发已满，已加入本地队列，"
+                        f"等待 {predecessor_count} 个前序任务完成后再提交"
+                    )
+                else:
+                    progress = "RunningHub API Key 并发已满，已加入本地队列，等待并发闸门释放后再提交"
+                self._db.execute(
+                    "INSERT INTO remote_queue_cooldowns "
+                    "(key_id,retry_after,attempts,wait_for_predecessors,probe_task_id,updated_at) "
+                    "VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(key_id) DO UPDATE SET retry_after=excluded.retry_after, "
+                    "attempts=excluded.attempts, "
+                    "wait_for_predecessors=excluded.wait_for_predecessors, "
+                    "probe_task_id='', updated_at=excluded.updated_at",
+                    (normalized_key_id, retry_after, attempts, wait_for_predecessors, "", timestamp),
+                )
+                updated = self._db.execute(
+                    "UPDATE tasks SET status='queued', key_id=?, remote_task_id=NULL, "
+                    "started_at=NULL, completed_at=NULL, error='', error_detail='{}', "
+                    "progress=?, updated_at=? WHERE id=? AND status IN ('queued','submitting','running')",
+                    (
+                        None if automatic_dispatch else normalized_key_id,
+                        progress,
+                        timestamp,
+                        task_id,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    self._db.rollback()
+                    return 0, 0
+                self._sync_usage_record_locked(task_id)
+                self._db.commit()
+                return delay_seconds, attempts
+            except Exception:
+                self._db.rollback()
+                raise
+
+    def clear_remote_queue_probe(self, key_id: str, task_id: str) -> None:
+        """Clear a successful or aborted post-gate probe, if this task owns it."""
+        normalized_key_id = str(key_id or "").strip()
+        normalized_task_id = str(task_id or "").strip()
+        if not normalized_key_id or not normalized_task_id:
+            return
+        with self._lock:
+            self._db.execute(
+                "DELETE FROM remote_queue_cooldowns WHERE key_id=? AND probe_task_id=?",
+                (normalized_key_id, normalized_task_id),
+            )
+            self._db.commit()
+
     def claim_task_slot(
         self,
         task_id: str,
@@ -3474,6 +4078,43 @@ class LocalStore:
                 if not task_row or task_row["status"] not in {"queued", "recovering"}:
                     self._db.rollback()
                     return False
+                if not recovery:
+                    queue_state = self._db.execute(
+                        "SELECT retry_after,attempts,wait_for_predecessors,probe_task_id "
+                        "FROM remote_queue_cooldowns WHERE key_id=?",
+                        (key_id,),
+                    ).fetchone()
+                    if queue_state:
+                        wait_for_predecessors = (
+                            bool(queue_state["wait_for_predecessors"])
+                            or int(queue_state["attempts"] or 0) > 0
+                        )
+                        probe_task_id = str(queue_state["probe_task_id"] or "")
+                        if wait_for_predecessors:
+                            predecessor_row = self._db.execute(
+                                "SELECT COUNT(*) AS count FROM tasks "
+                                "WHERE key_id=? AND id<>? AND status IN ('submitting','running')",
+                                (key_id, task_id),
+                            ).fetchone()
+                            if int(predecessor_row["count"] if predecessor_row else 0) > 0:
+                                self._db.rollback()
+                                return False
+                        if probe_task_id:
+                            probe_row = self._db.execute(
+                                "SELECT status FROM tasks WHERE id=?", (probe_task_id,)
+                            ).fetchone()
+                            if probe_row and probe_row["status"] == "submitting":
+                                self._db.rollback()
+                                return False
+                            self._db.execute(
+                                "UPDATE remote_queue_cooldowns SET probe_task_id='', updated_at=? WHERE key_id=?",
+                                (now, key_id),
+                            )
+                        if wait_for_predecessors:
+                            self._db.execute(
+                                "UPDATE remote_queue_cooldowns SET probe_task_id=?, updated_at=? WHERE key_id=?",
+                                (task_id, now, key_id),
+                            )
                 key_row = self._db.execute(
                     "SELECT COUNT(*) AS count FROM tasks "
                     "WHERE key_id=? AND status IN ('submitting','running')",
@@ -3535,8 +4176,6 @@ class TaskManager:
         self._active_by_key: dict[str, int] = {}
         self._claimed: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
-        self._retry_after: dict[str, float] = {}
-        self._remote_queue_retries: dict[str, int] = {}
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=LOCAL_WORKER_CAPACITY, thread_name_prefix="rh-web")
@@ -3584,6 +4223,17 @@ class TaskManager:
         """Expose valid inbound choices to the local settings page."""
         return self.store.telegram_inbound_workflows()
 
+    def telegram_video_inbound_workflows(self) -> list[dict[str, Any]]:
+        """Expose valid single-video inbound choices to the local settings page."""
+        return self.store.telegram_video_inbound_workflows()
+
+    def _telegram_project(self) -> dict[str, str]:
+        resolver = getattr(self.store, "telegram_project", None)
+        project = resolver() if callable(resolver) else None
+        if isinstance(project, dict) and str(project.get("name") or "").strip():
+            return normalize_project(project, infer_from_paths=False)
+        return normalize_project({"name": TELEGRAM_PROJECT_NAME}, infer_from_paths=False)
+
     def _select_telegram_inbound_workflow(self, settings: dict[str, Any]) -> dict[str, Any]:
         mode = str(settings.get("inbound_mode") or "fixed").strip().lower()
         if mode == "folder_random":
@@ -3608,6 +4258,19 @@ class TaskManager:
             raise RhCliError(
                 "INVALID_TELEGRAM_INBOUND_WORKFLOW",
                 "固定 Telegram 入站工作流当前不可用，请在设置中重新选择。",
+            )
+        return candidate
+
+    def _select_telegram_video_inbound_workflow(self, settings: dict[str, Any]) -> dict[str, Any]:
+        workflow_id = str(settings.get("video_inbound_workflow_id") or "").strip()
+        candidate = next(
+            (item for item in self.store.telegram_video_inbound_workflows() if str(item.get("id") or "") == workflow_id),
+            None,
+        )
+        if candidate is None:
+            raise RhCliError(
+                "INVALID_TELEGRAM_INBOUND_WORKFLOW",
+                "固定 Telegram 视频入站工作流当前不可用，请在设置中重新选择。",
             )
         return candidate
 
@@ -3827,6 +4490,35 @@ class TaskManager:
             return ""
         return text.split(None, 1)[0].split("@", 1)[0].lower()
 
+    def _queue_telegram_task_failure(self, task_id: str, message: str) -> None:
+        """Notify the configured chat when a Telegram-originated task fails."""
+        task = self.store.task(task_id)
+        if not task or str(task.get("submission_source") or "").strip().lower() != "telegram":
+            return
+        workflow_name = str(task.get("workflow_name") or "工作流").strip() or "工作流"
+        safe_message = str(redact_detail(message) or "未知错误").strip()[:2000]
+        notification = (
+            "❌ Telegram 入站任务处理失败\n"
+            f"工作流：{workflow_name}\n"
+            f"任务 ID：{task_id}\n"
+            f"原因：{safe_message}"
+        )
+        try:
+            self._telegram_executor.submit(
+                self._send_telegram_task_failure,
+                task_id,
+                notification,
+            )
+        except (RuntimeError, AttributeError):
+            # A shutdown race must not change the already-recorded task result.
+            self._log_stage(task_id, "telegram", "任务失败，但 Telegram 通知线程已关闭", level="warning")
+
+    def _send_telegram_task_failure(self, task_id: str, notification: str) -> None:
+        try:
+            self._telegram_notifier.send_message(notification)
+        except Exception as exc:  # pragma: no cover - background safety net
+            self._log_stage(task_id, "telegram", f"任务失败通知发送失败：{exc}", level="warning")
+
     def _queue_telegram_delivery(
         self,
         task_id: str,
@@ -3907,7 +4599,7 @@ class TaskManager:
                 self._telegram_uploading.discard(upload_key)
 
     def _telegram_inbound_loop(self) -> None:
-        """Poll the configured private chat and turn each image into a normal task."""
+        """Poll the configured private chat and turn supported inputs into normal tasks."""
         offset: int | None = None
         while not self._stop.is_set():
             settings = self._telegram_notifier.settings()
@@ -3945,6 +4637,70 @@ class TaskManager:
             except TelegramDeliveryError:
                 self._stop.wait(5)
 
+    def _handle_telegram_video_update(
+        self, update: dict[str, Any], settings: dict[str, Any], video_url: str,
+    ) -> str:
+        platform_labels = {"douyin": "抖音", "bilibili": "Bilibili", "x": "X"}
+        platform_label = platform_labels.get(social_video_platform(video_url), "视频")
+        try:
+            selected_workflow = self._select_telegram_video_inbound_workflow(settings)
+            workflow_id = str(selected_workflow.get("id") or "").strip()
+            detail = self.store.workflow_detail(workflow_id)
+            record = detail["record"]
+            configured_input_id = str(settings.get("video_inbound_file_input_id") or "").strip()
+            input_id = str(telegram_video_inbound_file_input(detail).get("id") or "").strip()
+            if configured_input_id and configured_input_id != input_id:
+                raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "入站工作流的视频输入配置已变化，请重新设置。")
+            if not input_id:
+                raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "没有找到入站视频输入节点。")
+            target_path = download_social_video(video_url, DATA_ROOT)
+            workflow_data = json.loads(json.dumps(detail["workflow"], ensure_ascii=False))
+            input_duration = _apply_telegram_video_duration(workflow_data, Path(target_path))
+            prompt_group = detail.get("prompt_group")
+            if not isinstance(prompt_group, dict):
+                prompt_group = {
+                    "id": f"telegram-video-{workflow_id}",
+                    "name": f"Telegram 视频入站 · {str(record.get('name') or workflow_id).strip()}",
+                    "updated_at": now_ms(),
+                    "items": [],
+                }
+            task = self.submit_task(
+                workflow_id=workflow_id,
+                files={input_id: str(target_path)},
+                prompts={},
+                key_id=None,
+                output_dir=None,
+                remote_workflow_id=str(record.get("remote_workflow_id") or "").strip(),
+                workflow_name=str(record.get("name") or "").strip(),
+                workflow_account_id=str(record.get("account_id") or "").strip(),
+                workflow_input_config=record.get("input_config"),
+                custom_inputs={},
+                random_noise={},
+                resolution={},
+                workflow_data=workflow_data,
+                prompt_group=prompt_group,
+                force_workflow_account=True,
+                submission_source="telegram",
+                project=self._telegram_project(),
+            )
+        except Exception as exc:
+            message = exc.message if isinstance(exc, RhCliError) else "Telegram 视频任务提交失败，请查看本机任务日志。"
+            try:
+                self._telegram_notifier.send_message(f"{platform_label}视频链接任务未提交：{message}")
+            except TelegramDeliveryError:
+                pass
+            raise
+        task_id = str(task.get("id") or "")
+        duration_suffix = f"，节点 14 时长已设为 {input_duration:.3f} 秒" if input_duration is not None else ""
+        self._log_stage(task_id, "telegram", f"已从 Telegram 接收{platform_label}视频链接并提交工作流{duration_suffix}")
+        try:
+            self._telegram_notifier.send_message(
+                f"已收到{platform_label}视频链接，已下载并排队{duration_suffix}：{task.get('workflow_name') or record.get('name') or workflow_id}\n任务 ID：{task_id}"
+            )
+        except TelegramDeliveryError:
+            self._log_stage(task_id, "telegram", "任务已提交，但 Telegram 回执发送失败", level="warning")
+        return task_id
+
     def _handle_telegram_update(self, update: dict[str, Any], settings: dict[str, Any]) -> str:
         callback = update.get("callback_query") if isinstance(update, dict) else None
         message = callback.get("message") if isinstance(callback, dict) else update.get("message") if isinstance(update, dict) else None
@@ -3959,6 +4715,12 @@ class TaskManager:
         if self._telegram_command(update) == "/switch":
             self._send_telegram_switch_menu(settings, chat_id)
             return ""
+        if settings.get("video_inbound_enabled"):
+            video_url = extract_social_video_url(self._telegram_notifier.message_text(update))
+            if video_url:
+                if not str(settings.get("video_inbound_workflow_id") or "").strip():
+                    return ""
+                return self._handle_telegram_video_update(update, settings, video_url)
         if not settings.get("inbound_enabled"):
             return ""
         mode = str(settings.get("inbound_mode") or "fixed").strip().lower()
@@ -4007,6 +4769,7 @@ class TaskManager:
                 prompt_group=prompt_group,
                 force_workflow_account=True,
                 submission_source="telegram",
+                project=self._telegram_project(),
             )
         except Exception as exc:
             message = exc.message if isinstance(exc, RhCliError) else "Telegram 图片任务提交失败，请查看本机任务日志。"
@@ -4326,6 +5089,8 @@ class TaskManager:
         prompt_group: dict[str, Any] | None = None,
         force_workflow_account: bool = False,
         submission_source: str = "local",
+        project: dict[str, Any] | None = None,
+        output_prefix: str | None = None,
     ) -> dict[str, Any]:
         if workflow_data is not None:
             if not isinstance(workflow_data, dict):
@@ -4335,6 +5100,7 @@ class TaskManager:
             workflow_path = self.store.workflow_path(workflow_id)
             workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
         instance_type = normalize_instance_type(instance_type)
+        output_prefix = normalize_output_prefix(output_prefix)
         current_account_id = self.store.current_account_id()
         selected_key = self.store.get_key(key_id) if key_id else None
         if key_id and not selected_key:
@@ -4402,6 +5168,8 @@ class TaskManager:
         submission_source = str(submission_source or "local").strip().lower()
         if submission_source not in {"local", "telegram"}:
             submission_source = "local"
+        if submission_source == "telegram":
+            project = self._telegram_project()
         files = apply_default_file_inputs(workflow, analysis, files, bypassed_set, workflow_path)
         required = {
             item["id"]
@@ -4420,6 +5188,7 @@ class TaskManager:
         task_id = f"task_{uuid.uuid4().hex[:12]}"
         root = Path(output_dir or self.store.output_dir()).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
+        normalized_project = normalize_project(project, output_dir=root, workflow_path=workflow_path)
         task = {
             "id": task_id,
             "created_at": now_ms(),
@@ -4438,6 +5207,10 @@ class TaskManager:
             "key_id": key_id or None,
             "account_id": bound_workflow_account_id if force_workflow_account else current_account_id or selected_key_account_id or bound_workflow_account_id,
             "instance_type": instance_type,
+            "output_prefix": output_prefix,
+            "project_id": normalized_project["id"],
+            "project_name": normalized_project["name"],
+            "project_path": normalized_project["path"],
             "output_dir": str(root),
         }
         snapshot_workflow = json.loads(json.dumps(workflow, ensure_ascii=False))
@@ -4483,8 +5256,6 @@ class TaskManager:
             event = self._cancel_events.get(task_id)
             if current["status"] in {"queued", "recovering"}:
                 self.store.update_task(task_id, status="cancelled", progress="已取消")
-                self._retry_after.pop(task_id, None)
-                self._remote_queue_retries.pop(task_id, None)
             elif event:
                 event.set()
             else:
@@ -4524,18 +5295,16 @@ class TaskManager:
     def _dispatch_once(self) -> None:
         keys = self.store.keys()
         records = {item["id"]: item for item in keys}
+        remote_queue_states = self.store.remote_queue_states()
         for task in self.store.dispatchable_tasks():
             if task["id"] in self._claimed:
                 continue
-            with self._lock:
-                if self._retry_after.get(task["id"], 0.0) > time.time():
-                    continue
             recovery = task["status"] == "recovering"
             automatic_dispatch = not bool(task.get("key_id"))
             scoped_keys = self._keys_for_task(task, keys)
-            record = self._select_key(task, scoped_keys, records)
+            record = self._select_key(task, scoped_keys, records, remote_queue_states)
             if not record:
-                wait_message = self._queue_wait_message(task, scoped_keys, records)
+                wait_message = self._queue_wait_message(task, scoped_keys, records, remote_queue_states)
                 if task.get("progress") != wait_message:
                     self.store.update_task(task["id"], progress=wait_message)
                 continue
@@ -4581,14 +5350,51 @@ class TaskManager:
             return keys
         return [item for item in keys if str(item.get("account_id") or "").strip() == account_id]
 
-    def _automatic_candidates(self, keys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _remote_queue_state_blocks_dispatch(
+        self,
+        key: dict[str, Any],
+        state: dict[str, Any] | None,
+    ) -> bool:
+        if not state:
+            return False
+        if state.get("probe_active"):
+            return True
+        if state.get("wait_for_predecessors") or int(state.get("attempts") or 0) > 0:
+            return self._active_count_for_key(str(key.get("id") or "")) > 0
+        return False
+
+    def _remote_queue_wait_label(
+        self,
+        key: dict[str, Any],
+        state: dict[str, Any] | None,
+    ) -> str:
+        if not state:
+            return ""
+        if state.get("probe_active"):
+            return "正在提交闸门任务"
+        if state.get("wait_for_predecessors") or int(state.get("attempts") or 0) > 0:
+            active = self._active_count_for_key(str(key.get("id") or ""))
+            if active:
+                return f"等待 {active} 个前序任务完成"
+        return ""
+
+    def _automatic_candidates(
+        self,
+        keys: list[dict[str, Any]],
+        remote_queue_states: dict[str, dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Return ready Keys with capacity, honoring the configured tier policy."""
+        states = remote_queue_states if remote_queue_states is not None else self.store.remote_queue_states()
         with self._lock:
             available = [
                 item
                 for item in keys
                 if item.get("status") == "ready"
                 and self._active_count_for_key(item["id"]) < int(item.get("capacity") or DEFAULT_PERSONAL_CAPACITY)
+                and not self._remote_queue_state_blocks_dispatch(
+                    item,
+                    states.get(str(item.get("id") or "")),
+                )
             ]
         strategy = self.store.api_key_strategy()
         personal = [item for item in available if not is_shared_api_key_type(item.get("api_type"))]
@@ -4604,21 +5410,37 @@ class TaskManager:
         task: dict[str, Any],
         keys: list[dict[str, Any]],
         records: dict[str, dict[str, Any]],
+        remote_queue_states: dict[str, dict[str, Any]] | None = None,
     ) -> str:
+        states = remote_queue_states if remote_queue_states is not None else self.store.remote_queue_states()
         if task.get("key_id"):
             record = records.get(task["key_id"])
             if record and record.get("status") == "ready":
+                remote_queue_label = self._remote_queue_wait_label(
+                    record,
+                    states.get(str(record["id"])),
+                )
+                if remote_queue_label:
+                    return f"本地等待队列 · RunningHub 远程队列繁忙，{record['name']} {remote_queue_label}"
                 active = self._active_count_for_key(record["id"])
                 capacity = int(record.get("capacity") or DEFAULT_PERSONAL_CAPACITY)
                 return f"本地等待队列 · {record['name']} 并发已满（{active}/{capacity}）"
             return "本地等待队列 · 等待指定 API Key 可用"
-        candidates = self._automatic_candidates(keys)
+        candidates = self._automatic_candidates(keys, states)
         if candidates:
             capacities = ", ".join(
                 f"{item['name']} {self._active_count_for_key(item['id'])}/{int(item.get('capacity') or DEFAULT_PERSONAL_CAPACITY)}"
                 for item in candidates
             )
             return f"本地等待队列 · 等待并发槽位（{capacities}）"
+        remote_queue_labels = [
+            f"{item.get('name') or item.get('id')} {self._remote_queue_wait_label(item, states.get(str(item.get('id') or '')))}"
+            for item in keys
+            if item.get("status") == "ready"
+            and self._remote_queue_wait_label(item, states.get(str(item.get("id") or "")))
+        ]
+        if remote_queue_labels:
+            return "本地等待队列 · RunningHub 远程队列繁忙（" + "，".join(remote_queue_labels) + "）"
         strategy = self.store.api_key_strategy()
         labels = {
             "personal_only": "个人 API Key",
@@ -4632,7 +5454,9 @@ class TaskManager:
         task: dict[str, Any],
         keys: list[dict[str, Any]],
         records: dict[str, dict[str, Any]],
+        remote_queue_states: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
+        states = remote_queue_states if remote_queue_states is not None else self.store.remote_queue_states()
         with self._lock:
             if task.get("key_id"):
                 candidate = records.get(task["key_id"])
@@ -4641,16 +5465,43 @@ class TaskManager:
                 account_id = str(task.get("account_id") or "").strip()
                 if account_id and str(candidate.get("account_id") or "").strip() != account_id:
                     return None
+                if self._remote_queue_state_blocks_dispatch(
+                    candidate,
+                    states.get(str(candidate["id"])),
+                ):
+                    return None
                 if self._active_count_for_key(candidate["id"]) >= int(candidate.get("capacity") or DEFAULT_PERSONAL_CAPACITY):
                     return None
                 return candidate
-            candidates = self._automatic_candidates(keys)
+            candidates = self._automatic_candidates(keys, states)
             if not candidates:
                 return None
             return min(
                 candidates,
                 key=lambda item: (self._active_count_for_key(item["id"]), item.get("created_at", 0)),
             )
+
+    @staticmethod
+    def _is_remote_805(exc: RhCliError) -> bool:
+        """Recognize a RunningHub task failure response with code 805."""
+        detail = exc.detail
+        candidates = [detail]
+        if isinstance(detail, dict):
+            candidates.append(detail.get("detail"))
+        return any(
+            isinstance(item, dict) and str(item.get("code") or "").strip() == "805"
+            for item in candidates
+        )
+
+    @staticmethod
+    def _instance_type_after_805(instance_type: str, retry_count: int) -> str | None:
+        """Return the one allowed 805 retry machine, or None when exhausted."""
+        if retry_count >= 1:
+            return None
+        normalized = normalize_instance_type(instance_type)
+        if normalized in {"default", "plus"}:
+            return "plus"
+        return None
 
     def _recover_task(
         self,
@@ -4688,7 +5539,7 @@ class TaskManager:
                 cancel_url=_site_cancel_url(key["site"]),
             )
             self._log_stage(task_id, "download", f"恢复后开始保存 {len(outputs)} 个远程产物")
-            saved = self._download_outputs(client, outputs, task_output_dir)
+            saved = self._download_outputs(client, outputs, task_output_dir, task.get("output_prefix"))
             self._log_stage(task_id, "download", f"恢复后保存 {len(saved)} 个产物")
         cost_type, cost, duration = self._task_cost(outputs)
         self.store.update_task(
@@ -4726,6 +5577,8 @@ class TaskManager:
             task_output_dir = Path(task["output_dir"]) / task_id
             task_output_dir.mkdir(parents=True, exist_ok=True)
             site_upload, site_create, site_outputs = _site_urls(key["site"])
+            retry_805_count = 0
+            submit_instance_type = normalize_instance_type(task.get("instance_type"))
 
             with RhHttpClient(key["api_key"], no_proxy_host="runninghub.ai" if key["site"] == "ai" else "") as client:
                 self._log_stage(task_id, "prepare", "已读取工作流，准备应用输入配置")
@@ -4774,44 +5627,85 @@ class TaskManager:
                 changes = _apply_file_args(client, workflow, file_args, f"{get_site_config(key['site'])['api_host']}/task/openapi/upload")
                 self._log_stage(task_id, "upload", f"输入文件上传完成：{len(changes)} 个")
                 self.store.update_task(task_id, progress=f"已上传 {len(changes)} 个输入，正在提交…")
-                self._log_stage(task_id, "submit", f"正在提交完整 API 工作流（workflowId：{remote_id_value}）")
-                remote_id = _submit(
-                    client,
-                    key["api_key"],
-                    remote_id_value,
-                    json.dumps(workflow, ensure_ascii=False),
-                    instance_type=str(task.get("instance_type") or "default"),
-                    create_url=site_create,
-                    add_metadata=True,
-                    requeue_on_queue_full=True,
-                )
-                self.store.update_task(task_id, remote_task_id=remote_id, status="running", progress=f"已提交 · {remote_id}")
-                self._log_stage(task_id, "submit", f"RunningHub 已返回 taskId：{remote_id}")
-                self._log_stage(task_id, "poll", "开始轮询任务状态")
+                while True:
+                    self._log_stage(
+                        task_id,
+                        "submit",
+                        f"正在提交完整 API 工作流（workflowId：{remote_id_value}，机型：{submit_instance_type}）",
+                    )
+                    try:
+                        remote_id = _submit(
+                            client,
+                            key["api_key"],
+                            remote_id_value,
+                            json.dumps(workflow, ensure_ascii=False),
+                            instance_type=submit_instance_type,
+                            create_url=site_create,
+                            add_metadata=True,
+                            requeue_on_queue_full=True,
+                        )
+                        self.store.clear_remote_queue_probe(key["id"], task_id)
+                        self.store.update_task(
+                            task_id,
+                            remote_task_id=remote_id,
+                            status="running",
+                            progress=f"已提交 · {remote_id}（{submit_instance_type}）",
+                        )
+                        self._log_stage(task_id, "submit", f"RunningHub 已返回 taskId：{remote_id}")
+                        self._log_stage(task_id, "poll", "开始轮询任务状态")
 
-                last_state = {"value": ""}
+                        last_state = {"value": ""}
 
-                def on_tick(elapsed: int, state: str) -> None:
-                    labels = {"RUNNING": "RunningHub 执行中…", "QUEUED": "等待 RunningHub 队列…", "WAITING_OUTPUT": "等待产物返回…"}
-                    self.store.update_task(task_id, status="running", progress=f"{labels.get(state, state)} {elapsed}s")
-                    if state != last_state["value"]:
-                        last_state["value"] = state
-                        self._log_stage(task_id, "poll", f"远程状态：{state}（{elapsed}s）", detail={"state": state, "elapsed": elapsed})
+                        def on_tick(elapsed: int, state: str) -> None:
+                            labels = {"RUNNING": "RunningHub 执行中…", "QUEUED": "等待 RunningHub 队列…", "WAITING_OUTPUT": "等待产物返回…"}
+                            self.store.update_task(task_id, status="running", progress=f"{labels.get(state, state)} {elapsed}s")
+                            if state != last_state["value"]:
+                                last_state["value"] = state
+                                self._log_stage(task_id, "poll", f"远程状态：{state}（{elapsed}s）", detail={"state": state, "elapsed": elapsed})
 
-                outputs = _poll_outputs(
-                    client,
-                    key["api_key"],
-                    remote_id,
-                    max_seconds=1200,
-                    interval=5,
-                    on_tick=on_tick,
-                    outputs_url=site_outputs,
-                    cancel_event=cancel_event,
-                    cancel_url=_site_cancel_url(key["site"]),
-                )
-                self._log_stage(task_id, "download", f"开始保存 {len(outputs)} 个远程产物")
-                saved = self._download_outputs(client, outputs, task_output_dir)
-                self._log_stage(task_id, "download", f"保存 {len(saved)} 个产物")
+                        outputs = _poll_outputs(
+                            client,
+                            key["api_key"],
+                            remote_id,
+                            max_seconds=1200,
+                            interval=5,
+                            on_tick=on_tick,
+                            outputs_url=site_outputs,
+                            cancel_event=cancel_event,
+                            cancel_url=_site_cancel_url(key["site"]),
+                        )
+                    except RhCliError as exc:
+                        next_instance_type = self._instance_type_after_805(
+                            submit_instance_type,
+                            retry_805_count,
+                        ) if self._is_remote_805(exc) else None
+                        if next_instance_type is None:
+                            raise
+                        retry_805_count += 1
+                        previous_instance_type = submit_instance_type
+                        submit_instance_type = next_instance_type
+                        self.store.update_task(
+                            task_id,
+                            instance_type=submit_instance_type,
+                            status="submitting",
+                            remote_task_id=None,
+                            progress=(
+                                "任务执行返回 805，"
+                                f"{previous_instance_type} 机型失败，准备使用 {submit_instance_type} 机型重试（1/1）"
+                            ),
+                        )
+                        self._log_stage(
+                            task_id,
+                            "retry",
+                            f"任务执行返回 805，{previous_instance_type} 机型失败，改用 {submit_instance_type} 机型重试（1/1）",
+                            level="warning",
+                            detail=exc.detail,
+                        )
+                        continue
+                    self._log_stage(task_id, "download", f"开始保存 {len(outputs)} 个远程产物")
+                    saved = self._download_outputs(client, outputs, task_output_dir, task.get("output_prefix"))
+                    self._log_stage(task_id, "download", f"保存 {len(saved)} 个产物")
+                    break
 
             cost_type, cost, duration = self._task_cost(outputs)
             self.store.update_task(
@@ -4832,22 +5726,21 @@ class TaskManager:
                     self.store.update_task(task_id, status="cancelled", progress="已取消", completed_at=now_ms())
                     self._log_stage(task_id, "cancelled", "任务在远程队列繁忙时被取消", level="warning")
                     return
-                with self._lock:
-                    attempts = self._remote_queue_retries.get(task_id, 0) + 1
-                    self._remote_queue_retries[task_id] = attempts
-                    retry_delay = min(60, 5 * (2 ** min(attempts - 1, 3)))
-                    self._retry_after[task_id] = time.time() + retry_delay
-                    self.store.update_task(
+                _, attempts = self.store.defer_task_for_remote_queue(
+                    task_id,
+                    key["id"],
+                    automatic_dispatch=automatic_dispatch,
+                )
+                requeued = bool(attempts)
+                if requeued:
+                    self._log_stage(
                         task_id,
-                        status="queued",
-                        key_id=None if automatic_dispatch else key["id"],
-                        remote_task_id=None,
-                        error="",
-                        error_detail="{}",
-                        progress=f"远程队列繁忙，已重新排队（约 {retry_delay} 秒后重试）",
+                        "queue",
+                        "API Key 并发已满，已加入本地队列，等待前序任务完成后再提交",
+                        level="warning",
                     )
-                    requeued = True
-                self._log_stage(task_id, "queue", f"远程队列已满，{retry_delay} 秒后重新尝试", level="warning")
+                else:
+                    self.store.update_task(task_id, status="cancelled", progress="任务已取消", completed_at=now_ms())
                 return
             runtime_key_failure = self._runtime_key_failure_code(exc)
             if runtime_key_failure:
@@ -4859,26 +5752,34 @@ class TaskManager:
             self.store.set_error_detail(task_id, error_detail)
             self.store.update_task(task_id, status=status, progress=exc.message, error=redact_detail(exc.message), completed_at=now_ms())
             self._log_stage(task_id, "cancelled" if status == "cancelled" else "failed", exc.message, level="warning" if status == "cancelled" else "error", detail=exc.detail)
+            if status == "failed":
+                self._queue_telegram_task_failure(task_id, exc.message)
         except Exception as exc:  # pragma: no cover - final safety net for background jobs
             error_detail = {"type": type(exc).__name__, "message": str(exc)}
             self.store.set_error_detail(task_id, error_detail)
             self.store.update_task(task_id, status="failed", progress="任务失败", error=redact_detail(str(exc)), completed_at=now_ms())
             self._log_stage(task_id, "failed", str(exc), level="error")
+            self._queue_telegram_task_failure(task_id, str(exc))
         finally:
             with self._lock:
-                if not requeued:
-                    self._retry_after.pop(task_id, None)
-                    self._remote_queue_retries.pop(task_id, None)
                 self._claimed.discard(task_id)
                 self._cancel_events.pop(task_id, None)
                 key_id = key["id"]
                 self._active_by_key[key_id] = max(0, self._active_by_key.get(key_id, 1) - 1)
+            if not requeued:
+                self.store.clear_remote_queue_probe(key["id"], task_id)
             self._wake.set()
 
     @staticmethod
-    def _download_outputs(client: RhHttpClient, outputs: list[dict[str, Any]], folder: Path) -> list[dict[str, Any]]:
+    def _download_outputs(
+        client: RhHttpClient,
+        outputs: list[dict[str, Any]],
+        folder: Path,
+        output_prefix: str | None = None,
+    ) -> list[dict[str, Any]]:
         saved: list[dict[str, Any]] = []
         file_index = 0
+        prefix = normalize_output_prefix(output_prefix)
         for item in outputs:
             url = _output_file_url(item)
             if not url:
@@ -4888,7 +5789,7 @@ class TaskManager:
                 continue
             file_index += 1
             extension = _normalise_output_ext(item.get("fileType"))
-            filename = f"output_{file_index}.{extension}"
+            filename = f"{prefix or 'output'}_{file_index}.{extension}"
             path = folder / filename
             # Keep incomplete downloads out of startup recovery. If the app is
             # closed while streaming, only the hidden .part file remains and
@@ -4920,10 +5821,24 @@ class TaskManager:
         return None, None, first.get("taskCostTime")
 
 
-def public_state(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
+def public_state(
+    store: LocalStore,
+    manager: TaskManager,
+    *,
+    scope: str = "full",
+) -> dict[str, Any]:
+    """Return only the state needed by the requesting page.
+
+    The complete snapshot remains the backwards-compatible default. Page
+    callers can skip assembling large, unrelated collections, especially
+    task history and Telegram workflow candidates.
+    """
+    scope = str(scope or "full").strip().lower()
+    if scope not in {"full", "submit", "workflows", "prompt", "outputs", "settings"}:
+        scope = "full"
     current_account_id = store.current_account_id()
     current_account = store.get_account(current_account_id) if current_account_id else None
-    return {
+    result: dict[str, Any] = {
         "settings": {
             "output_dir": store.output_dir(),
             "douyin_cookie_path": store.douyin_cookie_path(),
@@ -4938,12 +5853,18 @@ def public_state(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
             "aliyun_vision": store.aliyun_vision_settings(),
             "telegram": store.telegram_settings(),
         },
-        "current_account": public_account(current_account) if current_account else None,
-        "keys": manager.public_keys(current_account_id),
-        "accounts": [public_account(item) for item in store.accounts()],
-        "telegram_inbound_workflows": manager.telegram_inbound_workflows(),
-        "tasks": manager.public_tasks(),
     }
+    if scope in {"full", "submit", "workflows", "settings"}:
+        result["current_account"] = public_account(current_account) if current_account else None
+        result["accounts"] = [public_account(item) for item in store.accounts()]
+    if scope in {"full", "submit", "settings"}:
+        result["keys"] = manager.public_keys(current_account_id)
+    if scope in {"full", "submit"}:
+        result["tasks"] = manager.public_tasks()
+    if scope in {"full", "settings"}:
+        result["telegram_inbound_workflows"] = manager.telegram_inbound_workflows()
+        result["telegram_video_inbound_workflows"] = manager.telegram_video_inbound_workflows()
+    return result
 
 
 def _decimal_value(value: Any) -> float | None:
@@ -4996,6 +5917,30 @@ def _probe_video_duration(path: Path) -> float:
         if duration is not None and duration > 0:
             return duration
     return 0.0
+
+
+def _apply_telegram_video_duration(workflow: dict[str, Any], video_path: Path) -> float | None:
+    """Apply a downloaded video's duration to the conventional H3 duration node.
+
+    Telegram video intake supports general single-video workflows, so a
+    workflow without node 14 remains unchanged. H3 workflows that expose the
+    conventional ``PrimitiveFloat`` node 14 get the measured duration in the
+    task-local workflow copy; the library workflow itself is never modified.
+    """
+    node = workflow.get("14") if isinstance(workflow, dict) else None
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict) or "value" not in inputs:
+        return None
+
+    duration = _probe_video_duration(video_path)
+    if duration <= 0:
+        raise RhCliError(
+            "TELEGRAM_VIDEO_DURATION_UNAVAILABLE",
+            f"无法读取下载视频的实际时长：{video_path.name}。请检查本机 ffprobe 是否可用。",
+        )
+    measured = round(duration, 3)
+    inputs["value"] = measured
+    return measured
 
 
 def _video_seconds_from_outputs(outputs: Any) -> float:
@@ -5212,13 +6157,14 @@ def _dashboard_workflow_scores(
     store: LocalStore,
     manager: TaskManager,
     active_task_ids: set[str],
+    tasks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Aggregate current output-library ratings for registered workflows."""
     workflows = [
         item for item in store.workflows()
         if str(item.get("id") or "").strip()
     ]
-    tasks = manager.public_tasks()
+    tasks = tasks if tasks is not None else manager.public_tasks()
     tasks_by_id = {
         str(task.get("id") or "").strip(): task
         for task in tasks
@@ -5231,7 +6177,7 @@ def _dashboard_workflow_scores(
     score_rows: dict[str, dict[str, Any]] = {}
     task_ids_by_workflow: dict[str, set[str]] = {}
 
-    for output in public_outputs(store, manager).get("outputs", []):
+    for output in public_outputs(store, manager, tasks=tasks).get("outputs", []):
         task_id = str(output.get("task_id") or "").strip()
         if not task_id or task_id not in active_task_ids:
             continue
@@ -5334,7 +6280,7 @@ def public_dashboard(
     current_tasks = manager.public_tasks()
     current_task_ids = {str(task.get("id") or "") for task in current_tasks}
     active_task_ids = {str(record.get("task_id") or "") for record in active_records}
-    workflow_scores = _dashboard_workflow_scores(store, manager, active_task_ids)
+    workflow_scores = _dashboard_workflow_scores(store, manager, active_task_ids, tasks=current_tasks)
 
     total_coins = 0.0
     money_spent: dict[str, dict[str, Any]] = {}
@@ -5535,14 +6481,24 @@ def public_output_media(manager: TaskManager, tag: str = "案例") -> list[dict[
     return media
 
 
-def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
+def public_outputs(
+    store: LocalStore,
+    manager: TaskManager,
+    *,
+    tasks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Return locally available task artifacts for the output library page."""
     artifacts: list[dict[str, Any]] = []
     type_counts = {"image": 0, "video": 0, "audio": 0, "other": 0, "text": 0}
     rating_counts = {"unrated": 0, **{str(score): 0 for score in range(1, 6)}}
     tag_counts: dict[str, int] = {"案例": 0}
+    registered_workflows = [
+        item for item in store.workflows()
+        if str(item.get("id") or "").strip()
+    ]
 
-    for task in manager.public_tasks():
+    tasks = tasks if tasks is not None else manager.public_tasks()
+    for task in tasks:
         task_id = str(task.get("id") or "").strip()
         if not task_id:
             continue
@@ -5551,6 +6507,11 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
         task_workflow_path = Path(str(task.get("workflow_path") or "")).expanduser()
         task_snapshot_path = LocalStore.task_snapshot_path(task)
         workflow_available = task_snapshot_path.is_file() or task_workflow_path.is_file()
+        registered_workflow_id = _dashboard_registered_workflow_id(task, registered_workflows)
+        account_id = str(task.get("account_id") or "").strip()
+        project_id = str(task.get("project_id") or "").strip()
+        project_name = str(task.get("project_name") or "").strip()
+        project_path = str(task.get("project_path") or "").strip()
         for output_index, output in enumerate(task.get("outputs") or []):
             if not isinstance(output, dict):
                 continue
@@ -5578,6 +6539,11 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
                         "text": text,
                         "node_id": str(output.get("node_id") or ""),
                         "task_id": task_id,
+                        "registered_workflow_id": registered_workflow_id,
+                        "account_id": account_id,
+                        "project_id": project_id,
+                        "project_name": project_name,
+                        "project_path": project_path,
                         "workflow_available": workflow_available,
                         "output_index": output_index,
                         "rating": rating,
@@ -5630,6 +6596,11 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
                     "file_type": str(output.get("file_type") or file_path.suffix.lstrip(".") or "file"),
                     "node_id": str(output.get("node_id") or ""),
                     "task_id": task_id,
+                    "registered_workflow_id": registered_workflow_id,
+                    "account_id": account_id,
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "project_path": project_path,
                     "workflow_available": workflow_available,
                     "output_index": output_index,
                     "rating": rating,
@@ -5650,6 +6621,7 @@ def public_outputs(store: LocalStore, manager: TaskManager) -> dict[str, Any]:
     artifacts.sort(key=lambda item: int(item.get("modified_at") or item.get("task_created_at") or 0), reverse=True)
     return {
         "outputs": artifacts,
+        "projects": store.project_folders(),
         "summary": {
             "total": len(artifacts),
             "tasks": len({item["task_id"] for item in artifacts}),

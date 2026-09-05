@@ -122,12 +122,16 @@
               </article>
               <article class="settings-card">
                 <div class="settings-card-heading"><div><h3>当前使用账号</h3><p>点击账号卡片选择默认站点；选择会在统一保存时生效。</p></div></div>
-                <div id="accountList" class="credential-list account-list"></div>
+                <div id="accountList" class="credential-list account-list">
+                  <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取账号</strong></div>
+                </div>
                 <form id="accountForm" class="credential-editor account-editor"><div class="editor-title">添加一个 RunningHub 登录账号</div><div class="editor-grid account-editor-grid"><input id="accountName" type="text" placeholder="名称，例如：主账号" autocomplete="off" /><select id="accountSite"><option value="cn">runninghub.cn</option><option value="ai">runninghub.ai</option></select><button id="addAccount" class="secondary-button" type="submit">添加并登录</button></div></form>
               </article>
               <article class="settings-card">
                 <div class="settings-card-heading"><div><h3>当前账号 API Key</h3><p>添加、检测、刷新余额和删除属于即时操作。</p></div><button id="refreshKeys" class="text-button" type="button">刷新全部</button></div>
-                <div id="credentialList" class="credential-list"></div>
+                <div id="credentialList" class="credential-list">
+                  <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取 API Key</strong></div>
+                </div>
                 <form id="credentialForm" class="credential-editor"><div class="editor-title">添加一个 API Key</div><div class="editor-grid"><input id="keyName" type="text" placeholder="名称，例如：主账号" /><select id="keySite"><option value="cn">runninghub.cn</option><option value="ai">runninghub.ai</option></select><input id="keyValue" type="password" placeholder="粘贴 API Key" autocomplete="off" /><button id="addKey" class="secondary-button" type="button">检测并保存</button></div></form>
               </article>
             </section>
@@ -135,8 +139,8 @@
             <section class="settings-section" data-settings-panel="plugin" hidden>
               <div class="settings-section-heading"><div><div class="section-kicker">PLUGIN CONFIGURATION</div><h2>插件配置</h2><p>管理外部服务和本机下载工具的路径。修改后统一保存。</p></div></div>
               <article class="settings-card">
-                <div class="settings-card-heading"><div><h3>抖音视频下载</h3><p>只保存 Cookie 文件路径，下载时由本机 yt-dlp 读取，不会上传 Cookie 内容。</p></div></div>
-                <div class="settings-form-grid settings-path-row"><label class="field-group"><span class="field-label">Cookie 文件路径</span><input id="douyinCookiePath" type="text" autocomplete="off" placeholder="例如 /Users/apple/Documents/VideoMake/douyin-cookies.txt" /></label><div class="settings-inline-actions"><button id="chooseDouyinCookie" class="secondary-button" type="button">选择文件</button></div></div>
+                <div class="settings-card-heading"><div><h3>社交视频下载</h3><p>支持 Bilibili、X 和抖音。可选配置 Cookie 文件路径，下载时由本机 yt-dlp 读取，不会上传 Cookie 内容。</p></div></div>
+                <div class="settings-form-grid settings-path-row"><label class="field-group"><span class="field-label">Cookie 文件路径（可选）</span><input id="douyinCookiePath" type="text" autocomplete="off" placeholder="例如 /Users/apple/Documents/VideoMake/social-cookies.txt" /></label><div class="settings-inline-actions"><button id="chooseDouyinCookie" class="secondary-button" type="button">选择文件</button></div></div>
               </article>
               <article class="settings-card">
                 <div class="settings-card-heading"><div><h3>Telegram 成片推送</h3><p>任务下载完成后，可发送图片、视频、音频或其它成片到指定聊天。</p></div><span id="telegramStatus" class="credential-status">未配置</span></div>
@@ -149,6 +153,13 @@
                     <label class="field-group"><span class="field-label">运行模式</span><select id="telegramInboundMode"><option value="fixed">固定工作流</option><option value="folder_random">文件夹随机</option></select></label>
                     <label id="telegramInboundWorkflowField" class="field-group"><span class="field-label">固定工作流</span><select id="telegramInboundWorkflow"><option value="">请选择工作流</option></select></label>
                     <label id="telegramInboundFolderField" class="field-group" hidden><span class="field-label">随机文件夹</span><select id="telegramInboundFolder"><option value="">请选择文件夹</option></select></label>
+                  </div>
+                </div>
+                <div class="settings-toggle-row telegram-inbound-toggle-row"><label class="settings-switch"><input id="telegramVideoInboundEnabled" type="checkbox" aria-controls="telegramVideoInboundPanel" /><span class="settings-switch-track" aria-hidden="true"></span><span class="settings-switch-label">启用视频链接入站</span></label></div>
+                <div id="telegramVideoInboundPanel" class="telegram-inbound-panel is-disabled" aria-disabled="true">
+                  <div class="telegram-inbound-copy"><span class="field-label">Telegram 视频链接入站</span><span id="telegramVideoInboundSummary" class="field-hint">未选择工作流。</span><span class="field-hint">发送抖音、Bilibili/b23.tv 或 X/Twitter 视频链接，下载后提交给单视频输入工作流。</span></div>
+                  <div class="telegram-inbound-config">
+                    <label class="field-group"><span class="field-label">固定视频工作流</span><select id="telegramVideoInboundWorkflow"><option value="">请选择工作流</option></select></label>
                   </div>
                 </div>
                 <div class="settings-card-footer settings-button-row"><button id="testTelegram" class="secondary-button" type="button">测试已保存配置</button><button id="clearTelegram" class="danger-button" type="button">清除 Telegram 配置</button></div>

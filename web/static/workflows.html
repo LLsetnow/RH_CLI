@@ -112,7 +112,9 @@
           </div>
         </section>
 
-        <section id="workflowGroups" class="workflow-groups" aria-live="polite"></section>
+        <section id="workflowGroups" class="workflow-groups" aria-live="polite">
+          <div class="page-loading-state" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取工作流库</strong><span>正在扫描本地工作流和文件夹…</span></div>
+        </section>
 
         <section class="prompt-group-library" aria-labelledby="promptGroupLibraryTitle">
           <div class="prompt-group-library-heading">
@@ -123,7 +125,9 @@
             </div>
             <span class="output-format">LOCAL</span>
           </div>
-          <div id="promptGroupGroups" class="workflow-groups" aria-live="polite"></div>
+          <div id="promptGroupGroups" class="workflow-groups" aria-live="polite">
+            <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取组状态库</strong></div>
+          </div>
         </section>
       </main>
     </div>

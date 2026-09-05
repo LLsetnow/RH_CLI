@@ -1,7 +1,8 @@
 (function () {
   "use strict";
 
-  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", workflowAccountId: "", workflowInputConfig: null, analysis: null, workflowDirty: false, bypassedNodes: {}, keys: [], accounts: [], currentAccountId: "", tasks: [], settings: null, loading: false, activeFileInputId: "", configEditor: null };
+  var TASK_PAGE_SIZE = 20;
+  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", workflowAccountId: "", workflowInputConfig: null, analysis: null, workflowDirty: false, bypassedNodes: {}, keys: [], accounts: [], currentAccountId: "", tasks: [], taskPage: 1, settings: null, loading: false, activeFileInputId: "", configEditor: null };
   var previewUrls = {};
   var previewFiles = {};
   var draggedPreviewInputId = "";
@@ -83,6 +84,40 @@
   }
   function activeTaskCount(tasks) {
     return (tasks || []).filter(isActiveTask).length;
+  }
+  function taskPageCount(totalItems) {
+    var count = Array.isArray(totalItems) ? totalItems.length : Number(totalItems) || 0;
+    return Math.max(1, Math.ceil(count / TASK_PAGE_SIZE));
+  }
+  function taskPageNumberMarkup(page, currentPage) {
+    var active = page === currentPage;
+    return '<button class="queue-page-number' + (active ? ' active' : '') + '" type="button" data-task-page="' + page + '"' + (active ? ' aria-current="page"' : '') + ' aria-label="第 ' + page + ' 页" aria-pressed="' + (active ? 'true' : 'false') + '">' + page + '</button>';
+  }
+  function renderTaskPagination(totalItems) {
+    var pagination = $("queuePagination");
+    if (!pagination) return;
+    var totalPages = taskPageCount(totalItems);
+    if (totalPages <= 1) {
+      pagination.hidden = true;
+      pagination.innerHTML = "";
+      return;
+    }
+    appState.taskPage = Math.min(Math.max(Number(appState.taskPage) || 1, 1), totalPages);
+    var currentPage = appState.taskPage;
+    var pageNumbers = [];
+    var start = Math.max(2, currentPage - 2);
+    var end = Math.min(totalPages - 1, currentPage + 2);
+    pageNumbers.push(taskPageNumberMarkup(1, currentPage));
+    if (start > 2) pageNumbers.push('<span class="queue-page-ellipsis" aria-hidden="true">…</span>');
+    for (var page = start; page <= end; page += 1) pageNumbers.push(taskPageNumberMarkup(page, currentPage));
+    if (end < totalPages - 1) pageNumbers.push('<span class="queue-page-ellipsis" aria-hidden="true">…</span>');
+    if (totalPages > 1) pageNumbers.push(taskPageNumberMarkup(totalPages, currentPage));
+    var visibleCount = Math.min(TASK_PAGE_SIZE, Math.max(0, totalItems - (currentPage - 1) * TASK_PAGE_SIZE));
+    pagination.hidden = false;
+    pagination.innerHTML = '<button class="queue-page-button" type="button" data-task-page="previous"' + (currentPage === 1 ? ' disabled' : '') + ' aria-label="上一页">上一页</button>' +
+      '<div class="queue-page-numbers" role="list" aria-label="页码">' + pageNumbers.join("") + '</div>' +
+      '<span class="queue-page-status">第 ' + currentPage + ' / ' + totalPages + ' 页 · 当前显示 ' + visibleCount + ' 张</span>' +
+      '<button class="queue-page-button" type="button" data-task-page="next"' + (currentPage === totalPages ? ' disabled' : '') + ' aria-label="下一页">下一页</button>';
   }
   function showToast(message, isError) {
     var toast = $("toast");
@@ -613,9 +648,14 @@
     $("queueCount").textContent = activeTaskCount(tasks);
     if (!tasks.length) {
       list.innerHTML = '<div class="empty-queue"><div class="empty-line"></div><strong>队列还是空的</strong><span>导入一个工作流，准备第一次提交。</span></div>';
+      renderTaskPagination(0);
       return;
     }
-    list.innerHTML = tasks.map(function (task) {
+    var totalPages = taskPageCount(tasks.length);
+    appState.taskPage = Math.min(Math.max(Number(appState.taskPage) || 1, 1), totalPages);
+    var start = (appState.taskPage - 1) * TASK_PAGE_SIZE;
+    var visibleTasks = tasks.slice(start, start + TASK_PAGE_SIZE);
+    list.innerHTML = visibleTasks.map(function (task) {
       var outputCount = (task.outputs || []).filter(function (item) { return item.kind === "file"; }).length;
       var outputLabel = outputCount ? outputCount + " 个产物" : (task.status === "completed" ? "无文件产物" : "");
       var costLabel = formatTaskCost(task);
@@ -637,6 +677,7 @@
         (canCancel ? '<button type="button" data-action="cancel-task">取消</button>' : "") +
         (canDelete ? '<button type="button" data-action="delete-task">删除</button>' : "") + '</span></div></article>';
     }).join("");
+    renderTaskPagination(tasks.length);
   }
 
   function taskErrorText(task) {
@@ -785,7 +826,7 @@
   function refresh(silent) {
     if (appState.loading) return Promise.resolve();
     appState.loading = true;
-    return request("/api/state").then(renderState).catch(function (error) {
+    return request("/api/state?scope=submit").then(renderState).catch(function (error) {
       if (!silent) showToast(error.message, true);
     }).finally(function () { appState.loading = false; });
   }
@@ -1193,12 +1234,12 @@
     var mediaMarkup = kind === "video" ? '<video controls preload="metadata" playsinline></video>' : (kind === "audio" ? '<audio controls preload="metadata"></audio>' : '<button class="image-preview-trigger file-preview-image-trigger" type="button" data-image-preview="" aria-label="放大查看输入图片" hidden><img alt="" draggable="false" /></button>');
     var pasteButton = kind === "image" ? '<button class="file-button paste-file-button" data-action="paste-file" data-input-id="' + esc(item.id) + '" type="button">粘贴图片</button>' : "";
     var hint = kind === "video" ? "拖入、选择或输入路径后预览视频" : (kind === "audio" ? "拖入、选择或输入路径后预览音频" : "拖入、⌘V 粘贴或点击“选择文件”查看图片");
-    var douyinSource = kind === "video" ? '<div class="video-source-row"><label class="video-url-field"><span class="sr-only">抖音视频链接</span><input class="douyin-url" data-input-id="' + esc(item.id) + '" type="url" placeholder="粘贴抖音视频链接（可选）" autocomplete="off" /></label><button class="file-button douyin-download-button" data-action="download-douyin" data-input-id="' + esc(item.id) + '" type="button">下载抖音</button></div>' : "";
+    var socialSource = kind === "video" ? '<div class="video-source-row"><label class="video-url-field"><input class="social-video-url" data-input-id="' + esc(item.id) + '" type="url" aria-label="视频链接" placeholder="粘贴 Bilibili、X 或抖音视频链接（可选）" autocomplete="off" /></label><button class="file-button social-video-download-button" data-action="download-social-video" data-input-id="' + esc(item.id) + '" type="button">下载视频</button></div>' : "";
     return '<div class="file-input-layout"><div class="file-input-controls">' +
       '<div class="file-dropzone" data-action="pick-file" data-input-id="' + esc(item.id) + '" tabindex="0" role="group" aria-label="文件拖放区域">' +
       '<span class="file-drop-mark" aria-hidden="true">↓</span><span class="file-drop-copy"><strong class="file-drop-title">拖入文件到这里</strong><small class="file-drop-hint">' + hint + '</small></span>' +
-      '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" accept="' + accept + '" hidden />' + pasteButton + '<button class="file-button" data-action="pick-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button></div>' +
-      '<div class="input-control-row"><input class="file-path" data-input-id="' + esc(item.id) + '" data-original-value="' + esc(String(item.default || "")) + '" type="text" placeholder="输入本机绝对路径（不会复制文件）" value="' + esc(/^(\/|[A-Za-z]:[\\/])/.test(String(item.default || "")) ? String(item.default || "") : "") + '" /><button class="file-button native-file-button" data-action="pick-native-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button></div>' + douyinSource +
+      '<input class="file-picker" data-input-id="' + esc(item.id) + '" type="file" accept="' + accept + '" hidden />' + pasteButton + '</div>' +
+      '<div class="input-control-row"><input class="file-path" data-input-id="' + esc(item.id) + '" data-original-value="' + esc(String(item.default || "")) + '" type="text" placeholder="输入本机绝对路径（不会复制文件）" value="' + esc(/^(\/|[A-Za-z]:[\\/])/.test(String(item.default || "")) ? String(item.default || "") : "") + '" /><button class="file-button native-file-button" data-action="pick-native-file" data-input-id="' + esc(item.id) + '" type="button">选择文件</button><button class="file-button open-file-folder-button" data-action="open-file-folder" data-input-id="' + esc(item.id) + '" type="button" title="打开文件所在文件夹" aria-label="打开文件所在文件夹">打开文件</button></div>' + socialSource +
       '<div class="file-meta" data-meta-id="' + esc(item.id) + '">点击“选择文件”后，这里会显示本机绝对路径；输入文件不会复制到项目目录。</div></div>' +
       '<figure class="file-preview" data-preview-id="' + esc(item.id) + '" data-expected-preview-kind="' + kind + '" draggable="true" title="拖动此预览到其他文件输入以替换" aria-label="' + label + '，可拖动到其他文件输入替换" hidden><figcaption>' + label + '</figcaption><div class="file-preview-frame">' + mediaMarkup + '</div><div class="file-preview-name"></div></figure></div></div>';
   }
@@ -1914,13 +1955,41 @@
     });
   }
 
-  function downloadDouyinVideo(inputId, button) {
+  function openInputFileFolder(inputId, button) {
     if (isNodeBypassed(String(inputId).split(":", 1)[0])) return;
-    var urlInput = document.querySelector('.douyin-url[data-input-id="' + CSS.escape(inputId) + '"]');
+    var pathInput = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
+    var normalized = String(pathInput && pathInput.value || "").trim();
+    var requestPath = normalized;
+    if (!/^(\/|[A-Za-z]:[\\/])/.test(requestPath) && appState.workflowSourceDir && requestPath && !/^[a-z]+:\/\//i.test(requestPath)) {
+      requestPath = appState.workflowSourceDir.replace(/[\\/]$/, "") + "/" + requestPath.replace(/^[/\\]+/, "");
+    }
+    if (!/^(\/|[A-Za-z]:[\\/])/.test(requestPath)) {
+      if (pathInput) pathInput.focus();
+      showToast("请先选择或输入文件路径", true);
+      return;
+    }
+    var original = button.textContent;
+    button.disabled = true;
+    button.textContent = "打开中…";
+    button.setAttribute("aria-busy", "true");
+    jsonRequest("/api/open-file-folder", "POST", { path: requestPath }).then(function (data) {
+      showToast(data.message || "已打开文件所在文件夹");
+    }).catch(function (error) {
+      showToast(error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = original;
+      button.removeAttribute("aria-busy");
+    });
+  }
+
+  function downloadSocialVideo(inputId, button) {
+    if (isNodeBypassed(String(inputId).split(":", 1)[0])) return;
+    var urlInput = document.querySelector('.social-video-url[data-input-id="' + CSS.escape(inputId) + '"]');
     var url = urlInput ? urlInput.value.trim() : "";
     if (!url) {
       if (urlInput) urlInput.focus();
-      showToast("请先粘贴抖音视频链接", true);
+      showToast("请先粘贴 Bilibili、X 或抖音视频链接", true);
       return;
     }
     var path = document.querySelector('.file-path[data-input-id="' + CSS.escape(inputId) + '"]');
@@ -1933,10 +2002,11 @@
     if (card) card.classList.add("is-loading");
     if (zone) {
       zone.classList.add("is-loading");
-      zone.querySelector(".file-drop-title").textContent = "正在下载抖音视频";
+      zone.querySelector(".file-drop-title").textContent = "正在下载视频";
       zone.querySelector(".file-drop-hint").textContent = "下载完成后会自动写入当前节点";
     }
-    jsonRequest("/api/download-douyin", "POST", { url: url }).then(function (selected) {
+    jsonRequest("/api/download-social-video", "POST", { url: url }).then(function (selected) {
+      var platformLabel = selected.platform_label || "社交平台";
       if (path) path.value = selected.path || "";
       setPathPreview(inputId, selected);
       if (zone) {
@@ -1949,9 +2019,9 @@
         card.classList.remove("is-loading");
         card.classList.add("is-ready");
       }
-      if (meta) meta.textContent = selected.name + " · 已从抖音下载到本机";
+      if (meta) meta.textContent = selected.name + " · 已从" + platformLabel + "下载到本机";
       scheduleDraftSave();
-      showToast("抖音视频已下载并载入当前节点");
+      showToast(platformLabel + "视频已下载并载入当前节点");
     }).catch(function (error) {
       if (card) card.classList.remove("is-loading");
       if (zone) zone.classList.remove("is-loading");
@@ -2009,7 +2079,7 @@
     button.disabled = true;
     jsonRequest("/api/settings", "PATCH", { douyin_cookie_path: $("douyinCookiePath").value.trim() }).then(function (data) {
       $("douyinCookiePath").value = data.douyin_cookie_path || "";
-      showToast(data.douyin_cookie_path ? "抖音 Cookie 路径已保存" : "抖音 Cookie 路径已清除");
+      showToast(data.douyin_cookie_path ? "Cookie 路径已保存" : "Cookie 路径已清除");
     }).catch(function (error) {
       showToast(error.message, true);
     }).finally(function () {
@@ -2799,6 +2869,18 @@
     trigger.click();
   }
 
+  function handleQueuePagination(event) {
+    var button = event.target.closest("[data-task-page]");
+    if (!button || button.disabled) return;
+    var totalPages = taskPageCount(appState.tasks);
+    var requested = button.dataset.taskPage;
+    var nextPage = requested === "previous" ? appState.taskPage - 1 : requested === "next" ? appState.taskPage + 1 : Number(requested);
+    nextPage = Math.min(Math.max(Number(nextPage) || 1, 1), totalPages);
+    if (nextPage === appState.taskPage) return;
+    appState.taskPage = nextPage;
+    renderTasks();
+  }
+
   function handleCredentialClick(event) {
     var trigger = event.target.closest("button[data-action]");
     if (!trigger) return;
@@ -3004,13 +3086,14 @@
         return;
       }
       var inputCard = trigger.closest(".input-card");
-      if (inputCard && inputCard.classList.contains("is-bypassed") && ["pick-file", "pick-native-file", "pick-prompt", "paste-file", "download-douyin", "translate-prompt"].indexOf(action) !== -1) return;
+      if (inputCard && inputCard.classList.contains("is-bypassed") && ["pick-file", "pick-native-file", "open-file-folder", "pick-prompt", "paste-file", "download-social-video", "translate-prompt"].indexOf(action) !== -1) return;
       if (action === "jump-input") jumpToInput(inputId);
       if (action === "add-random-noise") addRandomNoiseNode();
       if (action === "pick-file") document.querySelector('.file-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
       if (action === "paste-file") armClipboardPaste(inputId);
       if (action === "pick-native-file") pickNativeInput(inputId, trigger);
-      if (action === "download-douyin") downloadDouyinVideo(inputId, trigger);
+      if (action === "open-file-folder") openInputFileFolder(inputId, trigger);
+      if (action === "download-social-video") downloadSocialVideo(inputId, trigger);
       if (action === "pick-prompt") document.querySelector('.prompt-picker[data-input-id="' + CSS.escape(inputId) + '"]').click();
       if (action === "translate-prompt") translatePromptNode(inputId, trigger);
     });
@@ -3176,6 +3259,7 @@
     });
     $("queueList").addEventListener("click", handleQueueClick);
     $("queueList").addEventListener("keydown", handleQueueKeydown);
+    $("queuePagination").addEventListener("click", handleQueuePagination);
     if (!document.body.classList.contains("focus-body")) {
     $("credentialList").addEventListener("click", handleCredentialClick);
     $("accountList").addEventListener("click", handleAccountClick);

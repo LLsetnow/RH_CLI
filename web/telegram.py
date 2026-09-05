@@ -105,6 +105,13 @@ class TelegramNotifier:
                 )
             except Exception:
                 inbound_folder_name = ""
+        video_inbound_workflow_id = str(data.get("telegram_video_inbound_workflow_id") or "").strip()
+        video_inbound_workflow_name = ""
+        if video_inbound_workflow_id:
+            try:
+                video_inbound_workflow_name = str(self.store.workflow_record(video_inbound_workflow_id).get("name") or "").strip()
+            except Exception:
+                video_inbound_workflow_name = "工作流已删除"
         return {
             "configured": bool(token and chat_ids),
             "enabled": enabled,
@@ -119,6 +126,10 @@ class TelegramNotifier:
             "inbound_folder_id": inbound_folder_id,
             "inbound_folder_name": inbound_folder_name,
             "inbound_file_input_id": str(data.get("telegram_inbound_file_input_id") or "").strip(),
+            "video_inbound_enabled": bool(data.get("telegram_video_inbound_enabled")),
+            "video_inbound_workflow_id": video_inbound_workflow_id,
+            "video_inbound_workflow_name": video_inbound_workflow_name,
+            "video_inbound_file_input_id": str(data.get("telegram_video_inbound_file_input_id") or "").strip(),
         }
 
     @staticmethod
@@ -362,6 +373,13 @@ class TelegramNotifier:
             raise TelegramDeliveryError("Telegram 消息信息不完整。")
         fields = {"chat_id": target_chat_id, "message_id": str(int(message_id))}
         self._with_retries(lambda: self._api_call(token, "deleteMessage", fields))
+
+    @staticmethod
+    def message_text(update: dict[str, Any]) -> str:
+        message = update.get("message") if isinstance(update, dict) else None
+        if not isinstance(message, dict):
+            return ""
+        return str(message.get("text") or message.get("caption") or "").strip()
 
     @staticmethod
     def image_file_reference(update: dict[str, Any]) -> dict[str, str] | None:

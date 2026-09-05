@@ -40,6 +40,12 @@ def test_output_cards_support_local_selection_and_media_shortcuts():
     assert 'event.key === "ArrowRight"' in script
     assert 'event.key === "ArrowUp"' in script
     assert 'event.key === "ArrowDown"' in script
+    assert "function outputKeyboardNavigationAllowed(event)" in script
+    assert 'target.closest(".artifact-card")' in script
+    assert 'target.closest("input, select, textarea, [contenteditable=\\"true\\"], audio, video")' in script
+    assert "targetPage = currentPage - 1" in script
+    assert "targetPage = currentPage + 1" in script
+    assert "state.page = targetPage" in script
     assert "toggleSelectedVideo" in script
     assert "video.play()" in script
     assert "previewMediaElement" in script
@@ -158,6 +164,80 @@ def test_output_workflow_names_load_the_task_draft_and_open_submit_page():
     assert "queuePromptGroupSnapshot(data.prompt_group)" in script
 
 
+def test_output_workflow_names_show_a_compact_copyable_task_id():
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert "function taskIdLabel(item)" in script
+    assert 'data-copy-task-id="' in script
+    assert "copyTextToClipboard" in script
+    assert 'event.stopPropagation();' in script
+    assert "完整任务 ID 已复制" in script
+    assert ".artifact-task-id" in styles
+    assert ".artifact-task-prefix" in styles
+    assert ".artifact-task .artifact-workflow-link" in styles
+
+
+def test_outputs_are_browsable_by_project_folder_and_reclassifiable_per_task():
+    page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert 'id="outputProjectGrid"' in page
+    assert 'id="outputProjectMoveModal"' in page
+    assert 'data-artifact-menu-action="move-project"' in page
+    assert "UNCLASSIFIED_PROJECT_ID" in script
+    assert "outputProjectRecords" in script
+    assert "belongsToProject" in script
+    assert 'data-output-project="' in script
+    assert '"/api/tasks/" + encodeURIComponent(item.task_id) + "/project"' in script
+    assert "只会改变项目归类，不会移动或复制成片文件" in script
+    assert ".output-project-card" in styles
+    assert ".output-project-move-option" in styles
+
+
+def test_output_projects_can_be_created_and_managed_without_an_all_outputs_folder_card():
+    page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert 'id="createOutputProject"' in page
+    assert 'id="outputProjectEditorModal"' in page
+    assert 'id="outputProjectDeleteModal"' in page
+    assert 'id="outputProjectContextMenu"' in page
+    assert 'data-output-project-menu-action="rename"' in page
+    assert 'data-output-project-menu-action="delete"' in page
+    assert "createProjectFolder" not in script
+    assert "openOutputProjectEditor" in script
+    assert "openOutputProjectContextMenu" in script
+    assert "confirmOutputProjectDelete" in script
+    assert '"/api/projects"' in script
+    assert '"/api/projects/" + encodeURIComponent(projectId)' in script
+    assert "outputProjectCard(allRecord" not in script
+    assert ".output-project-context-menu" in styles
+    assert ".output-project-empty" in styles
+
+
+def test_output_cards_can_be_dragged_to_project_folder_drop_targets():
+    page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert 'data-output-project-drop="' in script
+    assert 'data-project-draggable="' in script
+    assert 'application/x-rh-output-task' in script
+    assert "handleOutputProjectDragOver" in script
+    assert "handleOutputProjectDragLeave" in script
+    assert "handleOutputProjectDrop" in script
+    assert "requestOutputTaskProject" in script
+    assert 'addEventListener("dragover", handleOutputProjectDragOver)' in script
+    assert 'addEventListener("drop", handleOutputProjectDrop)' in script
+    assert "可拖拽到项目文件夹" in script
+    assert ".is-output-project-drop-target" in styles
+    assert ".is-output-project-drop-saving" in styles
+    assert "不会移动或复制成片文件" in page
+
+
 def test_output_grid_favors_four_portrait_cards_on_desktop():
     styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
 
@@ -213,7 +293,7 @@ def test_output_cards_support_star_ratings_and_rating_filters():
     assert "output-preview-rating" in styles
 
 
-def test_output_cards_support_case_tags_and_case_filter():
+def test_output_cards_support_case_tags_and_three_state_case_filter():
     page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
     styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
@@ -221,24 +301,33 @@ def test_output_cards_support_case_tags_and_case_filter():
     assert 'id="outputTagFilters"' in page
     assert 'data-output-tag="案例"' in page
     assert 'data-output-tag="H"' in page
-    assert 'aria-label="筛选案例"' in page
-    assert 'aria-label="筛选 H 标签"' in page
+    assert 'aria-label="案例标签筛选"' in page
+    assert 'aria-label="H 标签筛选"' in page
     tag_start = page.index('<div id="outputTagFilters"')
     tag_end = page.index("</div>", tag_start) + len("</div>")
     tag_markup = page[tag_start:tag_end]
     assert ">全部</button>" not in tag_markup
-    assert ">案例</button>" in tag_markup
-    assert ">H</button>" in tag_markup
     assert 'data-output-tag=""' not in tag_markup
     assert "全部标签" not in tag_markup
     assert "data-tag-count" not in tag_markup
-    assert "output-tag-filter-label" not in tag_markup
+    assert "output-tag-filter-label" in tag_markup
     assert "output-tag-filter-hint" not in tag_markup
+    for tag in ("案例", "H"):
+        assert tag_markup.count(f'data-output-tag="{tag}"') == 1
+        assert f'data-output-tag="{tag}" data-output-tag-mode="off"' in tag_markup
+    assert tag_markup.count(">不启用</button>") == 2
+    assert ">包含</button>" not in tag_markup
+    assert ">不包含</button>" not in tag_markup
     assert page.index('<div id="outputTagFilters"') > page.index('<div id="outputFilters"')
     assert "tag_counts" in script
     assert "normalizedOutputTags" in script
-    assert "filteredOutputs" in script and "state.tags" in script
-    assert "state.tags.every(function (tag)" in script
+    assert "filteredOutputs" in script and "state.tagFilters" in script
+    assert "outputTagFilterMode" in script
+    assert "outputTagFilterMatches" in script
+    assert "matchesOutputTagFilters" in script
+    assert 'state.tags.every(function (tag)' not in script
+    assert "OUTPUT_TAG_FILTER_MODES[(currentIndex + 1) % OUTPUT_TAG_FILTER_MODES.length]" in script
+    assert 'button.textContent = label' in script
     assert "setOutputTags" in script
     assert 'body: JSON.stringify({ tags: nextTags })' in script
     assert "toggleCaseTag" in script
@@ -254,6 +343,15 @@ def test_output_cards_support_case_tags_and_case_filter():
     assert "artifact-tag-h" in script
     assert ".artifact-tag" in styles
     assert ".output-tag-filter" in styles
+    assert ".output-tag-filter-group" in styles
+    assert ".output-tag-filter-options" in styles
+    assert 'data-output-tag-mode="off"' in styles
+    assert 'data-output-tag-mode="include"' in styles
+    assert 'data-output-tag-mode="exclude"' in styles
+    assert "background: var(--panel-glass)" in styles
+    assert "color: var(--accent)" in styles
+    assert "color: var(--danger)" in styles
+    assert "@media (max-width: 650px)" in styles
 
 
 def test_output_toolbar_can_export_all_case_media():
@@ -328,8 +426,39 @@ def test_dashboard_exposes_registered_workflow_score_ranking():
     assert "workflow_scores" in script
     assert "total_score" in script
     assert "rated_output_count" in script
+    assert "workflowOutputsUrl" in script
+    assert "workflowSearchName" in script
+    assert 'replace(/\\.json$/i, "")' in script
+    assert 'registered_workflow_id' not in script
+    assert 'params.set("workflow_name", searchName)' in script
+    assert 'range_start' in script
+    assert 'range_end' in script
+    assert '<a class="dashboard-workflow-score-item"' in script
     assert "dashboard-workflow-score-item" in styles
     assert "dashboard-workflow-score-empty" in styles
+
+
+def test_outputs_accept_dashboard_workflow_context_and_keep_range_filter():
+    page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert 'id="outputContextFilter"' not in page
+    assert 'id="clearOutputContextFilter"' not in page
+    assert 'new URLSearchParams(window.location.search || "")' in script
+    assert 'state.search = state.contextWorkflowName' in script
+    assert 'params.get("registered_workflow_id")' not in script
+    assert 'params.get("range_start")' in script
+    assert 'params.get("range_end")' in script
+    assert 'params.get("account_id")' in script
+    assert "contextOutputMatches" in script
+    assert "contextRangeEnd" in script
+    assert "task_created_at" in script
+    assert "range_start" in script
+    assert "range_end" in script
+    assert "renderOutputContext" not in script
+    assert "clearOutputContextFilter" not in script
+    assert ".output-context-filter" not in styles
 
 
 def test_workflow_submit_exposes_all_instance_type_options():

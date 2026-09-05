@@ -6,6 +6,7 @@
     keys: [],
     accounts: [],
     inboundWorkflows: [],
+    videoInboundWorkflows: [],
     workflowFolders: [],
     pendingAccountId: "",
     dirty: false,
@@ -348,7 +349,42 @@
       folderSelect.innerHTML = folderOptions.join("");
       setValue("telegramInboundFolder", selectedFolderId);
     }
+    renderTelegramVideoInboundOptions();
     updateTelegramInboundControls();
+  }
+  function renderTelegramVideoInboundOptions() {
+    var telegram = state.settings && state.settings.telegram || {};
+    var workflowSelect = $("telegramVideoInboundWorkflow");
+    var selectedWorkflowId = telegram.video_inbound_workflow_id || "";
+    if (workflowSelect && document.activeElement === workflowSelect) selectedWorkflowId = workflowSelect.value;
+    if (workflowSelect) {
+      var workflowOptions = ['<option value="">请选择可用视频工作流</option>'];
+      state.videoInboundWorkflows.forEach(function (workflow) {
+        var account = workflow.account_name ? " · " + workflow.account_name : "";
+        workflowOptions.push('<option value="' + esc(workflow.id) + '">' + esc(workflow.name + account) + '</option>');
+      });
+      if (selectedWorkflowId && !state.videoInboundWorkflows.some(function (workflow) { return workflow.id === selectedWorkflowId; })) {
+        workflowOptions.push('<option value="' + esc(selectedWorkflowId) + '">' + esc((telegram.video_inbound_workflow_name || selectedWorkflowId) + "（当前不可用）") + '</option>');
+      }
+      workflowSelect.innerHTML = workflowOptions.join("");
+      setValue("telegramVideoInboundWorkflow", selectedWorkflowId);
+    }
+    updateTelegramVideoInboundControls();
+  }
+  function updateTelegramVideoInboundControls() {
+    var videoInboundEnabled = Boolean($("telegramVideoInboundEnabled") && $("telegramVideoInboundEnabled").checked);
+    var videoInboundPanel = $("telegramVideoInboundPanel");
+    if (videoInboundPanel) {
+      videoInboundPanel.classList.toggle("is-disabled", !videoInboundEnabled);
+      videoInboundPanel.setAttribute("aria-disabled", videoInboundEnabled ? "false" : "true");
+    }
+    var workflowSelect = $("telegramVideoInboundWorkflow");
+    if (workflowSelect) workflowSelect.disabled = !videoInboundEnabled;
+    var summary = $("telegramVideoInboundSummary");
+    if (!summary) return;
+    var workflow = state.videoInboundWorkflows.find(function (item) { return item.id === value("telegramVideoInboundWorkflow"); });
+    var telegram = state.settings && state.settings.telegram || {};
+    summary.textContent = workflow ? "固定工作流：" + workflow.name + (videoInboundEnabled ? " · 已启用" : " · 未启用") : telegram.video_inbound_workflow_id ? "固定工作流：" + (telegram.video_inbound_workflow_name || telegram.video_inbound_workflow_id) + " · 当前不可用" : "请选择一个可用的视频工作流。";
   }
   function updateTelegramInboundControls() {
     var mode = telegramInboundMode();
@@ -403,6 +439,7 @@
     setValue("telegramChatId", telegram.chat_id || "");
     setChecked("telegramEnabled", telegram.enabled);
     setChecked("telegramInboundEnabled", telegram.inbound_enabled);
+    setChecked("telegramVideoInboundEnabled", telegram.video_inbound_enabled);
     setValue("telegramInboundMode", telegram.inbound_mode || "fixed");
     renderTelegramInboundOptions();
     var telegramStatus = $("telegramStatus");
@@ -413,8 +450,9 @@
   function refresh(silent) {
     if (state.loading) return Promise.resolve();
     state.loading = true;
-    return Promise.all([request("/api/state"), request("/api/workflow-folders")]).then(function (results) {
+    return Promise.all([request("/api/state?scope=settings"), request("/api/workflow-folders")]).then(function (results) {
       state.inboundWorkflows = Array.isArray(results[0].telegram_inbound_workflows) ? results[0].telegram_inbound_workflows : [];
+      state.videoInboundWorkflows = Array.isArray(results[0].telegram_video_inbound_workflows) ? results[0].telegram_video_inbound_workflows : [];
       state.workflowFolders = Array.isArray(results[1].folders) ? results[1].folders : [];
       applyState(results[0]);
     }).catch(function (error) { if (!silent) showToast(error.message, true); }).finally(function () { state.loading = false; });
@@ -459,6 +497,8 @@
       body.telegram_inbound_mode = value("telegramInboundMode") || "fixed";
       body.telegram_inbound_workflow_id = value("telegramInboundWorkflow");
       body.telegram_inbound_folder_id = value("telegramInboundFolder");
+      body.telegram_video_inbound_enabled = Boolean($("telegramVideoInboundEnabled") && $("telegramVideoInboundEnabled").checked);
+      body.telegram_video_inbound_workflow_id = value("telegramVideoInboundWorkflow");
       var botToken = value("telegramBotToken");
       if (botToken) body.telegram_bot_token = botToken;
     }
@@ -595,6 +635,8 @@
     $("telegramInboundWorkflow").addEventListener("change", updateTelegramInboundControls);
     $("telegramInboundFolder").addEventListener("change", updateTelegramInboundControls);
     $("telegramInboundEnabled").addEventListener("change", updateTelegramInboundControls);
+    $("telegramVideoInboundWorkflow").addEventListener("change", updateTelegramVideoInboundControls);
+    $("telegramVideoInboundEnabled").addEventListener("change", updateTelegramVideoInboundControls);
     $("saveSettings").addEventListener("click", function () { saveAllSettings().catch(function () {}); });
     $("chooseOutputDir").addEventListener("click", function () { var button = this; button.disabled = true; chooseDirectory().then(function (path) { if (path) { setValue("outputDir", path); markDirty(); showToast("已选择产物目录，请点击右下角保存配置"); } }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; }); });
     $("chooseDouyinCookie").addEventListener("click", function () { pickDouyinCookie(this); });
@@ -611,7 +653,7 @@
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; button.textContent = original; });
     });
     $("testTelegram").addEventListener("click", function () { if (state.dirty) return showToast("请先保存配置，再测试 Telegram", true); var button = this; button.disabled = true; jsonRequest("/api/telegram/test", "POST", {}).then(function (data) { showToast(data.message || "Telegram 测试消息已发送"); }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; }); });
-    $("clearTelegram").addEventListener("click", function () { if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？点击右下角保存后生效。")) return; state.clearingTelegram = true; setValue("telegramBotToken", ""); setValue("telegramChatId", ""); setChecked("telegramEnabled", false); setChecked("telegramInboundEnabled", false); setValue("telegramInboundMode", "fixed"); setValue("telegramInboundWorkflow", ""); setValue("telegramInboundFolder", ""); updateTelegramInboundControls(); markDirty(); showToast("已准备清除 Telegram 配置，请保存"); });
+    $("clearTelegram").addEventListener("click", function () { if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？点击右下角保存后生效。")) return; state.clearingTelegram = true; setValue("telegramBotToken", ""); setValue("telegramChatId", ""); setChecked("telegramEnabled", false); setChecked("telegramInboundEnabled", false); setChecked("telegramVideoInboundEnabled", false); setValue("telegramInboundMode", "fixed"); setValue("telegramInboundWorkflow", ""); setValue("telegramInboundFolder", ""); setValue("telegramVideoInboundWorkflow", ""); updateTelegramInboundControls(); updateTelegramVideoInboundControls(); markDirty(); showToast("已准备清除 Telegram 配置，请保存"); });
     $("credentialList").addEventListener("click", handleCredentialClick);
     $("accountList").addEventListener("click", handleAccountClick);
     $("accountList").addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); handleAccountClick(event); } });

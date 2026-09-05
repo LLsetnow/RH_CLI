@@ -1,10 +1,12 @@
 (function () {
   "use strict";
 
+  var COMPARE_PAGE_SIZE = 20;
   var state = {
     outputs: [],
     localAssets: [],
     sourceFilter: "all",
+    assetPage: 1,
     slots: { a: null, b: null },
     mode: "split",
     panX: 0,
@@ -271,6 +273,47 @@
     if (size < 1024 * 1024) return (size / 1024).toFixed(1) + " KB";
     return (size / (1024 * 1024)).toFixed(1) + " MB";
   }
+  function comparePageCount(items) {
+    return Math.max(1, Math.ceil((Array.isArray(items) ? items.length : Number(items) || 0) / COMPARE_PAGE_SIZE));
+  }
+  function comparePageItems(items) {
+    var pageCount = comparePageCount(items);
+    state.assetPage = Math.min(Math.max(Number(state.assetPage) || 1, 1), pageCount);
+    var start = (state.assetPage - 1) * COMPARE_PAGE_SIZE;
+    return (items || []).slice(start, start + COMPARE_PAGE_SIZE);
+  }
+  function resetCompareAssetPage() {
+    state.assetPage = 1;
+  }
+  function comparePageNumberMarkup(page, currentPage) {
+    var active = page === currentPage;
+    return '<button class="output-page-number' + (active ? ' active' : '') + '" type="button" data-compare-page="' + page + '"' + (active ? ' aria-current="page"' : '') + ' aria-label="第 ' + page + ' 页"' + (active ? ' aria-pressed="true"' : ' aria-pressed="false"') + '>' + page + '</button>';
+  }
+  function renderComparePagination(totalItems) {
+    var pagination = $("compareAssetPagination");
+    if (!pagination) return;
+    var totalPages = comparePageCount(totalItems);
+    if (totalPages <= 1) {
+      pagination.hidden = true;
+      pagination.innerHTML = "";
+      return;
+    }
+    state.assetPage = Math.min(Math.max(Number(state.assetPage) || 1, 1), totalPages);
+    var currentPage = state.assetPage;
+    var pageNumbers = [];
+    var start = Math.max(2, currentPage - 2);
+    var end = Math.min(totalPages - 1, currentPage + 2);
+    pageNumbers.push(comparePageNumberMarkup(1, currentPage));
+    if (start > 2) pageNumbers.push('<span class="output-page-ellipsis" aria-hidden="true">…</span>');
+    for (var page = start; page <= end; page += 1) pageNumbers.push(comparePageNumberMarkup(page, currentPage));
+    if (end < totalPages - 1) pageNumbers.push('<span class="output-page-ellipsis" aria-hidden="true">…</span>');
+    if (totalPages > 1) pageNumbers.push(comparePageNumberMarkup(totalPages, currentPage));
+    pagination.hidden = false;
+    pagination.innerHTML = '<button class="output-page-button" type="button" data-compare-page="previous"' + (currentPage === 1 ? ' disabled' : '') + ' aria-label="上一页">上一页</button>' +
+      '<div class="output-page-numbers" role="list" aria-label="页码">' + pageNumbers.join("") + '</div>' +
+      '<span class="output-page-status">第 ' + currentPage + ' / ' + totalPages + ' 页 · 当前显示 ' + Math.min(COMPARE_PAGE_SIZE, Math.max(0, totalItems - (currentPage - 1) * COMPARE_PAGE_SIZE)) + ' 张</span>' +
+      '<button class="output-page-button" type="button" data-compare-page="next"' + (currentPage === totalPages ? ' disabled' : '') + ' aria-label="下一页">下一页</button>';
+  }
   function assetCardMarkup(asset) {
     var sourceLabel = asset.source === "local" ? "本地文件" : (asset.task_name || "成片库");
     return '<article class="compare-asset-card" draggable="true" tabindex="0" data-asset-id="' + esc(asset.id) + '" aria-label="拖拽 ' + esc(asset.name) + ' 到对比槽">' +
@@ -281,10 +324,12 @@
   }
   function renderAssets() {
     var list = $("compareAssetList");
-    var assets = allAssets().filter(function (asset) {
+    var filteredAssets = allAssets().filter(function (asset) {
       return state.sourceFilter === "all" || asset.display_type === state.sourceFilter;
     });
+    var assets = comparePageItems(filteredAssets);
     $("compareSourceCount").textContent = String(allAssets().length);
+    renderComparePagination(filteredAssets.length);
     if (!assets.length) {
       list.innerHTML = '<div class="compare-asset-empty">还没有可用的' + (state.sourceFilter === "video" ? "视频" : state.sourceFilter === "image" ? "图片" : "图片或视频") + '。<br />从成片库拖入，或选择本地文件。</div>';
       return;
@@ -732,11 +777,21 @@
       var button = event.target.closest("[data-source-filter]");
       if (!button) return;
       state.sourceFilter = button.dataset.sourceFilter;
+      resetCompareAssetPage();
       document.querySelectorAll("[data-source-filter]").forEach(function (item) {
         var active = item === button;
         item.classList.toggle("active", active);
         item.setAttribute("aria-selected", active ? "true" : "false");
       });
+      renderAssets();
+    });
+    $("compareAssetPagination").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-compare-page]");
+      if (!button || button.disabled) return;
+      var nextPage = button.dataset.comparePage;
+      if (nextPage === "previous") state.assetPage -= 1;
+      else if (nextPage === "next") state.assetPage += 1;
+      else state.assetPage = Number(nextPage);
       renderAssets();
     });
     $("compareAssetList").addEventListener("dragstart", function (event) {

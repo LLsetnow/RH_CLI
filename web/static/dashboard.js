@@ -178,6 +178,21 @@
     }
   }
 
+  function workflowSearchName(value) {
+    return String(value == null ? "" : value).trim().replace(/\.json$/i, "");
+  }
+
+  function workflowOutputsUrl(item, data) {
+    var params = new URLSearchParams();
+    if (data && data.range_start != null) params.set("range_start", String(data.range_start));
+    if (data && data.range_end != null) params.set("range_end", String(data.range_end));
+    if (data && data.range_days != null) params.set("range_days", String(data.range_days));
+    if (data && data.account_filter) params.set("account_id", String(data.account_filter));
+    var searchName = workflowSearchName(item && item.name);
+    if (searchName) params.set("workflow_name", searchName);
+    return "/outputs?" + params.toString();
+  }
+
   function renderWorkflowScores(data) {
     var scores = data.workflow_scores || {};
     var items = Array.isArray(scores.items) ? scores.items : [];
@@ -203,7 +218,7 @@
       var average = formatNumber(item.average_rating, 1);
       var detail = ratedOutputs + " 个已评分成片 · 平均 " + average + " 星";
       if (runCount > 0) detail += " · " + runCount + " 次运行";
-      return '<article class="dashboard-workflow-score-item"><span class="dashboard-workflow-score-rank" aria-label="第 ' + (index + 1) + ' 名">' + String(index + 1).padStart(2, "0") + '</span><div class="dashboard-workflow-score-identity"><strong title="' + esc(item.name) + '">' + esc(item.name) + '</strong><span>' + esc(detail) + '</span></div><div class="dashboard-workflow-score-value"><strong>' + esc(item.total_score) + '</strong><small>总得分</small></div></article>';
+      return '<a class="dashboard-workflow-score-item" href="' + esc(workflowOutputsUrl(item, data)) + '" title="打开成片页并筛选该注册工作流的产物"><span class="dashboard-workflow-score-rank" aria-label="第 ' + (index + 1) + ' 名">' + String(index + 1).padStart(2, "0") + '</span><div class="dashboard-workflow-score-identity"><strong title="' + esc(item.name) + '">' + esc(item.name) + '</strong><span>' + esc(detail) + '</span></div><div class="dashboard-workflow-score-value"><strong>' + esc(item.total_score) + '</strong><small>总得分</small></div></a>';
     }).join("");
   }
 
