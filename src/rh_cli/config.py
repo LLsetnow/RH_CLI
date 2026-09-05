@@ -275,6 +275,9 @@ def resolve_api_key(provided_key: str | None = None, key_name: str | None = None
         named_key = get_key_by_name(cli_key)
         if named_key:
             return ResolvedKey(named_key, f"keys.{cli_key}")
+        # Explicit CLI input must win over environment/config fallbacks even
+        # when a development or test endpoint uses a non-UUID key format.
+        return ResolvedKey(cli_key, "cli")
 
     env_key = _valid_key(os.environ.get(ENV_API_KEY))
     if env_key:
@@ -361,5 +364,4 @@ def save_browser_token(rh_comfy_auth: str, rh_identify: str) -> Path:
         "rh_identify": rh_identify,
     }
     return write_config(cfg)
-
 

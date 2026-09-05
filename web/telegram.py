@@ -23,10 +23,19 @@ class TelegramDeliveryError(RhCliError):
         super().__init__("TELEGRAM_DELIVERY_FAILED", message)
 
 
+class TelegramRequestNotSentError(TelegramDeliveryError):
+    """The request failed before any bytes could be sent to Telegram."""
+
+
+class TelegramRequestOutcomeUnknownError(TelegramDeliveryError):
+    """The request may have been accepted, but its response was not known."""
+
+
 class TelegramNotifier:
-    """Deliver saved task outputs to one Telegram chat without new dependencies."""
+    """Deliver saved task outputs to configured Telegram chats without new dependencies."""
 
     RETRIES = 3
+    DELIVERY_CLAIM_LEASE_MS = 10 * 60 * 1000
     CHUNK_SIZE = 1024 * 1024
     MAX_INBOUND_IMAGE_BYTES = 20 * 1024 * 1024
     IMAGE_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -37,6 +46,16 @@ class TelegramNotifier:
     @staticmethod
     def _is_true(value: Any) -> bool:
         return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def parse_chat_ids(value: Any) -> list[str]:
+        """Parse a comma-separated Chat ID setting into unique, trimmed targets."""
+        chat_ids: list[str] = []
+        for raw_chat_id in str(value or "").replace("，", ",").split(","):
+            chat_id = raw_chat_id.strip()
+            if chat_id and chat_id not in chat_ids:
+                chat_ids.append(chat_id)
+        return chat_ids
 
     def credentials(self) -> tuple[str, str]:
         data = self.store._read_json_file()
@@ -52,15 +71,19 @@ class TelegramNotifier:
     def settings(self) -> dict[str, Any]:
         data = self.store._read_json_file()
         token, chat_id = self.credentials()
+        chat_ids = self.parse_chat_ids(chat_id)
         local_configured = bool(
             str(data.get("telegram_bot_token") or "").strip()
-            and str(data.get("telegram_chat_id") or "").strip()
+            and self.parse_chat_ids(data.get("telegram_chat_id"))
         )
         environment_configured = bool(
             str(os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
-            and str(os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
+            and self.parse_chat_ids(os.environ.get("RH_TELEGRAM_CHAT_ID"))
         )
         enabled = bool(data.get("telegram_enabled")) if "telegram_enabled" in data else self._is_true(os.environ.get("RH_TELEGRAM_ENABLED"))
+        inbound_mode = str(data.get("telegram_inbound_mode") or "fixed").strip().lower()
+        if inbound_mode not in {"fixed", "folder_random"}:
+            inbound_mode = "fixed"
         inbound_workflow_id = str(data.get("telegram_inbound_workflow_id") or "").strip()
         inbound_workflow_name = ""
         if inbound_workflow_id:
@@ -68,15 +91,33 @@ class TelegramNotifier:
                 inbound_workflow_name = str(self.store.workflow_record(inbound_workflow_id).get("name") or "").strip()
             except Exception:
                 inbound_workflow_name = "工作流已删除"
+        inbound_folder_id = str(data.get("telegram_inbound_folder_id") or "").strip()
+        inbound_folder_name = ""
+        if inbound_folder_id:
+            try:
+                inbound_folder_name = next(
+                    (
+                        str(item.get("name") or "").strip()
+                        for item in self.store.workflow_folders()
+                        if str(item.get("id") or "").strip() == inbound_folder_id
+                    ),
+                    "",
+                )
+            except Exception:
+                inbound_folder_name = ""
         return {
-            "configured": bool(token and chat_id),
+            "configured": bool(token and chat_ids),
             "enabled": enabled,
             "bot_token_hint": self._mask(token),
             "chat_id": chat_id,
+            "chat_ids": chat_ids,
             "source": "local" if local_configured else "environment" if environment_configured else "",
             "inbound_enabled": bool(data.get("telegram_inbound_enabled")),
+            "inbound_mode": inbound_mode,
             "inbound_workflow_id": inbound_workflow_id,
             "inbound_workflow_name": inbound_workflow_name,
+            "inbound_folder_id": inbound_folder_id,
+            "inbound_folder_name": inbound_folder_name,
             "inbound_file_input_id": str(data.get("telegram_inbound_file_input_id") or "").strip(),
         }
 
@@ -97,6 +138,14 @@ class TelegramNotifier:
     def _output_key(index: int, output: dict[str, Any]) -> str:
         raw = f"{index}:{output.get('kind', '')}:{output.get('path', '')}:{output.get('text', '')}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _delivery_key(output_key: str, chat_id: str, multiple_chats: bool) -> str:
+        """Keep legacy keys for one target and isolate delivery state per target otherwise."""
+        if not multiple_chats:
+            return output_key
+        chat_key = hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16]
+        return f"{output_key}:{chat_key}"
 
     @staticmethod
     def _media_method(output: dict[str, Any]) -> tuple[str, str]:
@@ -151,11 +200,16 @@ class TelegramNotifier:
         content_length += len(closing)
 
         connection: http.client.HTTPSConnection | None = None
+        request_started = False
         try:
             connection = http.client.HTTPSConnection("api.telegram.org", timeout=60)
             connection.putrequest("POST", f"/bot{quote(token, safe=':_-')}/{method}")
             connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
             connection.putheader("Content-Length", str(content_length))
+            # endheaders() flushes the HTTP request headers. From this point on,
+            # a socket failure has an unknown outcome: Telegram may already have
+            # received enough of the request to create the message.
+            request_started = True
             connection.endheaders()
             for part in field_parts:
                 connection.send(part)
@@ -169,7 +223,11 @@ class TelegramNotifier:
             response = connection.getresponse()
             raw = response.read(2 * 1024 * 1024)
         except (OSError, http.client.HTTPException) as exc:
-            raise TelegramDeliveryError("Telegram 网络请求失败，请检查网络或代理。") from exc
+            if request_started:
+                raise TelegramRequestOutcomeUnknownError(
+                    "Telegram 请求结果未知，已停止自动重试以避免重复发送。"
+                ) from exc
+            raise TelegramRequestNotSentError("Telegram 请求尚未发出，请检查网络或代理。") from exc
         finally:
             if connection is not None:
                 connection.close()
@@ -177,7 +235,9 @@ class TelegramNotifier:
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
-            raise TelegramDeliveryError("Telegram 返回了无法识别的响应。") from exc
+            raise TelegramRequestOutcomeUnknownError(
+                "Telegram 返回无法识别的响应，已停止自动重试以避免重复发送。"
+            ) from exc
         if not isinstance(payload, dict) or not payload.get("ok"):
             description = str(payload.get("description") or "Telegram 接口拒绝了请求") if isinstance(payload, dict) else "Telegram 接口返回异常"
             raise TelegramDeliveryError(description[:300])
@@ -195,14 +255,18 @@ class TelegramNotifier:
             response = connection.getresponse()
             raw = response.read(2 * 1024 * 1024)
         except (OSError, http.client.HTTPException) as exc:
-            raise TelegramDeliveryError("Telegram 网络请求失败，请检查网络或代理。") from exc
+            # GET polling has no message-send side effect, so it is safe to
+            # retry even if the response outcome is not known.
+            raise TelegramRequestNotSentError("Telegram 网络请求失败，请检查网络或代理。") from exc
         finally:
             if connection is not None:
                 connection.close()
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
-            raise TelegramDeliveryError("Telegram 返回了无法识别的响应。") from exc
+            # A malformed GET response is also safe to retry because polling
+            # does not create a Telegram message.
+            raise TelegramRequestNotSentError("Telegram 返回了无法识别的响应。") from exc
         if not isinstance(payload, dict) or not payload.get("ok"):
             description = str(payload.get("description") or "Telegram 接口拒绝了请求") if isinstance(payload, dict) else "Telegram 接口返回异常"
             raise TelegramDeliveryError(description[:300])
@@ -213,24 +277,31 @@ class TelegramNotifier:
         for attempt in range(self.RETRIES):
             try:
                 return action()
-            except TelegramDeliveryError as exc:
+            except TelegramRequestNotSentError as exc:
                 last_error = exc
                 if attempt < self.RETRIES - 1:
                     time.sleep(1 + attempt * 2)
+            except TelegramDeliveryError as exc:
+                # A known API rejection and an unknown POST outcome must not be
+                # retried here. Retrying an unknown multipart upload can create
+                # duplicate messages after Telegram already accepted it.
+                raise exc
         raise last_error or TelegramDeliveryError("Telegram 发送失败")
 
     def test_connection(self) -> dict[str, Any]:
         token, chat_id = self.credentials()
-        if not token or not chat_id:
+        chat_ids = self.parse_chat_ids(chat_id)
+        if not token or not chat_ids:
             raise TelegramDeliveryError("请先配置 Telegram Bot Token 和 Chat ID。")
-        self._with_retries(
-            lambda: self._api_call(
-                token,
-                "sendMessage",
-                {"chat_id": chat_id, "text": "RH Workflow Desk 连接测试成功。"},
+        for target_chat_id in chat_ids:
+            self._with_retries(
+                lambda target_chat_id=target_chat_id: self._api_call(
+                    token,
+                    "sendMessage",
+                    {"chat_id": target_chat_id, "text": "RH Workflow Desk 连接测试成功。"},
+                )
             )
-        )
-        return {"ok": True, "message": "测试消息已发送到 Telegram。"}
+        return {"ok": True, "message": f"测试消息已发送到 {len(chat_ids)} 个 Telegram 聊天。"}
 
     def send_message(
         self,
@@ -239,18 +310,21 @@ class TelegramNotifier:
         reply_markup: dict[str, Any] | None = None,
     ) -> None:
         token, configured_chat_id = self.credentials()
-        target_chat_id = str(chat_id or configured_chat_id or "").strip()
-        if not token or not target_chat_id:
+        configured_chat_ids = self.parse_chat_ids(configured_chat_id)
+        requested_chat_id = str(chat_id or "").strip()
+        target_chat_ids = [requested_chat_id] if requested_chat_id else configured_chat_ids
+        if not token or not target_chat_ids:
             raise TelegramDeliveryError("请先配置 Telegram Bot Token 和 Chat ID。")
         message = str(text or "").strip()
         if not message:
             return
-        fields = {"chat_id": target_chat_id, "text": message[:4096]}
-        if reply_markup is not None:
-            fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
-        self._with_retries(
-            lambda: self._api_call(token, "sendMessage", fields)
-        )
+        for target_chat_id in target_chat_ids:
+            fields = {"chat_id": target_chat_id, "text": message[:4096]}
+            if reply_markup is not None:
+                fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
+            self._with_retries(
+                lambda fields=fields: self._api_call(token, "sendMessage", fields)
+            )
 
     def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False) -> None:
         token, _ = self.credentials()
@@ -412,7 +486,8 @@ class TelegramNotifier:
         if not force and not is_telegram_inbound and not settings["enabled"]:
             return {"status": "disabled", "sent": 0, "failed": 0}
         token, chat_id = self.credentials()
-        if not token or not chat_id:
+        chat_ids = self.parse_chat_ids(chat_id)
+        if not token or not chat_ids:
             return {"status": "not_configured", "sent": 0, "failed": 0}
         sent = 0
         failed = 0
@@ -420,14 +495,32 @@ class TelegramNotifier:
             if not isinstance(output, dict):
                 continue
             index = output_indices[position] if output_indices and position < len(output_indices) else position
-            delivery_key = self._output_key(index, output)
-            if self.store.telegram_delivery_sent(task_id, delivery_key):
-                continue
-            try:
-                self._send_output(token, chat_id, task, output)
-            except TelegramDeliveryError:
-                failed += 1
-                continue
-            self.store.mark_telegram_delivery_sent(task_id, delivery_key)
-            sent += 1
+            output_key = self._output_key(index, output)
+            for target_chat_id in chat_ids:
+                delivery_key = self._delivery_key(output_key, target_chat_id, len(chat_ids) > 1)
+                claim_id = uuid4().hex
+                if not self.store.claim_telegram_delivery(
+                    task_id,
+                    delivery_key,
+                    claim_id,
+                    lease_ms=self.DELIVERY_CLAIM_LEASE_MS,
+                    allow_unknown=force,
+                ):
+                    continue
+                try:
+                    self._send_output(token, target_chat_id, task, output)
+                except TelegramRequestOutcomeUnknownError as exc:
+                    self.store.finish_telegram_delivery(
+                        task_id, delivery_key, claim_id, "unknown", str(exc)
+                    )
+                    failed += 1
+                    continue
+                except TelegramDeliveryError as exc:
+                    self.store.finish_telegram_delivery(
+                        task_id, delivery_key, claim_id, "retryable", str(exc)
+                    )
+                    failed += 1
+                    continue
+                self.store.finish_telegram_delivery(task_id, delivery_key, claim_id, "sent", "")
+                sent += 1
         return {"status": "sent" if not failed else "partial", "sent": sent, "failed": failed}

@@ -5,6 +5,8 @@
     settings: null,
     keys: [],
     accounts: [],
+    inboundWorkflows: [],
+    workflowFolders: [],
     pendingAccountId: "",
     dirty: false,
     clearingTelegram: false,
@@ -17,11 +19,223 @@
   var credentialBusy = {};
   var accountBusy = {};
 
+  var shortcutGroups = [
+    {
+      title: "全局工作台",
+      items: [
+        { combos: [["Ctrl", "Enter"]], description: "提交当前任务；在非任务提交页会先回到任务提交页并自动提交。" },
+        { combos: [["Alt", "←"], ["Alt", "→"]], description: "在顶层页面之间循环切换；Electron 版同时注册为全局快捷键。" },
+      ],
+    },
+    {
+      title: "任务提交",
+      items: [
+        { combos: [["⌘", "V"], ["Ctrl", "V"]], description: "在文件输入区域粘贴剪贴板图片，并保存为可提交的本地输入文件。" },
+        { combos: [["Enter"]], description: "在工作流重命名弹窗中保存名称。" },
+        { combos: [["Enter"], ["Space"]], description: "激活任务卡片、账号卡片、分辨率预设和文件拖放区等可聚焦控件。" },
+        { combos: [["Escape"]], description: "关闭任务详情、设置、工作流配置和工作流重命名弹窗。" },
+      ],
+    },
+    {
+      title: "提示词工坊",
+      items: [
+        { combos: [["←"], ["→"], ["Home"], ["End"]], description: "调整左侧积木库宽度；方向键按步进调整，Home / End 直接到边界。" },
+        { combos: [["↑"], ["↓"]], description: "在输入 @ 后的参考候选列表中上下移动。" },
+        { combos: [["Enter"], ["Tab"]], description: "插入当前选中的 @ 参考候选。" },
+        { combos: [["Escape"]], description: "关闭参考候选、图片上下文菜单、图片/文本预览和编辑弹窗。" },
+        { combos: [["Backspace"]], description: "删除光标前最后一个参考 token。" },
+        { combos: [["Enter"], ["Space"]], description: "打开资源媒体槽位的文件选择器。" },
+        { combos: [["0"], ["1"], ["2"], ["3"], ["4"], ["5"]], description: "对鼠标悬停的积木、动作或参考卡片评分；0 表示清除评分。" },
+        { combos: [["⌘", "V"], ["Ctrl", "V"]], description: "在资源媒体槽位粘贴素材。" },
+      ],
+    },
+    {
+      title: "成片库",
+      items: [
+        { combos: [["←"], ["→"]], description: "预览打开时前后跳转 1 秒；未打开预览时在同一行移动选中产物。" },
+        { combos: [["↑"], ["↓"]], description: "未打开预览时在产物网格中上下移动选中项。" },
+        { combos: [["Space"]], description: "播放或暂停预览中的媒体；未打开预览时控制选中视频。" },
+        { combos: [["0"], ["1"], ["2"], ["3"], ["4"], ["5"]], description: "对当前或悬停的产物评分；0 表示清除评分。" },
+        { combos: [["Enter"]], description: "打开选中的产物预览；预览打开时关闭预览。" },
+        { combos: [["Escape"]], description: "关闭产物预览、导入弹窗和右键菜单。" },
+        { combos: [["Delete"], ["Backspace"]], description: "删除选中的任务记录及其产物；执行前会请求确认。" },
+      ],
+    },
+    {
+      title: "内容对比",
+      items: [
+        { combos: [["Space"]], description: "播放或暂停两条视频。需要至少加载两个视频，且焦点不在输入控件上。" },
+        { combos: [["←"], ["→"]], description: "让两条视频同步前后跳转 1 秒。" },
+        { combos: [["D"], ["F"]], description: "逐帧后退或前进 1 帧，并暂停视频。" },
+        { combos: [["0"]], description: "重置对比画布的缩放和平移；需要先聚焦对比画布。" },
+        { combos: [["Enter"], ["Space"]], description: "激活对比素材投放区或素材卡片。" },
+      ],
+    },
+    {
+      title: "专注模式",
+      items: [
+        { combos: [["Shift", "滚轮"]], description: "横向滚动专注模式中的多面板工作区。" },
+        { combos: [["←"], ["→"]], description: "聚焦面板分隔条时调整相邻面板宽度。" },
+      ],
+    },
+    {
+      title: "工作流库与设置",
+      items: [
+        { combos: [["Enter"]], description: "工作流库编辑文件夹名称时保存。" },
+        { combos: [["Escape"]], description: "工作流库取消文件夹重命名，或关闭上下文菜单和编辑弹窗。" },
+        { combos: [["Enter"], ["Space"]], description: "在设置页键盘激活账号卡片，选择当前使用账号。" },
+      ],
+    },
+  ];
+
+  function colorToken(token, name, description, dark, light, swatch) {
+    return { token: token, name: name, description: description, dark: dark, light: light, swatch: swatch || token.replace(/^--/, "") };
+  }
+
+  function derivedColor(token, name, description, formula) {
+    return colorToken(token, name, description, formula, formula);
+  }
+
+  var colorGroups = [
+    {
+      title: "状态与语义",
+      items: [
+        colorToken("--accent", "强调 / 成功", "主操作、选中、可用、完成和进行中状态。", "#6ee7d8", "#168f86"),
+        colorToken("--accent-deep", "强调深色", "强调色的悬停和亮色主题深阶。", "#39b7aa", "#0d746d"),
+        colorToken("--warm", "提醒 / 运行中", "等待、消耗、未配置、未绑定和运行中状态。", "#ffb86b", "#b46a16"),
+        colorToken("--danger", "错误 / 危险", "失败、异常和删除操作。", "#ff7e8a", "#c04457"),
+        colorToken("--accent-contrast", "强调反差文字", "放在强调色底上的文字或图标。", "#061414", "#ffffff"),
+        colorToken("--reference-accent", "参考资源", "参考媒体和资源类型标记。", "#5a9be8", "#2f6fb7"),
+        colorToken("--type-accent", "类型 / 结构", "工作流类型和提示词结构卡片。", "#b8a2ff", "#765ac4"),
+        colorToken("--disabled-ink", "禁用文字", "不可用控件中的低对比度文字。", "#3c4961", "#a7b2c1"),
+        colorToken("--grip-ink", "拖拽把手", "面板分隔和拖拽提示的辅助色。", "#52617a", "#8190a3"),
+      ],
+    },
+    {
+      title: "评分色阶",
+      items: [
+        colorToken("--rating-gray", "未评分 / 0", "未评分或中性的评分状态。", "#aab4c7", "#8f9aaa"),
+        colorToken("--rating-green", "1 星", "评分按钮的绿色语义色。", "#91e5d8", "#59c7bb"),
+        colorToken("--rating-purple", "2 星", "评分按钮的紫色语义色。", "#c8baff", "#9c86dc"),
+        colorToken("--rating-blue", "3 星", "评分按钮的蓝色语义色。", "#8ebcf0", "#619bd5"),
+        colorToken("--rating-yellow", "4—5 星 / 日志级别", "高评分和日志 WARNING 标记。", "#f4da86", "#c9a83d"),
+      ],
+    },
+    {
+      title: "文字与界面表面",
+      items: [
+        colorToken("--ink", "主文字", "标题、正文和高优先级信息。", "#f2f5fb", "#172033"),
+        colorToken("--muted", "次级文字", "说明、字段值和次要信息。", "#8f9ab1", "#59657a"),
+        colorToken("--subtle", "辅助文字", "标签、时间和低优先级说明。", "#68748d", "#7b879b"),
+        colorToken("--placeholder", "占位文字", "输入框和空状态的占位提示。", "#59657c", "var(--subtle)"),
+        colorToken("--canvas", "页面背景", "页面渐变的上层背景。", "#0b1020", "#f3f7fb"),
+        colorToken("--canvas-deep", "页面深层背景", "页面渐变的下层背景。", "#080c17", "#e9eff6"),
+        colorToken("--panel", "面板表面", "主要卡片和面板背景。", "#121a2c", "#ffffff"),
+        colorToken("--panel-raised", "抬升表面", "比普通面板更亮的内容区和拖放区。", "#172138", "#f7faff"),
+        colorToken("--surface-input", "输入表面", "输入框和可编辑控件背景。", "#0e1628", "var(--panel)"),
+        colorToken("--surface-control", "控件表面", "按钮、标签和分段控件背景。", "#1b2943", "#edf5f8"),
+        colorToken("--surface-control-muted", "弱控件表面", "未选中、禁用和辅助控件背景。", "#18233a", "#edf2f8"),
+        colorToken("--surface-control-hover", "控件悬停表面", "控件悬停时的反馈背景。", "#213653", "#e3edf3"),
+        colorToken("--surface-media", "媒体表面", "图片、视频和媒体预览底色。", "#070b14", "#e8eef5"),
+      ],
+    },
+    {
+      title: "边界",
+      items: [
+        colorToken("--line", "主边界", "卡片和主要容器边界。", "#26324b", "#d4deeb"),
+        colorToken("--line-soft", "柔和边界", "低强调容器轮廓。", "rgba(137, 153, 184, .16)", "rgba(73, 94, 123, .18)"),
+        colorToken("--border-control", "控件边界", "输入框、开关和按钮的默认边界。", "#40506c", "#c6d3e1"),
+        colorToken("--border-control-hover", "控件悬停边界", "控件获得悬停或聚焦反馈时的边界。", "#50617f", "#91a8bd"),
+        colorToken("--border-drop", "拖放边界", "文件拖放区、空状态和编辑区共用的边界。", "#3b4967", "#b9c8da"),
+        colorToken("--border-dialog", "弹窗边界", "弹窗和上下文菜单的边界。", "#344361", "var(--line)"),
+      ],
+    },
+    {
+      title: "统一层级与日志",
+      items: [
+        derivedColor("--accent-soft", "强调柔层", "选中、提示和悬停的统一强调背景。", "color-mix(in srgb, var(--accent) 8%, transparent)"),
+        derivedColor("--accent-strong", "强调强层", "强调边框、焦点和强反馈。", "color-mix(in srgb, var(--accent) 35%, transparent)"),
+        derivedColor("--warm-soft", "暖色柔层", "提醒和运行中状态的统一背景。", "color-mix(in srgb, var(--warm) 8%, transparent)"),
+        derivedColor("--warm-strong", "暖色强层", "运行中边框和高优先级提醒。", "color-mix(in srgb, var(--warm) 35%, transparent)"),
+        derivedColor("--danger-soft", "错误柔层", "错误和删除操作的统一背景。", "color-mix(in srgb, var(--danger) 9%, transparent)"),
+        derivedColor("--danger-strong", "错误强层", "删除、失败和异常状态的强边框。", "color-mix(in srgb, var(--danger) 50%, transparent)"),
+        derivedColor("--reference-soft", "参考柔层", "参考资源悬停和卡片背景。", "color-mix(in srgb, var(--reference-accent) 10%, transparent)"),
+        derivedColor("--reference-strong", "参考强层", "参考资源边框和选中反馈。", "color-mix(in srgb, var(--reference-accent) 35%, transparent)"),
+        derivedColor("--type-soft", "类型柔层", "提示词结构卡片的淡色背景。", "color-mix(in srgb, var(--type-accent) 10%, transparent)"),
+        derivedColor("--type-strong", "类型强层", "提示词结构卡片的选中轮廓。", "color-mix(in srgb, var(--type-accent) 38%, transparent)"),
+        derivedColor("--surface-deep", "深层表面", "输入卡片、拖放区和列表容器底色。", "color-mix(in srgb, var(--canvas-deep) 32%, transparent)"),
+        derivedColor("--light-soft", "亮色柔层", "深色媒体舞台中的弱高光。", "color-mix(in srgb, var(--light-base) 12%, transparent)"),
+        derivedColor("--light-strong", "亮色强层", "亮色导航、控件和卡片高光。", "color-mix(in srgb, var(--light-base) 78%, transparent)"),
+        colorToken("--shadow-ink", "阴影基色", "阴影和遮罩的主题基色。", "#000000", "#2f486a"),
+        derivedColor("--shadow-soft", "柔和阴影", "卡片和控件的轻量阴影。", "color-mix(in srgb, var(--shadow-ink) 10%, transparent)"),
+        derivedColor("--shadow-medium", "中等阴影", "面板、卡片和导航的标准阴影。", "color-mix(in srgb, var(--shadow-ink) 20%, transparent)"),
+        derivedColor("--shadow-strong", "强阴影", "弹窗、聚焦和拖拽状态的阴影。", "color-mix(in srgb, var(--shadow-ink) 36%, transparent)"),
+        derivedColor("--scrim", "遮罩层", "模态弹窗覆盖页面时的遮罩。", "color-mix(in srgb, var(--shadow-ink) 72%, transparent)"),
+        derivedColor("--subtle-soft", "辅助柔层", "标签和轻量内容表面的统一弱背景。", "color-mix(in srgb, var(--subtle) 7%, transparent)"),
+        colorToken("--log-surface", "日志表面", "日志视口的专用深色底。", "#1e1e1e", "#1e1e1e"),
+        colorToken("--log-text", "日志正文", "日志正文的统一文字色。", "#b7e9f2", "#b7e9f2"),
+        colorToken("--log-muted", "日志辅助文字", "日志时间、阶段、调试和空状态文字。", "#899ba2", "#899ba2"),
+      ],
+    },
+  ];
+
   function $(id) { return document.getElementById(id); }
   function esc(value) {
     return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char];
     });
+  }
+  function shortcutComboMarkup(combo) {
+    return combo.map(function (key, index) {
+      return (index ? '<span class="settings-key-plus" aria-hidden="true">+</span>' : "") + '<kbd>' + esc(key) + '</kbd>';
+    }).join("");
+  }
+  function shortcutMarkup(combos) {
+    return combos.map(function (combo, index) {
+      return (index ? '<span class="settings-key-or" aria-hidden="true">或</span>' : "") + '<span class="settings-key-combo">' + shortcutComboMarkup(combo) + '</span>';
+    }).join("");
+  }
+  function renderShortcutReference() {
+    var container = $("shortcutReference");
+    if (!container) return;
+    var count = 0;
+    container.innerHTML = shortcutGroups.map(function (group) {
+      count += group.items.length;
+      return '<section class="settings-reference-group"><h4>' + esc(group.title) + '</h4><div class="settings-shortcut-list">' + group.items.map(function (item) {
+        return '<div class="settings-shortcut-row"><div class="settings-shortcut-keys">' + shortcutMarkup(item.combos) + '</div><p>' + esc(item.description) + '</p></div>';
+      }).join("") + '</div></section>';
+    }).join("");
+    var countLabel = $("shortcutReferenceCount");
+    if (countLabel) countLabel.textContent = count + " 项操作";
+  }
+  function colorSwatchToken(item) {
+    return item.swatch || item.token.replace(/^--/, "");
+  }
+  function colorSwatchVariable(item) {
+    return "--" + colorSwatchToken(item);
+  }
+  function renderColorReference() {
+    var container = $("colorReference");
+    if (!container) return;
+    var theme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+    var alternate = theme === "light" ? "dark" : "light";
+    var themeLabel = theme === "light" ? "亮色" : "暗色";
+    var alternateLabel = alternate === "light" ? "亮色" : "暗色";
+    var count = 0;
+    container.innerHTML = colorGroups.map(function (group) {
+      count += group.items.length;
+      return '<section class="settings-color-group"><h4>' + esc(group.title) + '</h4><div class="settings-color-list">' + group.items.map(function (item) {
+        var currentValue = item[theme];
+        var alternateValue = item[alternate];
+        return '<div class="settings-color-row"><span class="settings-color-swatch" data-color-token="' + esc(colorSwatchToken(item)) + '" style="--settings-swatch-color: var(' + esc(colorSwatchVariable(item)) + ')" aria-hidden="true"></span><div class="settings-color-copy"><div class="settings-color-title"><strong>' + esc(item.name) + '</strong><code>' + esc(item.token) + '</code></div><p>' + esc(item.description) + '</p></div><div class="settings-color-values"><span><small>' + themeLabel + '</small><code>' + esc(currentValue) + '</code></span><span><small>' + alternateLabel + '</small><code>' + esc(alternateValue) + '</code></span></div></div>';
+      }).join("") + '</div></section>';
+    }).join("");
+    var countLabel = $("colorReferenceCount");
+    if (countLabel) countLabel.textContent = count + " 个令牌";
+  }
+  function renderInteractionReference() {
+    renderShortcutReference();
+    renderColorReference();
   }
   function showToast(message, isError) {
     var toast = $("settingsToast");
@@ -101,6 +315,68 @@
   function value(id) { var input = $(id); return input ? input.value.trim() : ""; }
   function setValue(id, next) { var input = $(id); if (input && document.activeElement !== input) input.value = next == null ? "" : String(next); }
   function setChecked(id, next) { var input = $(id); if (input && document.activeElement !== input) input.checked = Boolean(next); }
+  function telegramInboundMode() {
+    var select = $("telegramInboundMode");
+    return select && select.value === "folder_random" ? "folder_random" : "fixed";
+  }
+  function renderTelegramInboundOptions() {
+    var telegram = state.settings && state.settings.telegram || {};
+    var workflowSelect = $("telegramInboundWorkflow");
+    var folderSelect = $("telegramInboundFolder");
+    var selectedWorkflowId = telegram.inbound_workflow_id || "";
+    var selectedFolderId = telegram.inbound_folder_id || "";
+    if (workflowSelect && document.activeElement === workflowSelect) selectedWorkflowId = workflowSelect.value;
+    if (folderSelect && document.activeElement === folderSelect) selectedFolderId = folderSelect.value;
+    if (workflowSelect) {
+      var workflowOptions = ['<option value="">请选择可用工作流</option>'];
+      state.inboundWorkflows.forEach(function (workflow) {
+        var account = workflow.account_name ? " · " + workflow.account_name : "";
+        workflowOptions.push('<option value="' + esc(workflow.id) + '">' + esc(workflow.name + account) + '</option>');
+      });
+      if (selectedWorkflowId && !state.inboundWorkflows.some(function (workflow) { return workflow.id === selectedWorkflowId; })) {
+        workflowOptions.push('<option value="' + esc(selectedWorkflowId) + '">' + esc((telegram.inbound_workflow_name || selectedWorkflowId) + "（当前不可用）") + '</option>');
+      }
+      workflowSelect.innerHTML = workflowOptions.join("");
+      setValue("telegramInboundWorkflow", selectedWorkflowId);
+    }
+    if (folderSelect) {
+      var folderOptions = ['<option value="">请选择工作流文件夹</option>'];
+      state.workflowFolders.forEach(function (folder) {
+        var count = Number(folder.workflow_count) || 0;
+        folderOptions.push('<option value="' + esc(folder.id) + '">' + esc(folder.name) + (count ? "（" + count + " 个工作流）" : "（空文件夹）") + '</option>');
+      });
+      folderSelect.innerHTML = folderOptions.join("");
+      setValue("telegramInboundFolder", selectedFolderId);
+    }
+    updateTelegramInboundControls();
+  }
+  function updateTelegramInboundControls() {
+    var mode = telegramInboundMode();
+    var inboundEnabled = Boolean($("telegramInboundEnabled") && $("telegramInboundEnabled").checked);
+    var workflowField = $("telegramInboundWorkflowField");
+    var folderField = $("telegramInboundFolderField");
+    var inboundPanel = $("telegramInboundPanel");
+    if (inboundPanel) {
+      inboundPanel.classList.toggle("is-disabled", !inboundEnabled);
+      inboundPanel.setAttribute("aria-disabled", inboundEnabled ? "false" : "true");
+    }
+    ["telegramInboundMode", "telegramInboundWorkflow", "telegramInboundFolder"].forEach(function (id) {
+      var select = $(id);
+      if (select) select.disabled = !inboundEnabled;
+    });
+    if (workflowField) workflowField.hidden = mode !== "fixed";
+    if (folderField) folderField.hidden = mode !== "folder_random";
+    var summary = $("telegramInboundSummary");
+    if (!summary) return;
+    if (mode === "folder_random") {
+      var folder = state.workflowFolders.find(function (item) { return item.id === value("telegramInboundFolder"); });
+      summary.textContent = folder ? "随机文件夹：" + folder.name + (inboundEnabled ? " · 已启用" : " · 未启用") : "请选择一个工作流文件夹。";
+      return;
+    }
+    var workflow = state.inboundWorkflows.find(function (item) { return item.id === value("telegramInboundWorkflow"); });
+    var telegram = state.settings && state.settings.telegram || {};
+    summary.textContent = workflow ? "固定工作流：" + workflow.name + (inboundEnabled ? " · 已启用" : " · 未启用") : telegram.inbound_workflow_id ? "固定工作流：" + (telegram.inbound_workflow_name || telegram.inbound_workflow_id) + " · 当前不可用" : "请选择一个可用工作流。";
+  }
   function applyState(data) {
     state.settings = data.settings || {};
     state.keys = Array.isArray(data.keys) ? data.keys : [];
@@ -111,7 +387,7 @@
     setValue("douyinCookiePath", state.settings.douyin_cookie_path || "");
     setValue("personalCapacity", state.settings.personal_capacity || 3);
     setValue("apiKeyStrategy", state.settings.api_key_strategy || "personal_then_shared");
-    setValue("promptLibraryPath", state.settings.prompt_library_path || "");
+    setValue("poseMediaImportType", state.settings.pose_media_import_type || "depth");
     setValue("mediaLibraryRoot", state.settings.media_library_root || "");
     var translation = state.settings.aliyun_translation || {};
     setValue("aliyunTranslationAccessKeyId", translation.access_key_id || "");
@@ -127,8 +403,8 @@
     setValue("telegramChatId", telegram.chat_id || "");
     setChecked("telegramEnabled", telegram.enabled);
     setChecked("telegramInboundEnabled", telegram.inbound_enabled);
-    var inbound = $("telegramInboundWorkflow");
-    if (inbound) inbound.textContent = telegram.inbound_workflow_id ? "当前工作流：" + (telegram.inbound_workflow_name || telegram.inbound_workflow_id) + (telegram.inbound_enabled ? " · 已启用" : " · 未启用") : "未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。";
+    setValue("telegramInboundMode", telegram.inbound_mode || "fixed");
+    renderTelegramInboundOptions();
     var telegramStatus = $("telegramStatus");
     if (telegramStatus) { telegramStatus.textContent = telegram.configured ? (telegram.enabled ? "已启用 · " + (telegram.source === "environment" ? "环境变量" : "本机") : "已配置 · 未启用") : "未配置"; telegramStatus.classList.toggle("ready", Boolean(telegram.configured && telegram.enabled)); }
     renderKeys();
@@ -137,7 +413,11 @@
   function refresh(silent) {
     if (state.loading) return Promise.resolve();
     state.loading = true;
-    return request("/api/state").then(applyState).catch(function (error) { if (!silent) showToast(error.message, true); }).finally(function () { state.loading = false; });
+    return Promise.all([request("/api/state"), request("/api/workflow-folders")]).then(function (results) {
+      state.inboundWorkflows = Array.isArray(results[0].telegram_inbound_workflows) ? results[0].telegram_inbound_workflows : [];
+      state.workflowFolders = Array.isArray(results[1].folders) ? results[1].folders : [];
+      applyState(results[0]);
+    }).catch(function (error) { if (!silent) showToast(error.message, true); }).finally(function () { state.loading = false; });
   }
   function setDirty(dirty) {
     state.dirty = Boolean(dirty);
@@ -155,21 +435,20 @@
     if (window.rhElectron && typeof window.rhElectron.selectDirectory === "function") return Promise.resolve(window.rhElectron.selectDirectory()).then(function (path) { return String(path || "").trim(); });
     return request("/api/pick-directory", { method: "POST" }).then(function (data) { return String(data.path || "").trim(); });
   }
-  function pickFile(kind, button) {
+  function pickDouyinCookie(button) {
     var original = button.textContent;
     button.disabled = true; button.textContent = "选择中…";
-    var promise = kind === "douyin" ? jsonRequest("/api/pick-douyin-cookie", "POST", {}) : jsonRequest("/api/pick-prompt-resource", "POST", { kind: kind });
-    promise.then(function (data) {
-      var id = kind === "douyin" ? "douyinCookiePath" : "promptLibraryPath";
-      setValue(id, data.path || ""); markDirty(); showToast("已选择文件，请点击右下角保存配置");
+    jsonRequest("/api/pick-douyin-cookie", "POST", {}).then(function (data) {
+      setValue("douyinCookiePath", data.path || ""); markDirty(); showToast("已选择文件，请点击右下角保存配置");
     }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; button.textContent = original; });
   }
   function collectPayload() {
     var body = {
       output_dir: value("outputDir"), douyin_cookie_path: value("douyinCookiePath"), personal_capacity: value("personalCapacity"),
       api_key_strategy: value("apiKeyStrategy"),
+      pose_media_import_type: value("poseMediaImportType") || "depth",
       current_account_id: state.pendingAccountId || (state.settings && state.settings.current_account_id) || "__general__",
-      prompt_library_path: value("promptLibraryPath"), media_library_root: value("mediaLibraryRoot")
+      media_library_root: value("mediaLibraryRoot")
     };
     if (state.clearingTelegram) {
       body.telegram_clear = true;
@@ -177,7 +456,9 @@
       body.telegram_chat_id = value("telegramChatId");
       body.telegram_enabled = Boolean($("telegramEnabled") && $("telegramEnabled").checked);
       body.telegram_inbound_enabled = Boolean($("telegramInboundEnabled") && $("telegramInboundEnabled").checked);
-      body.telegram_inbound_workflow_id = (state.settings && state.settings.telegram && state.settings.telegram.inbound_workflow_id) || "";
+      body.telegram_inbound_mode = value("telegramInboundMode") || "fixed";
+      body.telegram_inbound_workflow_id = value("telegramInboundWorkflow");
+      body.telegram_inbound_folder_id = value("telegramInboundFolder");
       var botToken = value("telegramBotToken");
       if (botToken) body.telegram_bot_token = botToken;
     }
@@ -207,13 +488,16 @@
   }
 
   function selectSection(section) {
-    var allowed = ["ai", "platform", "plugin", "extension", "logs"];
+    var allowed = ["ai", "platform", "plugin", "extension", "reference", "logs"];
     section = allowed.indexOf(section) === -1 ? "ai" : section;
     state.activeSection = section;
     document.querySelectorAll("[data-settings-section]").forEach(function (button) { button.classList.toggle("active", button.dataset.settingsSection === section); });
     document.querySelectorAll("[data-settings-panel]").forEach(function (panel) { var active = panel.dataset.settingsPanel === section; panel.hidden = !active; panel.classList.toggle("active", active); });
     if (section === "logs") loadLogs(false);
-    try { history.replaceState({}, document.title, "/settings#" + section); } catch (error) {}
+    try {
+      var settingsPath = document.body.classList.contains("focus-body") ? window.location.pathname : "/settings";
+      history.replaceState({}, document.title, settingsPath + "#" + section);
+    } catch (error) {}
   }
   function parseTime(timestamp) { var date = new Date(Number(timestamp)); return isNaN(date.getTime()) ? "----/--/-- --:--:--" : date.toLocaleString("zh-CN", { hour12: false }); }
   function logMarkup(log) {
@@ -286,6 +570,7 @@
   }
   function closeUnsaved() { window.RHMotion.closeModal("unsavedChangesModal"); }
   function navigateAfterDecision(href) {
+    if (document.body.classList.contains("focus-body")) return;
     window.location.href = href;
   }
   function interceptNavigation(event) {
@@ -301,12 +586,18 @@
 
   function bindEvents() {
     updateThemeToggle();
-    $("themeToggle").addEventListener("click", function () { var next = document.documentElement.dataset.theme === "light" ? "dark" : "light"; document.documentElement.dataset.theme = next; try { localStorage.setItem("rh-workflow-theme", next); } catch (error) {} updateThemeToggle(); });
+    renderInteractionReference();
+    var settingsThemeToggle = $("themeToggle");
+    if (settingsThemeToggle) settingsThemeToggle.addEventListener("click", function () { var next = document.documentElement.dataset.theme === "light" ? "dark" : "light"; document.documentElement.dataset.theme = next; try { localStorage.setItem("rh-workflow-theme", next); } catch (error) {} updateThemeToggle(); renderColorReference(); });
     document.querySelectorAll("[data-settings-section]").forEach(function (button) { button.addEventListener("click", function () { selectSection(button.dataset.settingsSection); }); });
     document.querySelectorAll("[data-settings-input], input, select, textarea").forEach(function (input) { if (input.id === "logsAutoScroll" || input.classList.contains("log-level-filter")) return; input.addEventListener("input", markDirty); input.addEventListener("change", markDirty); });
+    $("telegramInboundMode").addEventListener("change", updateTelegramInboundControls);
+    $("telegramInboundWorkflow").addEventListener("change", updateTelegramInboundControls);
+    $("telegramInboundFolder").addEventListener("change", updateTelegramInboundControls);
+    $("telegramInboundEnabled").addEventListener("change", updateTelegramInboundControls);
     $("saveSettings").addEventListener("click", function () { saveAllSettings().catch(function () {}); });
     $("chooseOutputDir").addEventListener("click", function () { var button = this; button.disabled = true; chooseDirectory().then(function (path) { if (path) { setValue("outputDir", path); markDirty(); showToast("已选择产物目录，请点击右下角保存配置"); } }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; }); });
-    $("chooseDouyinCookie").addEventListener("click", function () { pickFile("douyin", this); });
+    $("chooseDouyinCookie").addEventListener("click", function () { pickDouyinCookie(this); });
     $("chooseMediaLibraryRoot").addEventListener("click", function () {
       var button = this;
       var original = button.textContent;
@@ -319,9 +610,8 @@
         }
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; button.textContent = original; });
     });
-    document.querySelectorAll("[data-pick-prompt-resource]").forEach(function (button) { button.addEventListener("click", function () { pickFile(button.dataset.pickPromptResource, button); }); });
     $("testTelegram").addEventListener("click", function () { if (state.dirty) return showToast("请先保存配置，再测试 Telegram", true); var button = this; button.disabled = true; jsonRequest("/api/telegram/test", "POST", {}).then(function (data) { showToast(data.message || "Telegram 测试消息已发送"); }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; }); });
-    $("clearTelegram").addEventListener("click", function () { if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？点击右下角保存后生效。")) return; state.clearingTelegram = true; setValue("telegramBotToken", ""); setValue("telegramChatId", ""); setChecked("telegramEnabled", false); setChecked("telegramInboundEnabled", false); markDirty(); showToast("已准备清除 Telegram 配置，请保存"); });
+    $("clearTelegram").addEventListener("click", function () { if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？点击右下角保存后生效。")) return; state.clearingTelegram = true; setValue("telegramBotToken", ""); setValue("telegramChatId", ""); setChecked("telegramEnabled", false); setChecked("telegramInboundEnabled", false); setValue("telegramInboundMode", "fixed"); setValue("telegramInboundWorkflow", ""); setValue("telegramInboundFolder", ""); updateTelegramInboundControls(); markDirty(); showToast("已准备清除 Telegram 配置，请保存"); });
     $("credentialList").addEventListener("click", handleCredentialClick);
     $("accountList").addEventListener("click", handleAccountClick);
     $("accountList").addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); handleAccountClick(event); } });

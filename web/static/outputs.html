@@ -33,6 +33,9 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button focus-mode-link" href="/focus" aria-label="进入专注模式" title="进入专注模式">
+            <span class="settings-icon" aria-hidden="true">▦</span><span>专注</span>
+          </a>
           <a class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
@@ -99,6 +102,7 @@
               <h2>成片库 <span id="outputCount" class="outputs-count">0</span></h2>
             </div>
             <div class="outputs-toolbar-actions">
+              <button id="exportCaseOutputs" class="secondary-button button-compact case-export-button" type="button" disabled aria-label="导出所有案例" title="没有带“案例”标签的媒体文件可导出"><span aria-hidden="true">⇩</span> 导出所有案例 <span id="caseOutputCount">0</span></button>
               <button id="deleteOneStarOutputs" class="secondary-button button-compact danger-button" type="button" disabled aria-label="删除所有一星成片" title="没有一星成片可删除"><span aria-hidden="true">⌫</span> 删除一星成片 <span id="oneStarOutputCount">0</span></button>
               <a class="secondary-button button-compact tool-entry-link" href="/outputs/compare">内容对比</a>
               <button id="refreshOutputs" class="secondary-button button-compact" type="button"><span aria-hidden="true">↻</span> 刷新</button>
@@ -136,10 +140,15 @@
             <button class="output-filter" type="button" data-output-type="audio" role="tab" aria-selected="false">音频 <span>0</span></button>
             <button class="output-filter" type="button" data-output-type="text" role="tab" aria-selected="false">文本 <span>0</span></button>
             <button class="output-filter" type="button" data-output-type="other" role="tab" aria-selected="false">其他 <span>0</span></button>
+            <div id="outputTagFilters" class="output-tag-filters" role="group" aria-label="按标签筛选">
+              <button class="output-tag-filter" type="button" data-output-tag="案例" aria-label="筛选案例" aria-pressed="false">案例</button>
+              <button class="output-tag-filter" type="button" data-output-tag="H" aria-label="筛选 H 标签" aria-pressed="false">H</button>
+            </div>
           </div>
         </section>
 
         <section id="outputGrid" class="output-grid" aria-live="polite"></section>
+        <nav id="outputPagination" class="output-pagination" aria-label="成片分页" hidden></nav>
       </main>
     </div>
 
@@ -162,7 +171,7 @@
         <div class="modal-heading">
           <div>
             <div class="section-kicker">IMPORT OUTPUT</div>
-            <h2 id="outputImportTitle">导入任务</h2>
+            <h2 id="outputImportTitle">导入媒体</h2>
           </div>
           <button id="closeOutputImport" class="close-button" type="button" aria-label="关闭导入">×</button>
         </div>
@@ -171,9 +180,15 @@
         <div id="outputImportTargets" class="output-import-targets" role="radiogroup" aria-label="文件输入节点"></div>
         <div class="output-import-actions">
           <button id="cancelOutputImport" class="secondary-button" type="button">取消</button>
-          <button id="confirmOutputImport" class="primary-button" type="button" disabled>导入任务</button>
+          <button id="confirmOutputImport" class="primary-button" type="button" disabled>导入媒体</button>
         </div>
       </section>
+    </div>
+    <div id="artifactContextMenu" class="artifact-context-menu" role="menu" aria-label="成片操作" hidden>
+      <button type="button" role="menuitem" data-artifact-menu-action="upload">上传</button>
+      <button type="button" role="menuitem" data-artifact-menu-action="import">导入媒体</button>
+      <button type="button" role="menuitem" data-artifact-menu-action="open-folder">打开所在文件夹</button>
+      <button type="button" role="menuitem" data-artifact-menu-action="delete">删除任务</button>
     </div>
     <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/outputs.js"></script>

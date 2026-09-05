@@ -33,6 +33,9 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button focus-mode-link" href="/focus" aria-label="进入专注模式" title="进入专注模式">
+            <span class="settings-icon" aria-hidden="true">▦</span><span>专注</span>
+          </a>
           <a class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
@@ -82,7 +85,7 @@
           <div>
             <div class="eyebrow">WORKFLOW LIBRARY / LOCAL JSON</div>
             <h1>把工作流，<br /><em>整理成自己的库。</em></h1>
-            <p>按账号保存 API 工作流和 RunningHub workflowId。点击卡片会将对应的 JSON 与输入配置覆盖到任务提交页草稿，当前页面保持不变；API Key 始终留在本机 API Key 管理中。</p>
+            <p>按账号保存 API 工作流和提示词组。点击卡片会同时恢复任务提交页与提示词工坊的工作台；API Key 始终留在本机 API Key 管理中。</p>
           </div>
           <div class="workflows-hero-stats">
             <div class="workflow-hero-stat"><span>工作流</span><strong id="workflowTotal">0</strong></div>
@@ -99,31 +102,52 @@
             </div>
             <button id="refreshWorkflows" class="secondary-button button-compact" type="button"><span aria-hidden="true">↻</span> 刷新</button>
           </div>
-          <div class="workflows-toolbar-controls">
-            <label class="workflows-search">
-              <span class="sr-only">搜索工作流</span>
-              <input id="workflowSearch" type="search" placeholder="搜索名称、workflowId 或账号" autocomplete="off" />
-            </label>
-            <label class="workflow-account-filter">
-              <span>账号</span>
-              <select id="workflowAccountFilter">
-                <option value="all">全部账号</option>
-              </select>
+          <div class="workflow-import-row">
+            <label id="workflowImportDropzone" class="workflow-import-dropzone" for="workflowImportFile">
+              <input id="workflowImportFile" type="file" accept=".json,application/json" />
+              <span class="workflow-import-mark" aria-hidden="true">＋</span>
+              <span><strong>拖入 API JSON 到这里</strong><small>导入后可指定所属账号、workflowId 和提示词组；不会保存 API Key。</small></span>
             </label>
             <button id="importWorkflowButton" class="primary-button workflow-import-button" type="button"><span class="button-glyph">+</span><span>导入工作流</span></button>
           </div>
-          <label id="workflowImportDropzone" class="workflow-import-dropzone" for="workflowImportFile">
-            <input id="workflowImportFile" type="file" accept=".json,application/json" />
-            <span class="workflow-import-mark" aria-hidden="true">＋</span>
-            <span><strong>拖入 API JSON 到这里</strong><small>导入后可指定所属账号和 workflowId；只保存工作流副本，不会保存 API Key。</small></span>
-          </label>
         </section>
 
         <section id="workflowGroups" class="workflow-groups" aria-live="polite"></section>
+
+        <section class="prompt-group-library" aria-labelledby="promptGroupLibraryTitle">
+          <div class="prompt-group-library-heading">
+            <div>
+              <div class="section-kicker">PROMPT GROUP LIBRARY</div>
+              <h2 id="promptGroupLibraryTitle">组状态库 <span id="promptGroupCount" class="workflows-count">0</span></h2>
+              <p>把提示词工作台的积木顺序按项目归档；点击卡片会在提示词工作台本地恢复，右键可删除。</p>
+            </div>
+            <span class="output-format">LOCAL</span>
+          </div>
+          <div id="promptGroupGroups" class="workflow-groups" aria-live="polite"></div>
+        </section>
       </main>
     </div>
 
     <div id="workflowToast" class="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
+
+    <div id="workflowFolderContextMenu" class="workflow-folder-context-menu" role="menu" aria-label="文件夹操作" hidden>
+      <button type="button" role="menuitem" data-folder-menu-action="rename">重命名</button>
+      <button type="button" role="menuitem" data-folder-menu-action="set-telegram-inbound">设为入站</button>
+      <button type="button" role="menuitem" data-folder-menu-action="delete">删除</button>
+    </div>
+    <div id="workflowCardContextMenu" class="workflow-card-context-menu" role="menu" aria-label="工作流操作" hidden>
+      <button type="button" role="menuitem" data-workflow-menu-action="configure-workflow">配置输入</button>
+      <button type="button" role="menuitem" data-workflow-menu-action="set-telegram-inbound">设为入站</button>
+      <button type="button" role="menuitem" data-workflow-menu-action="export-workflow">导出</button>
+      <button type="button" role="menuitem" data-workflow-menu-action="delete-workflow">删除</button>
+    </div>
+    <div id="promptGroupFolderContextMenu" class="workflow-folder-context-menu prompt-group-folder-context-menu" role="menu" aria-label="提示词组文件夹操作" hidden>
+      <button type="button" role="menuitem" data-prompt-group-folder-menu-action="rename">重命名</button>
+      <button type="button" role="menuitem" data-prompt-group-folder-menu-action="delete">删除</button>
+    </div>
+    <div id="promptGroupCardContextMenu" class="workflow-card-context-menu prompt-group-card-context-menu" role="menu" aria-label="提示词组操作" hidden>
+      <button type="button" role="menuitem" data-prompt-group-menu-action="delete">删除提示词组</button>
+    </div>
 
     <div id="workflowEditorModal" class="modal-backdrop" hidden>
       <section class="workflow-modal-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowEditorTitle">
@@ -152,6 +176,13 @@
               <input id="workflowRecordRemoteId" type="text" inputmode="numeric" autocomplete="off" placeholder="可稍后补充" />
             </label>
           </div>
+          <label class="field-group">
+            <span class="field-label">关联提示词组</span>
+            <select id="workflowRecordPromptGroup">
+              <option value="">不关联提示词组</option>
+            </select>
+            <span class="field-hint">保存时会把当前提示词组一起写入工作流包；加载工作流后会恢复到提示词工坊。</span>
+          </label>
           <div class="workflow-editor-note">工作流与账号绑定后，提交页可以明确识别归属；API Key 不会写入工作流文件。</div>
           <section class="workflow-editor-json" aria-labelledby="workflowEditorJsonLabel">
             <div class="workflow-editor-json-heading">

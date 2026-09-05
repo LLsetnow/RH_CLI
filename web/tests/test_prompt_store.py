@@ -5,7 +5,7 @@ import json
 from web.prompt_store import PromptStore
 
 
-def test_prompt_store_creates_markdown_library_and_json_state_documents(tmp_path):
+def test_prompt_store_creates_json_library_and_json_state_documents(tmp_path):
     store = PromptStore(tmp_path)
     block = store.add_block({"title": "主体", "text": "清晰主体", "tags": ["画面", "画面", ""]})
     state = store.save_state([
@@ -14,17 +14,62 @@ def test_prompt_store_creates_markdown_library_and_json_state_documents(tmp_path
     ])
     group = store.save_group("电影镜头", state["items"])
 
-    assert {path.name for path in (tmp_path / "prompt").glob("*.json")} == {"state.json", "groups.json"}
-    library_text = (tmp_path / "prompt" / "library.md").read_text()
-    assert "#### 主体" in library_text
-    assert f"id: {block['id']}" in library_text
-    assert "tags: 画面" in library_text
+    assert {path.name for path in (tmp_path / "prompt").glob("*.json")} == {"library.json", "state.json", "groups.json"}
+    library_document = json.loads((tmp_path / "prompt" / "library.json").read_text())
+    group_index = json.loads((tmp_path / "prompt" / "groups.json").read_text())
+    group_document = json.loads((tmp_path / "prompt" / "groups" / f"{group['id']}.json").read_text())
+    assert library_document["blocks"] == [block]
+    assert group_index["groups"] == [{
+        "id": group["id"],
+        "name": group["name"],
+        "updated_at": group["updated_at"],
+        "file": f"groups/{group['id']}.json",
+    }]
+    assert "items" not in group_index["groups"][0]
+    assert group_document["items"] == group["items"]
     assert not list(tmp_path.glob("prompt-*.json"))
     reloaded = PromptStore(tmp_path).snapshot()
     assert reloaded["library"]["blocks"] == [block]
     assert reloaded["state"]["items"][0]["block_id"] == block["id"]
     assert reloaded["groups"]["groups"][0]["id"] == group["id"]
     assert len(reloaded["groups"]["groups"][0]["items"]) == 2
+
+
+def test_prompt_store_migrates_legacy_combined_groups_file(tmp_path):
+    prompt_root = tmp_path / "prompt"
+    prompt_root.mkdir()
+    legacy_group = {
+        "id": "group-legacy",
+        "name": "旧组状态",
+        "updated_at": 123,
+        "items": [{"instanceId": "item-1", "kind": "text", "text": "旧内容"}],
+    }
+    (prompt_root / "groups.json").write_text(
+        json.dumps({"version": 1, "folders": [], "groups": [legacy_group]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    store = PromptStore(tmp_path)
+
+    index = json.loads((prompt_root / "groups.json").read_text(encoding="utf-8"))
+    group_file = json.loads((prompt_root / "groups" / "group-legacy.json").read_text(encoding="utf-8"))
+    assert index["groups"] == [{
+        "id": "group-legacy",
+        "name": "旧组状态",
+        "updated_at": 123,
+        "file": "groups/group-legacy.json",
+    }]
+    assert group_file["items"] == [{"instance_id": "item-1", "kind": "text", "text": "旧内容"}]
+    assert store.get_group("group-legacy")["items"] == group_file["items"]
+
+
+def test_prompt_store_lists_and_gets_saved_groups(tmp_path):
+    store = PromptStore(tmp_path)
+    group = store.save_group("可复用镜头", [{"instanceId": "item-1", "kind": "text", "text": "慢慢推近"}])
+
+    assert store.groups() == [group]
+    assert store.get_group(group["id"]) == group
+    assert store.get_group("") is None
 
 
 def test_prompt_store_persists_translated_free_text(tmp_path):
@@ -185,11 +230,8 @@ def test_update_library_block_preserves_id_and_refreshes_references(tmp_path):
     assert updated == {"id": block["id"], "category": "未分类", **expected_snapshot}
     assert snapshot["state"]["items"][0]["snapshot"] == expected_snapshot
     assert snapshot["groups"]["groups"][0]["items"][0]["snapshot"] == expected_snapshot
-    library_text = (tmp_path / "prompt" / "library.md").read_text()
-    assert "#### 新标题" in library_text
-    assert "tags: 新标签" in library_text
-    assert "> 新文本" in library_text
-    assert "#### 原标题" not in library_text
+    library_blocks = json.loads((tmp_path / "prompt" / "library.json").read_text())["blocks"]
+    assert library_blocks == [updated]
 
 
 def test_save_group_with_id_overwrites_items_without_creating_a_second_group(tmp_path):
@@ -203,6 +245,27 @@ def test_save_group_with_id_overwrites_items_without_creating_a_second_group(tmp
     assert updated["updated_at"] >= first["updated_at"]
     assert len(snapshot["groups"]["groups"]) == 1
     assert snapshot["groups"]["groups"][0]["items"][0]["text"] == "新顺序"
+
+
+def test_prompt_group_folders_persist_membership_and_unclassify_on_delete(tmp_path):
+    store = PromptStore(tmp_path)
+    folder = store.create_prompt_group_folder("剧场动画")
+    group = store.save_group(
+        "绝区零开场",
+        [{"instanceId": "item-1", "kind": "text", "text": "镜头缓慢推进"}],
+        folder_id=folder["id"],
+    )
+
+    assert store.prompt_group_folders()[0]["group_count"] == 1
+    assert store.get_group(group["id"])["folder_id"] == folder["id"]
+    assert PromptStore(tmp_path).prompt_group_folders()[0]["name"] == "剧场动画"
+
+    renamed = store.rename_prompt_group_folder(folder["id"], "绝区零剧场")
+    assert renamed["name"] == "绝区零剧场"
+    store.delete_prompt_group_folder(folder["id"])
+
+    assert store.prompt_group_folders() == []
+    assert "folder_id" not in store.get_group(group["id"])
 
 
 def test_migrate_legacy_browser_state_once(tmp_path):
@@ -225,21 +288,19 @@ def test_prompt_store_moves_legacy_files_into_prompt_directory(tmp_path):
     store = PromptStore(tmp_path)
 
     assert legacy_library.exists()
-    assert (tmp_path / "prompt" / "library.md").is_file()
+    assert (tmp_path / "prompt" / "library.json").is_file()
     assert store.snapshot()["library"]["blocks"][0]["id"] == "legacy"
 
 
-def test_prompt_store_parses_markdown_blocks_with_stable_metadata(tmp_path):
-    library = tmp_path / "library.md"
-    library.write_text(
-        "# 基础积木\n\n## blocks\n\n### 镜头\n\n"
-        "#### 摄影机运动\n"
-        "id: camera-motion\n"
-        "tags: 摄影机, 运镜\n"
-        "> The camera pushes in slowly.\n"
-        "> Keep the subject centered.\n",
-        encoding="utf-8",
-    )
+def test_prompt_store_reads_json_blocks_with_stable_metadata(tmp_path):
+    library = tmp_path / "library.json"
+    library.write_text(json.dumps({"version": 1, "blocks": [{
+        "id": "camera-motion",
+        "category": "镜头",
+        "tags": ["摄影机", "运镜"],
+        "title": "摄影机运动",
+        "text": "The camera pushes in slowly.\nKeep the subject centered.",
+    }]}, ensure_ascii=False), encoding="utf-8")
 
     store = PromptStore(tmp_path / "data", library_path=library)
 
@@ -252,29 +313,19 @@ def test_prompt_store_parses_markdown_blocks_with_stable_metadata(tmp_path):
     }]
 
 
-def test_prompt_store_preserves_markdown_categories_when_writing_library(tmp_path):
-    library = tmp_path / "library.md"
-    library.write_text(
-        "# 基础积木\n\n## blocks\n\n### 镜头\n\n"
-        "#### 固定镜头\n"
-        "id: fixed-camera\n"
-        "tags: 镜头\n"
-        "> The camera stays still.\n\n"
-        "### 风格\n\n"
-        "#### 写实\n"
-        "id: photoreal\n"
-        "tags: 风格\n"
-        "> Photorealistic.\n",
-        encoding="utf-8",
-    )
+def test_prompt_store_preserves_json_categories_when_writing_library(tmp_path):
+    library = tmp_path / "library.json"
+    library.write_text(json.dumps({"version": 1, "blocks": [
+        {"id": "fixed-camera", "category": "镜头", "tags": ["镜头"], "title": "固定镜头", "text": "The camera stays still."},
+        {"id": "photoreal", "category": "风格", "tags": ["风格"], "title": "写实", "text": "Photorealistic."},
+    ]}, ensure_ascii=False), encoding="utf-8")
 
     store = PromptStore(tmp_path / "data", library_path=library)
     store.delete_block("fixed-camera")
-    rewritten = library.read_text(encoding="utf-8")
+    rewritten = json.loads(library.read_text(encoding="utf-8"))
 
-    assert "### 镜头" not in rewritten
-    assert "### 风格" in rewritten
-    assert "#### 写实" in rewritten
+    assert [block["category"] for block in rewritten["blocks"]] == ["风格"]
+    assert rewritten["blocks"][0]["title"] == "写实"
 
 
 def test_prompt_store_supports_a_configured_library_path(tmp_path):

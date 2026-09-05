@@ -7,6 +7,7 @@
     <link rel="icon" type="image/png" href="/static/assets/rh-workflow-desk-icon.png" />
     <title>RH Workflow Desk</title>
     <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/workflows.css" />
     <script>
       (function () {
         try {
@@ -32,6 +33,9 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button focus-mode-link" href="/focus" aria-label="进入专注模式" title="进入专注模式">
+            <span class="settings-icon" aria-hidden="true">▦</span><span>专注</span>
+          </a>
           <a id="openSettings" class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
@@ -93,11 +97,12 @@
               </div>
               <div class="workflow-heading-actions">
                 <div class="workflow-library-actions" aria-label="工作流库操作">
+                  <button id="configureWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>配置输入</button>
+                  <button id="renameWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>重命名</button>
                   <button id="saveWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>保存</button>
-                  <button id="overwriteWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>覆盖</button>
                   <button id="exportWorkflowButton" class="secondary-button button-compact" type="button" hidden>导出</button>
                 </div>
-                <div class="step-pill">JSON</div>
+                <button id="openWorkflowJsonButton" class="step-pill workflow-json-button" type="button" aria-label="查看和编辑当前工作流 JSON" title="查看和编辑当前工作流 JSON">JSON</button>
               </div>
             </div>
             <label class="dropzone" id="workflowDropzone" for="workflowFile">
@@ -153,7 +158,7 @@
               </div>
               <div id="queueCount" class="queue-count">0</div>
             </div>
-            <div class="queue-caption"><span class="live-line"></span>自动更新 · 历史记录持续保留</div>
+            <div class="queue-caption"><span class="live-line"></span>自动更新 · 数字统计进行中任务 · 历史记录持续保留</div>
             <div id="queueList" class="queue-list">
               <div class="empty-queue">
                 <div class="empty-line"></div>
@@ -187,7 +192,6 @@
             <button id="saveOutputDir" class="secondary-button" type="button">保存路径</button>
           </div>
         </div>
-        <div class="divider video-download-divider"></div>
         <div class="credential-heading video-download-heading">
           <div>
             <span class="field-label">抖音视频下载</span>
@@ -204,25 +208,15 @@
             <button id="saveDouyinCookie" class="secondary-button" type="button">保存路径</button>
           </div>
         </div>
-        <div class="divider prompt-resources-divider"></div>
         <div class="credential-heading prompt-resources-heading">
           <div>
-            <span class="field-label">提示词工坊资源路径</span>
-            <span class="field-hint">基础积木保留独立 Markdown 文件；动作、人物、音频、背景、服装统一读取 ref 根目录下的对应文件夹，保存后立即重新扫描。</span>
-          </div>
-        </div>
-        <div class="setting-grid prompt-library-setting">
-          <label class="field-group">
-            <span class="field-label field-label-with-help">基础积木 Markdown 文件 <button class="field-help" type="button" aria-label="基础积木文件读取说明" data-tooltip="读取每个 #### 条目；id、tags 和以 > 开头的正文分别对应积木 ID、标签和提示词内容。修改后刷新提示词工坊即可重新抽取。">?</button></span>
-            <input id="promptLibraryPath" type="text" placeholder="~/Documents/VideoMake/ref/prompt/library.md" />
-          </label>
-          <div class="setting-actions">
-            <button id="choosePromptLibrary" class="secondary-button" type="button" data-pick-prompt-resource="library">选择文件</button>
+            <span class="field-label">提示词工坊媒体库</span>
+            <span class="field-hint">动作、人物、音频、背景和服装统一从 ref 根目录的 JSON 文件读取，保存后立即重新扫描。</span>
           </div>
         </div>
         <div class="setting-grid media-library-root-setting">
           <label class="field-group">
-            <span class="field-label field-label-with-help">媒体库 ref 文件夹 <button class="field-help" type="button" aria-label="媒体库目录读取说明" data-tooltip="统一读取 ref/pose/pose.md、character/character.md、audio/audio.md、background/background.md 和 clothes/clothes.md。媒体文件保留相对路径，不会复制。">?</button></span>
+            <span class="field-label field-label-with-help">媒体库 ref 文件夹 <button class="field-help" type="button" aria-label="媒体库目录读取说明" data-tooltip="统一读取 ref/pose/pose.json、character/character.json、audio/audio.json、background/background.json 和 clothes/clothes.json。媒体文件保留相对路径，不会复制。">?</button></span>
             <input id="mediaLibraryRoot" type="text" placeholder="~/Documents/VideoMake/ref" />
             <span class="field-hint">保存后会立即重新扫描动作、人物、音频、背景和服装卡片。</span>
           </label>
@@ -231,9 +225,25 @@
           </div>
         </div>
         <div class="setting-resource-actions">
-          <button id="savePromptResources" class="secondary-button" type="button">保存全部路径并扫描</button>
+          <button id="savePromptResources" class="secondary-button" type="button">保存媒体库并扫描</button>
         </div>
-        <div class="divider translation-divider"></div>
+        <div class="credential-heading pose-import-heading">
+          <div>
+            <span class="field-label">动作导入媒体</span>
+            <span class="field-hint">动作库和组装台的“导入媒体”按钮可导入深度图或骨骼图，设置会同步到提示词工坊。</span>
+          </div>
+        </div>
+        <div class="setting-grid pose-media-import-setting">
+          <label class="field-group">
+            <span class="field-label">默认导入类型</span>
+            <select id="poseMediaImportType">
+              <option value="depth">深度图</option>
+              <option value="skeleton">骨骼图</option>
+            </select>
+            <span class="field-hint">深度图适合空间结构参考；骨骼图适合姿势约束。</span>
+          </label>
+          <button id="savePoseMediaImportType" class="secondary-button" type="button">保存导入类型</button>
+        </div>
         <div class="credential-heading translation-heading">
           <div>
             <span class="field-label">阿里云翻译</span>
@@ -255,7 +265,6 @@
           <span class="field-hint">环境变量：ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET</span>
           <button id="saveAliyunTranslation" class="secondary-button" type="button">保存翻译配置</button>
         </div>
-        <div class="divider telegram-divider"></div>
         <div class="credential-heading telegram-heading">
           <div>
             <span class="field-label">Telegram 成片推送</span>
@@ -269,13 +278,12 @@
             <input id="telegramBotToken" type="password" autocomplete="new-password" placeholder="输入 BotFather 发放的 Token" />
           </label>
           <label class="field-group">
-            <span class="field-label">Chat ID</span>
-            <input id="telegramChatId" type="text" autocomplete="off" placeholder="例如 -1001234567890" />
+            <span class="field-label">Chat ID（多个用逗号分隔）</span>
+            <input id="telegramChatId" type="text" autocomplete="off" placeholder="例如 -1001234567890, -1009876543210" />
           </label>
         </div>
         <div class="telegram-actions">
           <label class="telegram-enabled-toggle"><input id="telegramEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用成片自动推送</span></label>
-          <span class="field-hint">Token 只保存在本机；已保存 Token 留空即可保持不变。</span>
           <span class="telegram-button-group">
             <button id="saveTelegram" class="secondary-button" type="button">保存 Telegram</button>
             <button id="clearTelegram" class="secondary-button" type="button">清除配置</button>
@@ -287,7 +295,7 @@
             <span class="field-label">Telegram 图片入站</span>
             <span id="telegramInboundWorkflow" class="field-hint">未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。</span>
           </div>
-          <label class="telegram-enabled-toggle"><input id="telegramInboundEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>收到图片后自动运行</span></label>
+          <label class="telegram-enabled-toggle"><input id="telegramInboundEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用图片入站</span></label>
         </div>
         <div class="setting-grid personal-capacity-setting">
           <label class="field-group">
@@ -309,7 +317,6 @@
           </label>
           <button id="saveApiKeyStrategy" class="secondary-button" type="button">保存策略</button>
         </div>
-        <div class="divider account-divider"></div>
         <div class="credential-heading account-heading">
           <div>
             <span class="field-label">账号管理</span>
@@ -329,7 +336,6 @@
             <button id="addAccount" class="secondary-button" type="submit">添加并登录</button>
           </div>
         </form>
-        <div class="divider"></div>
         <div class="credential-heading">
           <div>
             <span class="field-label">当前账号 API Key</span>
@@ -365,6 +371,92 @@
         <div id="modalDiagnostics" class="modal-diagnostics"></div>
         <div id="modalOutputs" class="modal-outputs"></div>
       </div>
+    </div>
+    <div id="workflowJsonModal" class="modal-backdrop" hidden>
+      <section class="workflow-json-modal dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowJsonTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">WORKFLOW JSON</div>
+            <h2 id="workflowJsonTitle">查看与编辑 JSON</h2>
+          </div>
+          <button id="closeWorkflowJson" class="close-button" type="button" aria-label="关闭 JSON 编辑器">×</button>
+        </div>
+        <p class="workflow-json-hint">直接编辑当前工作流的 API JSON。应用后会重新扫描输入节点；如需写入工作流库，请再点击上方“保存”。</p>
+        <div class="workflow-json-meta"><code id="workflowJsonFilename">workflow_api.json</code><span id="workflowJsonState">当前提交工作流</span></div>
+        <textarea id="workflowJsonEditor" class="workflow-json-editor" aria-label="当前工作流 API JSON" spellcheck="false" required></textarea>
+        <div id="workflowJsonStatus" class="workflow-json-status" role="status" aria-live="polite"></div>
+        <div class="workflow-json-toolbar">
+          <button id="restoreWorkflowJsonButton" class="secondary-button button-compact" type="button">恢复当前</button>
+          <button id="formatWorkflowJsonButton" class="secondary-button button-compact" type="button">格式化</button>
+        </div>
+        <div class="dialog-actions">
+          <button id="cancelWorkflowJson" class="secondary-button" type="button">取消</button>
+          <button id="applyWorkflowJson" class="primary-button" type="button"><span class="button-glyph">✓</span><span>应用修改</span></button>
+        </div>
+      </section>
+    </div>
+    <div id="workflowConfigModal" class="modal-backdrop" hidden>
+      <section class="workflow-config-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowConfigTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">INPUT CONFIGURATION</div>
+            <h2 id="workflowConfigTitle">配置输入节点</h2>
+          </div>
+          <button id="closeWorkflowConfig" class="close-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <p id="workflowConfigHint" class="workflow-editor-hint">自动识别模式只读取工作流原始输入；切换到手动选择后，已添加的节点可编辑默认值。</p>
+        <label class="workflow-config-mode field-group">
+          <span class="field-label">输入识别模式</span>
+          <select id="workflowConfigMode">
+            <option value="auto">自动识别文件、提示词、尺寸和 RandomNoise</option>
+            <option value="manual">手动选择需要在任务提交页显示的输入</option>
+          </select>
+        </label>
+        <div id="workflowConfigBuilder" class="workflow-config-builder">
+          <div class="workflow-config-builder-heading">
+            <div><strong>添加输入字段</strong><span>可以把任意标量节点字段加入任务提交面板。</span></div>
+          </div>
+          <div class="workflow-config-add-grid">
+            <label class="field-group"><span class="field-label">节点</span><select id="workflowConfigNode"></select></label>
+            <label class="field-group"><span class="field-label">字段</span><select id="workflowConfigField"></select></label>
+            <button id="addWorkflowConfigItem" class="secondary-button button-compact" type="button">＋ 添加</button>
+          </div>
+        </div>
+        <div id="workflowConfigItems" class="workflow-config-items"></div>
+        <div class="dialog-actions">
+          <button id="cancelWorkflowConfig" class="secondary-button" type="button">取消</button>
+          <button id="saveWorkflowConfig" class="primary-button" type="button"><span class="button-glyph">✓</span><span>保存配置与默认值</span></button>
+        </div>
+      </section>
+    </div>
+    <div id="workflowRenameModal" class="modal-backdrop" hidden>
+      <section class="workflow-rename-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowRenameTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">RENAME WORKFLOW</div>
+            <h2 id="workflowRenameTitle">重命名工作流</h2>
+          </div>
+          <button id="closeWorkflowRename" class="close-button" type="button" aria-label="关闭">×</button>
+        </div>
+        <p class="modal-description">只修改本地工作流文件名，不会改变工作流节点和输入配置。</p>
+        <label class="field-group workflow-rename-field" for="workflowRenameInput">
+          <span class="field-label">文件名</span>
+          <input id="workflowRenameInput" type="text" autocomplete="off" spellcheck="false" placeholder="例如：人物首帧生成.json" />
+          <span class="field-hint">无需填写路径；未填写扩展名时会自动补充 .json。</span>
+        </label>
+        <div class="dialog-actions">
+          <button id="cancelWorkflowRename" class="secondary-button" type="button">取消</button>
+          <button id="saveWorkflowRename" class="primary-button" type="button">保存名称</button>
+        </div>
+      </section>
+    </div>
+    <div id="imagePreviewModal" class="modal-backdrop image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" hidden>
+      <button id="closeImagePreview" class="image-preview-surface" type="button" aria-label="关闭图片预览">
+        <img id="imagePreviewImage" src="data:," alt="" />
+      </button>
+    </div>
+    <div id="workflowImageContextMenu" class="workflow-image-context-menu" role="menu" aria-label="图片操作" hidden>
+      <button type="button" role="menuitem" data-workflow-image-menu-action="copy">复制</button>
     </div>
     <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/app.js"></script>

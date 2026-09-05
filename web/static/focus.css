@@ -1,0 +1,88 @@
+html, body { min-width: 0; min-height: 100%; }
+body.focus-body { overflow: hidden; background: var(--canvas); }
+body.is-focus-resizing { cursor: col-resize; user-select: none; }
+.focus-shell { display: flex; width: 100%; height: 100vh; min-height: 100vh; flex-direction: column; }
+
+/* Keep the same inline navigation language as the normal page header. */
+.focus-header { position: relative; z-index: 20; display: grid; grid-template-columns: minmax(210px, 1fr) auto minmax(210px, 1fr); min-height: 64px; padding: 9px 18px; background: var(--canvas-glass); box-shadow: 0 10px 28px var(--shadow-soft); backdrop-filter: blur(18px); }
+.focus-navigation { position: static; top: auto; left: auto; display: flex; justify-self: center; width: max-content; min-width: 0; margin: 0; flex-direction: row; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line-soft); border-radius: 11px; background: var(--surface-control-muted); transform: none; }
+.focus-navigation .focus-nav-link { display: inline-flex; width: auto; height: 30px; min-height: 30px; align-items: center; gap: 6px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; box-shadow: none; font-size: 11px; font-weight: 700; line-height: 30px; cursor: pointer; transform: none; }
+.focus-nav-icon { color: var(--accent); font-size: 9px; line-height: 1; transition: color var(--motion-interaction) ease, opacity var(--motion-interaction) ease; }
+.focus-navigation .focus-nav-link:hover { width: auto; color: var(--ink); background: var(--accent-ghost); box-shadow: none; transform: translateY(-1px); }
+.focus-navigation .focus-nav-link.active { width: auto; color: var(--ink); background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent-outline); }
+.focus-navigation .focus-nav-link.is-focus-target { box-shadow: inset 0 0 0 1px var(--type-accent); }
+.focus-navigation .focus-nav-link.is-hidden { color: var(--subtle); background: var(--surface-control-muted); box-shadow: inset 0 0 0 1px var(--line-soft); opacity: .72; }
+.focus-navigation .focus-nav-link.is-hidden .focus-nav-icon { color: var(--subtle); opacity: .82; }
+.focus-navigation .focus-nav-link.is-hidden:hover { color: var(--subtle); background: var(--surface-control-muted); }
+.focus-navigation .focus-nav-link:active { transform: none; }
+.focus-navigation .top-nav-content { transform: none; }
+.focus-navigation .top-nav-label { max-width: none; margin-left: 0; color: inherit; font-size: 11px; opacity: 1; transform: none; }
+.focus-nav-link { cursor: pointer; }
+.focus-header-actions { min-width: 0; justify-content: flex-end; gap: 8px; flex-wrap: wrap; overflow: visible; }
+.focus-wheel-hint { color: var(--subtle); font-size: 10px; line-height: 1.45; text-align: right; }
+.focus-wheel-hint kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface-control-muted); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; }
+.focus-exit { flex: 0 0 auto; white-space: nowrap; }
+/* Adjacent pages share one horizontal canvas: no artificial cards or visual gaps. */
+.focus-stage { display: flex; height: 0; min-height: 0; flex: 1 1 auto; align-items: stretch; gap: 0; overflow-x: auto; overflow-y: hidden; padding: 0; scroll-behavior: auto; overscroll-behavior: contain; outline: none; scrollbar-width: none; }
+.focus-stage::-webkit-scrollbar { display: none; }
+.focus-stage:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.focus-stage.is-centered { justify-content: center; overflow-x: hidden; }
+.focus-stage.is-centered > .focus-panel:not(.is-focused),
+.focus-stage.is-centered > .focus-panel-divider { display: none; }
+/* A centered focus page should use the available window width instead of
+   inheriting a narrow width from the six-page split layout. */
+.focus-stage.is-centered > .focus-panel.is-focused { width: min(1440px, 100%); min-width: min(1440px, 100%); flex-basis: min(1440px, 100%); }
+.focus-panel { position: relative; display: block; width: var(--focus-panel-width, clamp(540px, calc(50vw - 28px), 820px)); min-width: var(--focus-panel-width, clamp(540px, calc(50vw - 28px), 820px)); height: 100%; min-height: 0; flex: 0 0 var(--focus-panel-width, clamp(540px, calc(50vw - 28px), 820px)); overflow-x: hidden; overflow-y: auto; scrollbar-width: none; -ms-overflow-style: none; box-sizing: border-box; }
+.focus-panel.is-hidden, .focus-panel-divider.is-hidden { display: none; }
+.focus-panel::-webkit-scrollbar { display: none; width: 0; height: 0; }
+.focus-panel::before { position: sticky; top: 0; z-index: 6; display: block; width: 100%; height: 3px; background: var(--type-accent); content: ""; opacity: 0; pointer-events: none; transition: opacity var(--motion-interaction) ease; }
+.focus-panel.is-focused::before { opacity: 1; }
+.focus-panel-divider { position: relative; z-index: 4; width: 12px; min-width: 12px; height: 100%; flex: 0 0 12px; cursor: col-resize; touch-action: none; outline: none; }
+.focus-panel-divider::before { position: absolute; top: 0; bottom: 0; left: 5px; width: 1px; background: var(--line-soft); content: ""; transition: width var(--motion-interaction) ease, left var(--motion-interaction) ease, background var(--motion-interaction) ease; }
+.focus-panel-divider::after { position: absolute; top: 50%; left: 2px; width: 7px; height: 42px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-control-muted); box-shadow: 0 4px 12px var(--shadow-soft); content: ""; opacity: 0; transform: translateY(-50%); transition: opacity var(--motion-interaction) ease, background var(--motion-interaction) ease; }
+.focus-panel-divider:hover::before, .focus-panel-divider:focus-visible::before, .focus-panel-divider.is-dragging::before { left: 4px; width: 3px; background: var(--accent); }
+.focus-panel-divider:hover::after, .focus-panel-divider:focus-visible::after, .focus-panel-divider.is-dragging::after { opacity: 1; }
+.focus-panel-divider:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-fill); }
+.focus-panel-divider.is-dragging::after { background: var(--accent); }
+.focus-page-slot { min-height: 100%; }
+.focus-page-slot > .app-shell { width: min(1440px, calc(100% - 48px)); max-width: 1440px; min-height: 0; margin: 0 auto; padding-top: 20px; padding-bottom: 48px; }
+.focus-page-slot > .app-shell > main { min-width: 0; }
+.focus-page-slot > .app-shell > .toast-stack { position: fixed; z-index: 80; }
+.focus-loading { display: grid; min-height: 240px; place-items: center; color: var(--subtle); font-size: 12px; letter-spacing: .04em; }
+.focus-loading.is-error { color: var(--danger); }
+
+/* Prevent standalone-page spacing from creating a visual break between panels. */
+.focus-page-slot .topbar,
+.focus-page-slot .top-nav { display: none; }
+.focus-page-slot .intro-block,
+.focus-page-slot .prompt-intro,
+.focus-page-slot .workflows-hero,
+.focus-page-slot .outputs-hero,
+.focus-page-slot .dashboard-hero,
+.focus-page-slot .settings-hero { display: none; }
+.focus-page-slot .settings-main { margin-top: 0; }
+
+/* The embedded task page is intentionally narrower than a standalone page.
+   Keep its queue beside the workflow inputs instead of letting the shared
+   responsive rules stack it underneath inside the focus workspace. */
+.focus-panel[data-focus-page="submit"] .workspace { grid-template-columns: minmax(0, 1.55fr) minmax(340px, .9fr); }
+
+@media (max-width: 1180px) {
+  .focus-header { grid-template-columns: minmax(180px, 1fr) auto; }
+  .focus-navigation { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; justify-content: center; }
+  .focus-header-actions { grid-column: 2; grid-row: 1; }
+}
+
+@media (max-width: 720px) {
+  .focus-header { display: flex; align-items: stretch; flex-direction: column; gap: 8px; padding: 9px 12px; }
+  .focus-navigation { justify-content: flex-start; overflow-x: auto; }
+  .focus-nav-link { flex: 0 0 auto; }
+  .focus-header-actions { justify-content: space-between; }
+  .focus-wheel-hint { font-size: 9px; }
+  .focus-panel { width: var(--focus-panel-width, calc(100vw - 24px)); min-width: var(--focus-panel-width, calc(100vw - 24px)); flex-basis: var(--focus-panel-width, calc(100vw - 24px)); }
+  .focus-page-slot > .app-shell { width: calc(100% - 24px); padding-top: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .focus-stage { scroll-behavior: auto; }
+}

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -59,6 +61,119 @@ def test_output_supports_http_ranges_for_video_seek(tmp_path, monkeypatch):
         assert response.read() == b"2345"
         connection.close()
     finally:
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_output_folder_can_be_opened_for_a_task_over_http(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    output_root = tmp_path / "outputs"
+    task_folder = output_root / "task_open_folder"
+    task_folder.mkdir(parents=True)
+    media = task_folder / "preview.mp4"
+    media.write_bytes(b"video")
+    opened = []
+    monkeypatch.setattr(web_server, "open_local_directory", lambda path: opened.append(path) or True)
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    server.store.create_task(
+        {
+            "id": "task_open_folder",
+            "created_at": 1,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": "workflow.json",
+            "files": {},
+            "prompts": {},
+            "random_noise": {},
+            "remote_workflow_id": "123456",
+            "output_dir": str(output_root),
+        }
+    )
+    server.store.update_task(
+        "task_open_folder",
+        outputs_json=json.dumps([{"kind": "file", "path": str(media), "mime": "video/mp4"}]),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        connection.request(
+            "POST",
+            "/api/tasks/task_open_folder/open-folder",
+            body=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload == {"opened": True, "message": "已打开媒体所在文件夹"}
+        assert opened == [task_folder.resolve()]
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_output_case_tags_can_be_updated_over_http_and_are_counted(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    output_dir = tmp_path / "outputs" / "task_tags_http"
+    output_dir.mkdir(parents=True)
+    media = output_dir / "case.mp4"
+    media.write_bytes(b"video")
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    server.store.create_task(
+        {
+            "id": "task_tags_http",
+            "created_at": 1,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": "workflow.json",
+            "files": {},
+            "prompts": {},
+            "random_noise": {},
+            "remote_workflow_id": "123456",
+            "output_dir": str(output_dir),
+        }
+    )
+    server.store.update_task(
+        "task_tags_http",
+        outputs_json=json.dumps([{"kind": "file", "path": str(media), "mime": "video/mp4"}]),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        body = json.dumps({"tags": ["案例"]}).encode("utf-8")
+        connection.request(
+            "PATCH",
+            "/api/tasks/task_tags_http/outputs/0",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["output"]["tags"] == ["案例"]
+
+        connection.request("GET", "/api/outputs")
+        outputs_response = connection.getresponse()
+        outputs_payload = json.loads(outputs_response.read())
+        assert outputs_response.status == 200
+        assert outputs_payload["summary"]["tag_counts"]["案例"] == 1
+        assert outputs_payload["outputs"][0]["tags"] == ["案例"]
+
+        connection.request("GET", "/api/outputs/export/case")
+        archive_response = connection.getresponse()
+        archive_payload = archive_response.read()
+        assert archive_response.status == 200
+        assert archive_response.getheader("Content-Type") == "application/zip"
+        assert "attachment" in (archive_response.getheader("Content-Disposition") or "")
+        with zipfile.ZipFile(io.BytesIO(archive_payload)) as archive:
+            assert archive.namelist() == ["workflow.json/task_tags_http/case.mp4"]
+    finally:
+        connection.close()
         server.shutdown()
         thread.join(timeout=1)
         server.server_close()
@@ -127,9 +242,9 @@ def test_douyin_download_endpoint_returns_local_video_preview(tmp_path, monkeypa
 
 
 def test_action_api_exposes_both_paired_assets(tmp_path, monkeypatch):
-    resources = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.md")
+    resources = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.json")
     if not resources.is_file():
-        pytest.skip("本机未安装 VideoMake 的 pose.md")
+        pytest.skip("本机未安装 VideoMake 的 pose.json")
     _configure_web_paths(tmp_path, monkeypatch)
 
     server = web_server.AppServer(("127.0.0.1", 0))

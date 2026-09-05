@@ -154,12 +154,24 @@ def test_action_library_can_import_depth_into_task_load_image():
     assert "target.bypassed" in prompt_js
     assert "is-disabled" in prompt_js
     assert '已保存到任务草稿' in prompt_js
-    assert '>导入任务</button>' in prompt_js
+    assert '>导入媒体</button>' in prompt_js
     assert "canonicalWorkflowName" in app_js
     assert "modifiedWorkflowName" in app_js
     assert 'link.download = modifiedWorkflowName(sourceName)' in app_js
     assert 'window.localStorage.getItem("rh-workflow-desk-draft-v1")' in prompt_js
     assert "focusInputFromQuery" in app_js
+
+
+def test_action_library_supports_skeleton_generation_and_preview():
+    prompt_html = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
+    prompt_js = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+
+    assert 'id="resourceSkeletonPath"' in prompt_html
+    assert 'role: "skeleton"' in prompt_js
+    assert 'data-resource-media-generate="' in prompt_js
+    assert '"/api/prompt/actions/generate-" + kind' in prompt_js
+    assert 'autoSkeleton: true' in prompt_js
+    assert 'data-action-media-image="skeleton"' in prompt_js
 
 
 def test_image_cards_can_import_original_image_into_task_workflow():
@@ -190,6 +202,7 @@ def test_prompt_library_cards_keep_readable_rows_and_default_width():
     prompt_css = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
     prompt_js = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
     index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    prompt_page = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
 
     assert "var(--prompt-library-width, 420px)" in prompt_css
     assert "align-content: start; grid-auto-rows: max-content" in prompt_css
@@ -197,4 +210,5 @@ def test_prompt_library_cards_keep_readable_rows_and_default_width():
     assert "-webkit-line-clamp: 4" in prompt_css
     assert "prompt-library-width-v2" in prompt_js
     assert "savedWidth || 420" in prompt_js
-    assert "~/Documents/VideoMake/ref/prompt/library.md" in index
+    assert 'id="mediaLibraryRoot"' in index
+    assert 'id="blockModeCount"' in prompt_page

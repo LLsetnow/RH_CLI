@@ -33,6 +33,9 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button focus-mode-link" href="/focus" aria-label="进入专注模式" title="进入专注模式">
+            <span class="settings-icon" aria-hidden="true">▦</span><span>专注</span>
+          </a>
           <a class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
@@ -103,14 +106,16 @@
               </div>
               <button id="openCustomBlock" class="icon-button" type="button" aria-label="添加自定义固定积木" title="添加自定义固定积木">＋</button>
             </div>
-            <p class="panel-description">基础积木来自本机 Markdown；动作、人物、音频、背景和服装来自 ref Markdown 索引。</p>
-            <div class="library-mode-tabs" role="tablist" aria-label="积木库类型">
-              <button id="libraryModeBlocks" class="library-mode-tab active" data-library-mode="blocks" type="button" role="tab" aria-selected="true">基础积木</button>
-              <button id="libraryModeActions" class="library-mode-tab" data-library-mode="pose" type="button" role="tab" aria-selected="false">动作库 <span id="actionModeCount">0</span></button>
-              <button id="libraryModeCharacter" class="library-mode-tab" data-library-mode="character" type="button" role="tab" aria-selected="false">人物 <span id="characterModeCount">0</span></button>
-              <button id="libraryModeAudio" class="library-mode-tab" data-library-mode="audio" type="button" role="tab" aria-selected="false">音频 <span id="audioModeCount">0</span></button>
-              <button id="libraryModeBackground" class="library-mode-tab" data-library-mode="background" type="button" role="tab" aria-selected="false">背景 <span id="backgroundModeCount">0</span></button>
-              <button id="libraryModeClothes" class="library-mode-tab" data-library-mode="clothes" type="button" role="tab" aria-selected="false">服装 <span id="clothesModeCount">0</span></button>
+            <p class="panel-description">基础积木、动作、人物、音频、背景和服装都来自 ref 中的 JSON 索引。</p>
+            <div class="library-mode-tabs-sticky">
+              <div class="library-mode-tabs" role="tablist" aria-label="积木库类型">
+                <button id="libraryModeBlocks" class="library-mode-tab active" data-library-mode="blocks" type="button" role="tab" aria-selected="true">基础积木 <span id="blockModeCount">0</span></button>
+                <button id="libraryModeActions" class="library-mode-tab" data-library-mode="pose" type="button" role="tab" aria-selected="false">动作库 <span id="actionModeCount">0</span></button>
+                <button id="libraryModeCharacter" class="library-mode-tab" data-library-mode="character" type="button" role="tab" aria-selected="false">人物 <span id="characterModeCount">0</span></button>
+                <button id="libraryModeAudio" class="library-mode-tab" data-library-mode="audio" type="button" role="tab" aria-selected="false">音频 <span id="audioModeCount">0</span></button>
+                <button id="libraryModeBackground" class="library-mode-tab" data-library-mode="background" type="button" role="tab" aria-selected="false">背景 <span id="backgroundModeCount">0</span></button>
+                <button id="libraryModeClothes" class="library-mode-tab" data-library-mode="clothes" type="button" role="tab" aria-selected="false">服装 <span id="clothesModeCount">0</span></button>
+              </div>
             </div>
             <label class="prompt-search">
               <span class="sr-only">搜索积木</span>
@@ -138,11 +143,7 @@
                 </div>
                 <span class="auto-save-label"><span class="status-dot"></span>自动保存</span>
               </div>
-              <div class="assembly-view-tabs" role="tablist" aria-label="工作台视图">
-                <button id="assemblyViewStage" class="assembly-view-tab active" type="button" role="tab" aria-selected="true" aria-controls="assemblyStageView">组装台 <span id="stageTabCount">0</span></button>
-                <button id="assemblyViewGroups" class="assembly-view-tab" type="button" role="tab" aria-selected="false" aria-controls="assemblyGroupView">组状态库 <span id="groupTabCount">0</span></button>
-              </div>
-              <div id="assemblyStageView" class="assembly-view" role="tabpanel" aria-labelledby="assemblyViewStage">
+              <div id="assemblyStageView" class="assembly-view" role="tabpanel">
                 <div class="stage-toolbar">
                   <div><strong id="stageCount">0 个积木</strong><span class="stage-toolbar-helper">按顺序以空行连接</span></div>
                   <div class="stage-toolbar-actions">
@@ -151,26 +152,17 @@
                     <button id="clearStage" class="text-button" type="button">清空组装台</button>
                   </div>
                 </div>
+                <div class="group-create-panel">
+                  <div class="group-create-copy"><span class="group-kicker">PROMPT GROUP</span><strong>保存当前组装台</strong><span>新建后可在工作流页面的组状态库中点击恢复。</span></div>
+                  <form id="groupForm" class="group-save-row">
+                    <label class="sr-only" for="groupName">新建提示词组名称</label>
+                    <input id="groupName" type="text" maxlength="48" placeholder="输入新建提示词组名称" />
+                    <button id="newGroup" class="text-button" type="button">另存为新组</button>
+                    <button id="saveGroup" class="secondary-button button-compact" type="submit">新建提示词组</button>
+                  </form>
+                </div>
                 <div id="stageList" class="stage-list" aria-live="polite"></div>
                 <div class="assembly-hint"><span>抓住卡片空白处上下拖动排序；拖到左侧积木库即可移除当前积木。</span></div>
-              </div>
-              <div id="assemblyGroupView" class="assembly-view" role="tabpanel" aria-labelledby="assemblyViewGroups" hidden>
-                <div class="group-view-heading">
-                  <div><span class="group-kicker">GROUP STATES</span><strong>保存并复用积木组成顺序</strong></div>
-                  <span class="output-format">JSON</span>
-                </div>
-                <div class="group-manager">
-                  <div class="group-manager-heading">
-                    <div><span class="group-kicker">CURRENT ARRANGEMENT</span><strong>当前组装台</strong></div>
-                    <button id="newGroup" class="text-button" type="button">＋新建</button>
-                  </div>
-                  <form id="groupForm" class="group-save-row">
-                    <label class="sr-only" for="groupName">组状态名称</label>
-                    <input id="groupName" type="text" maxlength="48" placeholder="给当前组装顺序命名" />
-                    <button id="saveGroup" class="secondary-button button-compact" type="submit">新建并保存</button>
-                  </form>
-                  <div id="groupList" class="group-list" aria-live="polite"></div>
-                </div>
               </div>
             </section>
 
@@ -216,7 +208,7 @@
         <p id="customBlockDescription" class="modal-description">把你经常重复使用的表达保存下来，下次直接从积木库加入；保存修改会同步当前基础积木源文件。</p>
         <form id="customBlockForm">
           <label id="customBlockCategoryField" class="field-group">
-            <span class="field-label">一级分类 <span class="field-hint inline-hint">对应 Markdown 的 ### 标题</span></span>
+            <span class="field-label">一级分类 <span class="field-hint inline-hint">对应 JSON 中的 category 字段</span></span>
             <div class="resource-category-control">
               <select id="customBlockCategorySelect" aria-label="选择已有一级分类"></select>
               <input id="customBlockCategory" type="text" placeholder="或输入新分类" maxlength="32" />
@@ -238,6 +230,7 @@
             <div id="resourceMediaSlots" class="resource-media-slots"></div>
             <input id="resourceImagePath" type="hidden" />
             <input id="resourceDepthPath" type="hidden" />
+            <input id="resourceSkeletonPath" type="hidden" />
             <input id="resourceAudioPath" type="hidden" />
             <input id="resourceMediaPicker" class="resource-media-picker" type="file" hidden />
             <div class="resource-media-tools"><span id="resourceMediaHint" class="field-hint">选择文件、拖入素材，或在素材槽位中按 ⌘V / Ctrl+V；保存时会自动复制到 ref 对应目录。</span><button id="resourceVisionButton" class="resource-ai-button" type="button" hidden>AI 识图填充</button></div>
@@ -253,6 +246,9 @@
       <button id="closeImagePreview" class="image-preview-surface" type="button" aria-label="关闭图片预览">
         <img id="imagePreviewImage" src="data:," alt="" />
       </button>
+    </div>
+    <div id="libraryImageContextMenu" class="library-image-context-menu" role="menu" aria-label="图片操作" hidden>
+      <button type="button" role="menuitem" data-library-image-menu-action="copy">复制</button>
     </div>
     <div id="textPreviewModal" class="modal-backdrop" hidden>
       <section class="text-preview-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="textPreviewTitle">
@@ -280,7 +276,7 @@
         <div id="depthImportTargets" class="depth-import-targets" role="radiogroup" aria-label="LoadImage 节点"></div>
         <div class="dialog-actions">
           <button id="cancelDepthImport" class="secondary-button" type="button">取消</button>
-          <button id="confirmDepthImport" class="primary-button" type="button" disabled>导入任务</button>
+          <button id="confirmDepthImport" class="primary-button" type="button" disabled>导入媒体</button>
         </div>
       </section>
     </div>

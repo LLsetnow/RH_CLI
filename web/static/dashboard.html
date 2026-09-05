@@ -33,6 +33,9 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button focus-mode-link" href="/focus" aria-label="进入专注模式" title="进入专注模式">
+            <span class="settings-icon" aria-hidden="true">▦</span><span>专注</span>
+          </a>
           <a class="settings-button settings-access settings-link" href="/settings" aria-label="打开本地设置" title="打开本地设置">
             <span class="settings-icon" aria-hidden="true">⚙</span><span>设置</span>
           </a>
@@ -82,7 +85,7 @@
           <div>
             <div class="eyebrow">USAGE DASHBOARD / LOCAL LEDGER</div>
             <h1>把每一次运行，<br /><em>都记成一笔清晰的账。</em></h1>
-            <p>查看 RH 币消耗、工作流提交次数和处理时长。统计来自本机独立用量记录；首次启用时会从已有任务建立基础数据，之后删除任务也不会影响统计。</p>
+            <p>查看 RH 币消耗、工作流提交次数、处理时长和视频生成响应效率。统计来自本机独立用量记录；首次启用时会从已有任务建立基础数据，之后删除任务也不会影响统计。</p>
           </div>
           <div class="dashboard-source-note">
             <span class="live-line"></span>
@@ -130,6 +133,11 @@
             <span id="dashboardProcessingMeta" class="dashboard-metric-meta">按任务记录的处理时间</span>
           </article>
           <article class="panel dashboard-metric">
+            <div class="dashboard-metric-head"><span>生成时长</span><span class="dashboard-metric-mark">VIDEO</span></div>
+            <strong id="dashboardVideoDuration" class="dashboard-metric-value dashboard-metric-processing">—</strong>
+            <span id="dashboardVideoDurationMeta" class="dashboard-metric-meta">可识别视频产物总时长</span>
+          </article>
+          <article class="panel dashboard-metric">
             <div class="dashboard-metric-head"><span>完成率</span><span class="dashboard-metric-mark">HEALTH</span></div>
             <strong id="dashboardSuccess" class="dashboard-metric-value">—</strong>
             <span id="dashboardSuccessMeta" class="dashboard-metric-meta">完成 0 · 失败 0</span>
@@ -137,16 +145,26 @@
         </section>
 
         <div class="dashboard-content-grid">
-          <section class="panel dashboard-chart-panel" aria-labelledby="dailyUsageTitle">
+          <section class="panel dashboard-response-panel" aria-labelledby="videoResponseTitle">
             <div class="dashboard-panel-heading">
               <div>
-                <div class="section-kicker">DAILY ACTIVITY</div>
-                <h2 id="dailyUsageTitle">每天发生了什么</h2>
+                <div class="section-kicker">VIDEO THROUGHPUT</div>
+                <h2 id="videoResponseTitle">视频响应效率</h2>
               </div>
-              <span class="dashboard-panel-caption">近一年 · 窄屏优先显示最近日期</span>
+              <span class="dashboard-panel-caption">重叠任务只计一次墙钟时间</span>
             </div>
-            <div id="dashboardDailyChart" class="dashboard-daily-chart" role="img" aria-label="近一年每日综合活动热力图，综合 RH 币消耗、工作流提交和处理时长"></div>
-            <div class="dashboard-chart-note"><span class="dashboard-heatmap-legend"></span>颜色越深，综合活跃度越高 · 三项指标归一化平均 · 悬停查看每日明细</div>
+            <div class="dashboard-response-value"><strong id="dashboardResponseRate">—</strong><span>秒 / 视频秒</span></div>
+            <div class="dashboard-response-formula" aria-label="视频响应效率计算公式">
+              <span><strong id="dashboardWallClock">—</strong><small>并发墙钟</small></span>
+              <b aria-hidden="true">÷</b>
+              <span><strong id="dashboardVideoSeconds">—</strong><small>生成视频</small></span>
+            </div>
+            <p id="dashboardResponseNote" class="dashboard-response-note">完成视频任务后，这里会按并发合并后的实际墙钟时间计算。</p>
+            <div class="dashboard-response-stats">
+              <div><span>可识别视频任务</span><strong id="dashboardVideoTasks">0</strong></div>
+              <div><span>总处理时长</span><strong id="dashboardResponseProcessing">0 秒</strong></div>
+            </div>
+            <div class="dashboard-response-footnote">视频秒数来自已保存视频产物的媒体时长；图片、文本和无法读取时长的产物不计入分母。</div>
           </section>
 
           <aside class="dashboard-side">
@@ -178,6 +196,20 @@
             </section>
           </aside>
         </div>
+
+        <section class="panel dashboard-workflow-score-panel" aria-labelledby="workflowScoreTitle">
+          <div class="dashboard-panel-heading">
+            <div>
+              <div class="section-kicker">OUTPUT SCORE / REGISTERED WORKFLOWS</div>
+              <h2 id="workflowScoreTitle">高分工作流 <span id="dashboardWorkflowRatedCount" class="dashboard-record-count">0</span></h2>
+            </div>
+            <div class="dashboard-workflow-score-actions">
+              <span id="dashboardWorkflowRegistryCount" class="dashboard-panel-caption">0 个已登记</span>
+            </div>
+          </div>
+          <p id="dashboardWorkflowScoreNote" class="dashboard-workflow-score-note">总得分 = 成片页可见产物的已评分星级之和。</p>
+          <div id="dashboardTopWorkflows" class="dashboard-workflow-score-list" aria-live="polite"></div>
+        </section>
 
         <section class="panel dashboard-recent-panel" aria-labelledby="recentUsageTitle">
           <div class="dashboard-panel-heading">

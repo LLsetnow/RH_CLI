@@ -33,6 +33,9 @@
           <button id="themeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
             <span id="themeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="themeToggleLabel">夜间</span>
           </button>
+          <a class="settings-button focus-mode-link" href="/focus" aria-label="进入专注模式" title="进入专注模式">
+            <span class="settings-icon" aria-hidden="true">▦</span><span>专注</span>
+          </a>
         </div>
       </header>
       <nav class="top-nav" aria-label="主导航">
@@ -78,6 +81,7 @@
             <button class="settings-section-link" type="button" data-settings-section="platform"><span>平台配置</span><small>路径与账号</small></button>
             <button class="settings-section-link" type="button" data-settings-section="plugin"><span>插件配置</span><small>Telegram 与下载</small></button>
             <button class="settings-section-link" type="button" data-settings-section="extension"><span>扩展功能</span><small>资源库扫描</small></button>
+            <button class="settings-section-link" type="button" data-settings-section="reference"><span>交互说明</span><small>快捷键与颜色</small></button>
             <button class="settings-section-link" type="button" data-settings-section="logs"><span>平台日志</span><small>运行记录</small></button>
           </aside>
 
@@ -136,21 +140,46 @@
               </article>
               <article class="settings-card">
                 <div class="settings-card-heading"><div><h3>Telegram 成片推送</h3><p>任务下载完成后，可发送图片、视频、音频或其它成片到指定聊天。</p></div><span id="telegramStatus" class="credential-status">未配置</span></div>
-                <div class="settings-form-grid two-columns"><label class="field-group"><span class="field-label">Bot Token</span><input id="telegramBotToken" type="password" autocomplete="new-password" placeholder="输入 BotFather 发放的 Token" /></label><label class="field-group"><span class="field-label">Chat ID</span><input id="telegramChatId" type="text" autocomplete="off" placeholder="例如 -1001234567890" /></label></div>
-                <div class="settings-toggle-row"><label class="settings-switch"><input id="telegramEnabled" type="checkbox" /><span class="settings-switch-track" aria-hidden="true"></span><span class="settings-switch-label">启用成片自动推送</span></label><span class="field-hint">Token 只保存在本机；已保存 Token 留空即可保持不变。</span></div>
-                <div class="telegram-inbound-panel"><div class="telegram-inbound-copy"><span class="field-label">Telegram 图片入站</span><span id="telegramInboundWorkflow" class="field-hint">未选择工作流。</span></div><label class="settings-switch"><input id="telegramInboundEnabled" type="checkbox" /><span class="settings-switch-track" aria-hidden="true"></span><span class="settings-switch-label">收到图片后自动运行</span></label></div>
+                <div class="settings-form-grid two-columns"><label class="field-group"><span class="field-label">Bot Token</span><input id="telegramBotToken" type="password" autocomplete="new-password" placeholder="输入 BotFather 发放的 Token" /></label><label class="field-group"><span class="field-label">Chat ID（多个用逗号分隔）</span><input id="telegramChatId" type="text" autocomplete="off" placeholder="例如 -1001234567890, -1009876543210" /></label></div>
+                <div class="settings-toggle-row"><label class="settings-switch"><input id="telegramEnabled" type="checkbox" /><span class="settings-switch-track" aria-hidden="true"></span><span class="settings-switch-label">启用成片自动推送</span></label></div>
+                <div class="settings-toggle-row telegram-inbound-toggle-row"><label class="settings-switch"><input id="telegramInboundEnabled" type="checkbox" aria-controls="telegramInboundPanel" /><span class="settings-switch-track" aria-hidden="true"></span><span class="settings-switch-label">启用图片入站</span></label></div>
+                <div id="telegramInboundPanel" class="telegram-inbound-panel is-disabled" aria-disabled="true">
+                  <div class="telegram-inbound-copy"><span class="field-label">Telegram 图片入站</span><span id="telegramInboundSummary" class="field-hint">未选择工作流。</span></div>
+                  <div class="telegram-inbound-config">
+                    <label class="field-group"><span class="field-label">运行模式</span><select id="telegramInboundMode"><option value="fixed">固定工作流</option><option value="folder_random">文件夹随机</option></select></label>
+                    <label id="telegramInboundWorkflowField" class="field-group"><span class="field-label">固定工作流</span><select id="telegramInboundWorkflow"><option value="">请选择工作流</option></select></label>
+                    <label id="telegramInboundFolderField" class="field-group" hidden><span class="field-label">随机文件夹</span><select id="telegramInboundFolder"><option value="">请选择文件夹</option></select></label>
+                  </div>
+                </div>
                 <div class="settings-card-footer settings-button-row"><button id="testTelegram" class="secondary-button" type="button">测试已保存配置</button><button id="clearTelegram" class="danger-button" type="button">清除 Telegram 配置</button></div>
               </article>
             </section>
 
             <section class="settings-section" data-settings-panel="extension" hidden>
-              <div class="settings-section-heading"><div><div class="section-kicker">EXTENSION FEATURES</div><h2>扩展功能</h2><p>基础积木保留独立 Markdown 文件；动作、人物、音频、背景和服装统一从 ref 根目录抽取。</p></div></div>
+              <div class="settings-section-heading"><div><div class="section-kicker">EXTENSION FEATURES</div><h2>扩展功能</h2><p>基础积木、动作、人物、音频、背景和服装统一从 ref 根目录的 JSON 文件读取。</p></div></div>
               <article class="settings-card">
-                <div class="settings-card-heading"><div><h3>提示词资源路径</h3><p>媒体保留相对路径，不会复制文件；请确保 ref 根目录下的 Markdown 和媒体文件可被本机读取。</p></div></div>
+                <div class="settings-card-heading"><div><h3>媒体库路径</h3><p>动作、人物、音频、背景和服装统一从 ref 根目录的 JSON 文件读取；媒体保留相对路径，不会复制文件。</p></div></div>
                 <div class="settings-resource-list">
-                  <label class="reference-path-row"><span class="field-label">基础积木 Markdown 文件</span><span class="reference-path-control"><input id="promptLibraryPath" type="text" placeholder="~/Documents/VideoMake/ref/prompt/library.md" /><button class="secondary-button" type="button" data-pick-prompt-resource="library">选择</button></span></label>
                   <label class="reference-path-row"><span class="field-label">媒体库 ref 文件夹</span><span class="reference-path-control"><input id="mediaLibraryRoot" type="text" placeholder="~/Documents/VideoMake/ref" /><button id="chooseMediaLibraryRoot" class="secondary-button" type="button">选择文件夹</button></span></label>
                 </div>
+              </article>
+              <article class="settings-card">
+                <div class="settings-card-heading"><div><h3>动作导入媒体</h3><p>控制动作库和组装台中的“导入媒体”按钮：选择将动作的深度图或骨骼图写入当前工作流的 LoadImage 节点。</p></div></div>
+                <div class="settings-form-grid">
+                  <label class="field-group"><span class="field-label">默认导入类型</span><select id="poseMediaImportType"><option value="depth">深度图</option><option value="skeleton">骨骼图</option></select><span class="field-hint">深度图适合空间结构参考；骨骼图适合姿势约束。没有对应文件的动作不会提供导入按钮。</span></label>
+                </div>
+              </article>
+            </section>
+
+            <section class="settings-section" data-settings-panel="reference" hidden>
+              <div class="settings-section-heading"><div><div class="section-kicker">INTERACTION REFERENCE</div><h2>快捷键与颜色</h2><p>这里汇总 Web / Electron 前端主动处理的键盘操作，以及界面里承担语义的特殊颜色。颜色值会随当前主题同步显示。</p></div></div>
+              <article class="settings-card">
+                <div class="settings-card-heading"><div><h3>快捷键总览</h3><p>仅列出应用额外接管的操作；普通输入框的 Tab、Enter 和方向键仍遵循浏览器默认行为。</p></div><span class="reference-count" id="shortcutReferenceCount"></span></div>
+                <div id="shortcutReference" class="settings-reference-groups"></div>
+              </article>
+              <article class="settings-card">
+                <div class="settings-card-heading"><div><h3>特殊颜色</h3><p>色块使用当前页面令牌渲染；“暗色 / 亮色”值来自公共令牌和提示词页面的主题定义。</p></div><span class="reference-count" id="colorReferenceCount"></span></div>
+                <div id="colorReference" class="settings-color-groups"></div>
               </article>
             </section>
 

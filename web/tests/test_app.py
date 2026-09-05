@@ -185,6 +185,21 @@ def test_api_key_strategy_persists_and_rejects_unknown_values(tmp_path, monkeypa
         store._db.close()
 
 
+def test_pose_media_import_type_defaults_to_depth_and_persists_skeleton(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        assert store.pose_media_import_type() == "depth"
+        assert store.set_pose_media_import_type("skeleton") == "skeleton"
+        assert store.pose_media_import_type() == "skeleton"
+        with pytest.raises(RhCliError) as excinfo:
+            store.set_pose_media_import_type("color")
+        assert excinfo.value.code == "INVALID_POSE_MEDIA_IMPORT_TYPE"
+        assert store.pose_media_import_type() == "skeleton"
+    finally:
+        store._db.close()
+
+
 def test_api_key_strategy_prefers_personal_and_falls_back_then_returns(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -212,6 +227,106 @@ def test_api_key_strategy_prefers_personal_and_falls_back_then_returns(tmp_path,
         store._db.close()
 
 
+def test_local_dispatch_is_fifo_and_queue_positions_match(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    submitted = []
+    try:
+        manager._stop.set()
+        manager._wake.set()
+        manager._dispatcher.join(timeout=1)
+        monkeypatch.setattr(manager._executor, "submit", lambda fn, *args, **kwargs: submitted.append(args[0]))
+        store.set_personal_capacity(1)
+        store.save_keys([_saved_key()])
+        workflow_id, _, _ = store.save_workflow(
+            "fifo_api.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+        )
+
+        task_ids = [
+            manager.submit_task(workflow_id, {}, {}, "key_test", None, remote_workflow_id="123456")["id"]
+            for _ in range(3)
+        ]
+
+        manager._dispatch_once()
+
+        assert submitted == [task_ids[0]]
+        assert store.task(task_ids[0])["status"] == "submitting"
+        assert store.task(task_ids[1])["status"] == "queued"
+        assert store.task(task_ids[2])["status"] == "queued"
+        positions = {item["id"]: item["queue_position"] for item in manager.public_tasks()}
+        assert positions[task_ids[1]] == 1
+        assert positions[task_ids[2]] == 2
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_refresh_balance_reenables_key_after_funds_are_added(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        key = {**_saved_key(), "status": "no_balance", "balance": "0", "coins": "0"}
+        store.save_keys([key])
+        monkeypatch.setattr(
+            manager,
+            "_fetch_account_data",
+            lambda record: {"remainMoney": "9.75", "remainCoins": "88", "apiType": "PERSONAL"},
+        )
+
+        result = manager.refresh_balance("key_test")
+
+        assert result["status"] == "ready"
+        assert manager._automatic_candidates(store.keys())[0]["id"] == "key_test"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_runtime_key_failure_quarantines_key_and_wakes_queue(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        store.save_keys([_saved_key()])
+
+        manager._mark_runtime_key_failure(_saved_key(), "AUTH_FAILED")
+
+        saved = store.get_key("key_test")
+        assert saved["status"] == "error"
+        assert "重新检测" in saved["status_message"]
+        assert manager._automatic_candidates(store.keys()) == []
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_cannot_remove_key_referenced_by_waiting_task(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        manager._stop.set()
+        manager._wake.set()
+        manager._dispatcher.join(timeout=1)
+        store.save_keys([_saved_key()])
+        workflow_id, _, _ = store.save_workflow(
+            "queued_key_api.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+        )
+        manager.submit_task(workflow_id, {}, {}, "key_test", None, remote_workflow_id="123456")
+
+        with pytest.raises(RhCliError) as excinfo:
+            manager.remove_key("key_test")
+
+        assert excinfo.value.code == "KEY_IN_QUEUE"
+    finally:
+        manager.close()
+        store._db.close()
+
+
 def test_telegram_inbound_settings_bind_one_image_workflow(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -233,6 +348,7 @@ def test_telegram_inbound_settings_bind_one_image_workflow(tmp_path, monkeypatch
         settings = store.set_telegram_inbound_settings(workflow_id, True)
 
         assert settings["inbound_enabled"] is True
+        assert settings["inbound_mode"] == "fixed"
         assert settings["inbound_workflow_id"] == workflow_id
         assert settings["inbound_file_input_id"] == "1:image"
     finally:
@@ -269,6 +385,226 @@ def test_telegram_inbound_settings_allows_optional_file_inputs(tmp_path, monkeyp
         assert settings["inbound_enabled"] is True
         assert settings["inbound_workflow_id"] == workflow_id
         assert settings["inbound_file_input_id"] == "1:image"
+    finally:
+        store._db.close()
+
+
+def test_telegram_inbound_folder_mode_validates_and_selects_a_random_workflow(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account = store.add_account("随机入站账号", "ai")
+        folder = store.create_workflow_folder("图片入站轮换")
+        workflow_ids = []
+        for index in (1, 2):
+            workflow = {
+                "__rh_meta__": {"workflowId": f"207518885499432960{index}"},
+                "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"filename_prefix": f"output-{index}"}},
+            }
+            workflow_id, _, _ = store.save_workflow(
+                f"轮换工作流-{index}.json",
+                json.dumps(workflow),
+                account_id=account["id"],
+                remote_workflow_id=f"207518885499432960{index}",
+            )
+            store.set_workflow_folder(workflow_id, folder["id"])
+            workflow_ids.append(workflow_id)
+        empty_folder = store.create_workflow_folder("空的随机文件夹")
+        store._write_json_file({"telegram_bot_token": "123456:secret", "telegram_chat_id": "5468961835"})
+
+        settings = store.set_telegram_inbound_settings("", True, mode="folder_random", folder_id=folder["id"])
+
+        assert settings["inbound_enabled"] is True
+        assert settings["inbound_mode"] == "folder_random"
+        assert settings["inbound_folder_id"] == folder["id"]
+        assert settings["inbound_folder_name"] == "图片入站轮换"
+        assert {item["id"] for item in store.telegram_inbound_workflows(folder["id"])} == set(workflow_ids)
+
+        manager = web_app.TaskManager.__new__(web_app.TaskManager)
+        manager.store = store
+        available_folders = manager._telegram_switchable_folders()
+        assert [(item["id"], item["workflow_count"]) for item in available_folders] == [(folder["id"], 2)]
+        assert empty_folder["id"] not in {item["id"] for item in available_folders}
+        monkeypatch.setattr(web_app.random, "choice", lambda candidates: candidates[-1])
+        selected = manager._select_telegram_inbound_workflow(settings)
+        assert selected["id"] == workflow_ids[1]
+    finally:
+        store._db.close()
+
+
+def test_telegram_folder_random_selects_again_for_each_inbound_task(monkeypatch):
+    class FolderStore:
+        def telegram_inbound_workflows(self, folder_id=""):
+            assert folder_id == "wff-images"
+            return [
+                {"id": "wf-a", "name": "工作流 A"},
+                {"id": "wf-b", "name": "工作流 B"},
+            ]
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = FolderStore()
+    selected_indexes = iter((0, 1))
+    monkeypatch.setattr(
+        web_app.random,
+        "choice",
+        lambda candidates: candidates[next(selected_indexes)],
+    )
+    settings = {"inbound_mode": "folder_random", "inbound_folder_id": "wff-images"}
+
+    assert manager._select_telegram_inbound_workflow(settings)["id"] == "wf-a"
+    assert manager._select_telegram_inbound_workflow(settings)["id"] == "wf-b"
+
+
+def test_telegram_inbound_submits_a_fresh_random_workflow_for_each_message(monkeypatch):
+    workflows = {
+        "wf-a": {"name": "工作流 A", "remote_workflow_id": "remote-a"},
+        "wf-b": {"name": "工作流 B", "remote_workflow_id": "remote-b"},
+    }
+
+    class InboundStore:
+        def telegram_inbound_workflows(self, folder_id=""):
+            assert folder_id == "wff-images"
+            return [
+                {"id": workflow_id, "name": record["name"], "file_input_id": "1:image"}
+                for workflow_id, record in workflows.items()
+            ]
+
+        def workflow_detail(self, workflow_id):
+            record = workflows[workflow_id]
+            return {
+                "record": {
+                    "name": record["name"],
+                    "remote_workflow_id": record["remote_workflow_id"],
+                    "account_id": "account-1",
+                },
+                "workflow": {"1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}}},
+            }
+
+    class InboundNotifier:
+        def image_file_reference(self, update):
+            return {"file_id": str(update["update_id"]), "name": "input.png", "mime": "image/png"}
+
+        def download_image(self, update_id, reference, destination):
+            return Path(f"/tmp/telegram-input-{update_id}.png")
+
+        def send_message(self, *args, **kwargs):
+            return None
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = InboundStore()
+    manager._telegram_notifier = InboundNotifier()
+    selected_workflows = []
+    submitted_prompt_groups = []
+
+    def submit_task(**kwargs):
+        selected_workflows.append(kwargs["workflow_id"])
+        submitted_prompt_groups.append(kwargs["prompt_group"])
+        return {"id": f"task-{len(selected_workflows)}", "workflow_name": workflows[kwargs["workflow_id"]]["name"]}
+
+    manager.submit_task = submit_task
+    manager._log_stage = lambda *args, **kwargs: None
+    selected_indexes = iter((0, 1))
+    monkeypatch.setattr(
+        web_app.random,
+        "choice",
+        lambda candidates: candidates[next(selected_indexes)],
+    )
+    settings = {
+        "chat_id": "chat",
+        "inbound_enabled": True,
+        "inbound_mode": "folder_random",
+        "inbound_folder_id": "wff-images",
+    }
+
+    for update_id in (101, 102):
+        assert manager._handle_telegram_update(
+            {"update_id": update_id, "message": {"chat": {"id": "chat"}}},
+            settings,
+        ) == f"task-{update_id - 100}"
+
+    assert selected_workflows == ["wf-a", "wf-b"]
+    assert [group["id"] for group in submitted_prompt_groups] == ["telegram-wf-a", "telegram-wf-b"]
+    assert all(group["items"] == [] for group in submitted_prompt_groups)
+
+
+def test_telegram_inbound_saves_selected_workflow_and_prompt_group_to_task_folder(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        account = store.add_account("Telegram 入站账号", "ai")
+        group = {
+            "id": "telegram-group",
+            "name": "Telegram 提示词",
+            "updated_at": 123456,
+            "items": [{"instance_id": "item-1", "kind": "text", "text": "保持电影感"}],
+        }
+        workflow_id, _, _ = store.save_workflow(
+            "telegram-inbound.json",
+            json.dumps({
+                "1": {"class_type": "LoadImage", "inputs": {"image": "input.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }),
+            account_id=account["id"],
+            remote_workflow_id="123456",
+            prompt_group=group,
+        )
+
+        class InboundNotifier:
+            def image_file_reference(self, update):
+                return {"file_id": "telegram-file", "name": "input.png", "mime": "image/png"}
+
+            def download_image(self, update_id, reference, destination):
+                path = tmp_path / "telegram-input.png"
+                path.write_bytes(b"image")
+                return path
+
+            def send_message(self, *args, **kwargs):
+                return None
+
+        manager = web_app.TaskManager.__new__(web_app.TaskManager)
+        manager.store = store
+        manager._telegram_notifier = InboundNotifier()
+        manager._wake = threading.Event()
+        manager._log_stage = lambda *args, **kwargs: None
+        settings = {
+            "chat_id": "chat",
+            "inbound_enabled": True,
+            "inbound_mode": "fixed",
+            "inbound_workflow_id": workflow_id,
+            "inbound_file_input_id": "1:image",
+        }
+
+        task_id = manager._handle_telegram_update(
+            {"update_id": 701, "message": {"chat": {"id": "chat"}}},
+            settings,
+        )
+
+        task = store.task(task_id)
+        assert task is not None
+        task_folder = Path(task["output_dir"]) / task_id
+        workflow_snapshot = task_folder / "workflow_api.json"
+        prompt_group_snapshot = task_folder / "prompt_group.json"
+        assert workflow_snapshot.is_file()
+        assert prompt_group_snapshot.is_file()
+        assert json.loads(prompt_group_snapshot.read_text(encoding="utf-8"))["group"] == group
+        assert store.load_task_workflow(task_id)["prompt_group"] == group
+    finally:
+        store._db.close()
+
+
+def test_telegram_inbound_folder_mode_rejects_empty_folder(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        store.create_workflow_folder("空入站文件夹")
+        folder = store.workflow_folders()[0]
+        store._write_json_file({"telegram_bot_token": "123456:secret", "telegram_chat_id": "5468961835"})
+
+        with pytest.raises(RhCliError) as excinfo:
+            store.set_telegram_inbound_settings("", True, mode="folder_random", folder_id=folder["id"])
+
+        assert excinfo.value.code == "INVALID_TELEGRAM_INBOUND_FOLDER"
     finally:
         store._db.close()
 
@@ -323,6 +659,20 @@ def test_manual_telegram_upload_rejects_duplicate_while_in_flight():
 
     assert "value" in result
     assert "value" not in error
+
+
+def test_telegram_delivery_claim_is_atomic_across_store_connections(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    first = web_app.LocalStore()
+    second = web_app.LocalStore()
+    try:
+        assert first.claim_telegram_delivery("task-1", "output-1", "owner-1", lease_ms=60_000)
+        assert not second.claim_telegram_delivery("task-1", "output-1", "owner-2", lease_ms=60_000)
+        first.finish_telegram_delivery("task-1", "output-1", "owner-1", "sent")
+        assert not second.claim_telegram_delivery("task-1", "output-1", "owner-2", lease_ms=60_000)
+    finally:
+        first._db.close()
+        second._db.close()
 
 
 def test_telegram_inbound_loop_uses_current_settings_for_each_update():
@@ -417,17 +767,155 @@ def test_telegram_switch_callback_updates_workflow_and_refreshes_menu():
     assert manager._telegram_notifier.sent == [("已切换到：新工作流", "chat", None)]
 
 
+def test_telegram_switch_menu_includes_random_folder_and_usable_workflows():
+    workflows = [
+        {"id": "wf-a", "name": "工作流 A", "account_name": "账号 A"},
+        {"id": "wf-b", "name": "工作流 B", "account_name": "账号 B"},
+    ]
+    folders = [{"id": "wff-images", "name": "图片轮换", "workflow_count": 2}]
+
+    text, reply_markup = web_app.TaskManager._telegram_switch_menu(
+        workflows,
+        "wf-a",
+        folders=folders,
+        current_mode="fixed",
+    )
+
+    assert "当前：工作流 A" in text
+    assert reply_markup == {
+        "inline_keyboard": [
+            [{"text": "文件夹随机", "callback_data": "rh_switch:folder_random"}],
+            [{"text": "✓ 工作流 A · 账号 A", "callback_data": "rh_switch:wf-a"}],
+            [{"text": "工作流 B · 账号 B", "callback_data": "rh_switch:wf-b"}],
+            [{"text": "取消", "callback_data": "rh_switch:cancel"}],
+        ]
+    }
+
+    folder_text, folder_markup = web_app.TaskManager._telegram_switch_folder_menu(
+        folders,
+        "",
+    )
+    assert "当前：未选择" in folder_text
+    assert folder_markup["inline_keyboard"] == [
+        [{"text": "图片轮换 · 2 个可用工作流", "callback_data": "rh_switch_folder:wff-images"}],
+        [{"text": "← 返回固定工作流", "callback_data": "rh_switch:back"}],
+        [{"text": "取消", "callback_data": "rh_switch:cancel"}],
+    ]
+
+    _, empty_folder_markup = web_app.TaskManager._telegram_switch_menu(workflows, "wf-a")
+    assert empty_folder_markup["inline_keyboard"][0] == [
+        {"text": "文件夹随机（暂无可用文件夹）", "callback_data": "rh_switch:folder_random"}
+    ]
+
+
+def test_telegram_switch_cancel_does_not_change_settings():
+    class CancelStore:
+        def __init__(self):
+            self.changed = False
+
+        def set_telegram_inbound_settings(self, *args, **kwargs):
+            self.changed = True
+
+    class CancelNotifier:
+        def __init__(self):
+            self.answers = []
+            self.deleted = []
+
+        def answer_callback_query(self, callback_id, text="", show_alert=False):
+            self.answers.append((callback_id, text, show_alert))
+
+        def delete_message(self, chat_id, message_id):
+            self.deleted.append((chat_id, message_id))
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = CancelStore()
+    manager._telegram_notifier = CancelNotifier()
+    update = {
+        "callback_query": {
+            "id": "callback-cancel",
+            "data": "rh_switch:cancel",
+            "message": {"message_id": 8, "chat": {"id": "chat"}},
+        }
+    }
+
+    assert manager._handle_telegram_update(update, {"chat_id": "chat"}) == ""
+    assert manager.store.changed is False
+    assert manager._telegram_notifier.answers == [("callback-cancel", "", False)]
+    assert manager._telegram_notifier.deleted == [("chat", 8)]
+
+
+def test_telegram_switch_callback_selects_random_folder():
+    class FolderStore:
+        def __init__(self):
+            self.selected = None
+
+        def set_telegram_inbound_settings(self, workflow_id, enabled, mode=None, folder_id=""):
+            self.selected = (workflow_id, enabled, mode, folder_id)
+            return {}
+
+    class FolderNotifier:
+        def __init__(self):
+            self.answers = []
+            self.edits = []
+            self.deleted = []
+            self.sent = []
+
+        def answer_callback_query(self, callback_id, text="", show_alert=False):
+            self.answers.append((callback_id, text, show_alert))
+
+        def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            self.edits.append((chat_id, message_id, text, reply_markup))
+
+        def delete_message(self, chat_id, message_id):
+            self.deleted.append((chat_id, message_id))
+
+        def send_message(self, text, chat_id=None, reply_markup=None):
+            self.sent.append((text, chat_id, reply_markup))
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = FolderStore()
+    manager._telegram_notifier = FolderNotifier()
+    manager._telegram_switchable_workflows = lambda: [
+        {"id": "wf-a", "name": "工作流 A", "account_name": "账号 A"}
+    ]
+    manager._telegram_switchable_folders = lambda: [
+        {"id": "wff-images", "name": "图片轮换", "workflow_count": 1}
+    ]
+    message = {"message_id": 8, "chat": {"id": "chat"}}
+
+    manager._handle_telegram_update(
+        {"callback_query": {"id": "callback-folder", "data": "rh_switch:folder_random", "message": message}},
+        {"chat_id": "chat"},
+    )
+    assert manager._telegram_notifier.answers == [("callback-folder", "", False)]
+    assert manager._telegram_notifier.edits[0][3]["inline_keyboard"] == [
+        [{"text": "图片轮换 · 1 个可用工作流", "callback_data": "rh_switch_folder:wff-images"}],
+        [{"text": "← 返回固定工作流", "callback_data": "rh_switch:back"}],
+        [{"text": "取消", "callback_data": "rh_switch:cancel"}],
+    ]
+
+    manager._handle_telegram_update(
+        {"callback_query": {"id": "callback-select", "data": "rh_switch_folder:wff-images", "message": message}},
+        {"chat_id": "chat"},
+    )
+
+    assert manager.store.selected == ("", True, "folder_random", "wff-images")
+    assert manager._telegram_notifier.answers[-1] == ("callback-select", "", False)
+    assert manager._telegram_notifier.deleted == [("chat", 8)]
+    assert manager._telegram_notifier.sent == [("已切换到文件夹随机：图片轮换", "chat", None)]
+
+
 def test_action_resources_path_setting_persists_and_validates(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
-    source = tmp_path / "pose.md"
-    source.write_text("## pose\n", encoding="utf-8")
+    source = tmp_path / "pose.json"
+    source.write_text(json.dumps({"version": 6, "actions": []}), encoding="utf-8")
     store = web_app.LocalStore()
     try:
         assert store.action_resources_path() == ""
         assert store.set_action_resources_path(str(source)) == str(source.resolve())
         assert store.action_resources_path() == str(source.resolve())
         with pytest.raises(RhCliError) as excinfo:
-            store.set_action_resources_path(str(tmp_path / "missing.md"))
+            store.set_action_resources_path(str(tmp_path / "missing.json"))
         assert excinfo.value.code == "INVALID_ACTION_RESOURCES_PATH"
     finally:
         store._db.close()
@@ -451,26 +939,46 @@ def test_douyin_cookie_path_setting_persists_and_can_be_cleared(tmp_path, monkey
         store._db.close()
 
 
-def test_prompt_resource_paths_setting_persists_all_library_sources(tmp_path, monkeypatch):
+def test_reference_resource_paths_setting_persists_all_library_sources(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
-    library = tmp_path / "library.json"
-    library.write_text(json.dumps({"version": 1, "blocks": []}), encoding="utf-8")
     sources = {}
     for kind in ("character", "audio", "background", "clothes"):
-        source = tmp_path / f"{kind}.md"
-        source.write_text(f"## {kind}\n", encoding="utf-8")
+        source = tmp_path / f"{kind}.json"
+        source.write_text(json.dumps({"version": 6, "references": []}), encoding="utf-8")
         sources[kind] = source
 
     store = web_app.LocalStore()
     try:
-        assert store.set_prompt_library_path(str(library)) == str(library.resolve())
-        assert store.prompt_library_path() == str(library.resolve())
         assert store.set_reference_resources_paths({kind: str(path) for kind, path in sources.items()}) == {
             kind: str(path.resolve()) for kind, path in sources.items()
         }
         assert store.reference_resources_paths() == {
             kind: str(path.resolve()) for kind, path in sources.items()
         }
+    finally:
+        store._db.close()
+
+
+def test_prompt_library_path_prefers_resources_index(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    ref_root = tmp_path / "ref"
+    prompt_root = ref_root / "prompt"
+    prompt_root.mkdir(parents=True)
+    indexed_library = prompt_root / "library.json"
+    indexed_library.write_text(json.dumps({"version": 1, "blocks": []}), encoding="utf-8")
+    (ref_root / "Resources.json").write_text(json.dumps({
+        "version": 1,
+        "media_root": ".",
+        "sources": {"prompt": "prompt/library.json"},
+    }), encoding="utf-8")
+    legacy_library = tmp_path / "legacy-library.json"
+    legacy_library.write_text(json.dumps({"version": 1, "blocks": []}), encoding="utf-8")
+
+    store = web_app.LocalStore()
+    try:
+        store.set_prompt_library_path(str(legacy_library))
+        store.set_media_library_root(str(ref_root))
+        assert store.prompt_library_path() == str(indexed_library.resolve())
     finally:
         store._db.close()
 
@@ -665,14 +1173,154 @@ def test_dashboard_can_filter_usage_ledger_by_account(tmp_path, monkeypatch):
         cn_only = web_app.public_dashboard(store, manager, days=1, account_id=account_cn["id"], current_time=now)
 
         assert all_accounts["account_filter_name"] == "全部账号"
-        assert len(all_accounts["heatmap"]["daily"]) == 365
         assert all_accounts["summary"]["coins_spent"] == "12"
         assert all_accounts["summary"]["submissions"] == 2
+        assert all_accounts["summary"]["video_seconds"] == "0"
         assert {item["name"] for item in all_accounts["accounts"]} == {"中文账号", "AI 账号"}
         assert cn_only["account_filter"] == account_cn["id"]
         assert cn_only["account_filter_name"] == "中文账号"
         assert cn_only["summary"]["coins_spent"] == "5"
         assert cn_only["summary"]["submissions"] == 1
+    finally:
+        store._db.close()
+
+
+def test_dashboard_ranks_registered_workflows_by_output_total_score(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        now = web_app.now_ms()
+        workflow = {"1": {"class_type": "SaveImage", "inputs": {}}}
+        workflow_a, _, _ = store.save_workflow("workflow-a.json", json.dumps(workflow))
+        workflow_b, _, _ = store.save_workflow("workflow-b.json", json.dumps(workflow))
+        task_ids = []
+
+        def add_rated_task(task_id, workflow_id, ratings):
+            output_dir = tmp_path / "data" / "outputs" / task_id
+            output_dir.mkdir(parents=True)
+            outputs = []
+            for index, rating in enumerate(ratings):
+                output_path = output_dir / f"output-{index}.png"
+                output_path.write_bytes(b"png")
+                outputs.append({"kind": "file", "path": str(output_path), "mime": "image/png", "rating": rating})
+            store.create_task(
+                {
+                    "id": task_id,
+                    "created_at": now - 1000,
+                    "workflow_path": str(tmp_path / f"{task_id}.json"),
+                    "workflow_name": f"{task_id}.json",
+                    "registered_workflow_id": workflow_id,
+                    "files": {},
+                    "prompts": {},
+                    "output_dir": str(output_dir),
+                }
+            )
+            store.update_task(
+                task_id,
+                status="completed",
+                completed_at=now,
+                outputs_json=json.dumps(outputs, ensure_ascii=False),
+            )
+            task_ids.append(task_id)
+
+        add_rated_task("task_workflow_a", workflow_a, [4, 5])
+        add_rated_task("task_workflow_b", workflow_b, [5])
+        add_rated_task("task_unregistered", "", [5])
+        manager = SimpleNamespace(
+            public_tasks=lambda: [store.task(task_id) for task_id in task_ids],
+            public_keys=lambda: [],
+        )
+
+        result = web_app.public_dashboard(store, manager, days=1, current_time=now)
+
+        scores = result["workflow_scores"]
+        assert scores["registered_count"] == 2
+        assert scores["rated_count"] == 2
+        assert [item["id"] for item in scores["items"]] == [workflow_a, workflow_b]
+        assert scores["items"][0]["total_score"] == 9
+        assert scores["items"][0]["rated_output_count"] == 2
+        assert scores["items"][0]["average_rating"] == 4.5
+        assert scores["items"][0]["run_count"] == 1
+    finally:
+        store._db.close()
+
+
+def test_submit_task_records_registered_workflow_id(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        workflow = {"1": {"class_type": "SaveImage", "inputs": {}}}
+        workflow_id, _, _ = store.save_workflow(
+            "registered.json",
+            json.dumps(workflow),
+            remote_workflow_id="remote-registered",
+        )
+
+        task = manager.submit_task(
+            workflow_id,
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="remote-registered",
+            workflow_data=workflow,
+            workflow_name="registered.json",
+        )
+
+        assert task["registered_workflow_id"] == workflow_id
+        assert store.task(task["id"])["registered_workflow_id"] == workflow_id
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_dashboard_calculates_video_response_time_after_merging_concurrent_tasks(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        now = int(datetime(2026, 9, 4, 0, 4).timestamp() * 1000)
+        created_at = now - 240_000
+        for index in range(10):
+            task_id = f"task_video_response_{index}"
+            store.create_task(
+                {
+                    "id": task_id,
+                    "created_at": created_at,
+                    "workflow_path": str(tmp_path / f"{task_id}.json"),
+                    "workflow_name": "video.json",
+                    "files": {},
+                    "prompts": {},
+                    "output_dir": str(tmp_path / "outputs"),
+                }
+            )
+            store.update_task(
+                task_id,
+                status="completed",
+                started_at=created_at,
+                completed_at=now,
+                outputs_json=json.dumps(
+                    [{
+                        "kind": "file",
+                        "path": str(tmp_path / "outputs" / task_id / "output.mp4"),
+                        "mime": "video/mp4",
+                        "duration_seconds": 15,
+                    }]
+                ),
+            )
+
+        result = web_app.public_dashboard(
+            store,
+            SimpleNamespace(public_tasks=lambda: [], public_keys=lambda: []),
+            days=1,
+            current_time=now,
+        )
+
+        assert result["summary"]["video_task_count"] == 10
+        assert result["summary"]["video_seconds"] == "150"
+        assert result["summary"]["wall_clock_seconds"] == "240"
+        assert result["summary"]["response_seconds_per_video_second"] == "1.6"
+        assert store.usage_records()[0]["video_seconds"] == "15"
     finally:
         store._db.close()
 
@@ -799,8 +1447,8 @@ def test_refresh_balance_only_updates_balance_fields(tmp_path, monkeypatch):
         assert result["coins"] == "88"
         assert result["balance_checked_at"] > 222
         assert result["status"] == "ready"
-        assert result["api_type"] == "PERSONAL"
-        assert result["capacity"] == 3
+        assert result["api_type"] == "ENTERPRISE_PRO"
+        assert result["capacity"] == 100
         assert result["checked_at"] == 111
         assert saved["status_message"] == "检测成功"
     finally:
@@ -993,6 +1641,51 @@ def test_local_store_persists_output_rating_and_can_clear_it(tmp_path, monkeypat
         store._db.close()
 
 
+def test_local_store_persists_output_tags_and_public_outputs_counts_them(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    output_dir = tmp_path / "data" / "outputs" / "task_tags"
+    output_dir.mkdir(parents=True)
+    output_path = output_dir / "case.mp4"
+    output_path.write_bytes(b"video")
+    try:
+        store.create_task(
+            {
+                "id": "task_tags",
+                "created_at": 1,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "workflow.json",
+                "files": {},
+                "prompts": {},
+                "random_noise": {},
+                "remote_workflow_id": "123456",
+                "output_dir": str(output_dir),
+            }
+        )
+        store.update_task(
+            "task_tags",
+            outputs_json=json.dumps([{"kind": "file", "path": str(output_path), "mime": "video/mp4"}]),
+        )
+
+        tagged = store.update_output_tags("task_tags", 0, ["案例", "案例", "  "])
+
+        assert tagged["tags"] == ["案例"]
+        assert store.task("task_tags")["outputs"][0]["tags"] == ["案例"]
+        public = web_app.public_outputs(store, SimpleNamespace(public_tasks=lambda: [store.task("task_tags")]))
+        assert public["outputs"][0]["tags"] == ["案例"]
+        assert public["summary"]["tag_counts"] == {"案例": 1}
+
+        cleared = store.update_output_tags("task_tags", 0, [])
+
+        assert "tags" not in cleared
+        assert "tags" not in store.task("task_tags")["outputs"][0]
+        with pytest.raises(RhCliError) as excinfo:
+            store.update_output_tags("task_tags", 0, "案例")
+        assert excinfo.value.code == "INVALID_OUTPUT_TAGS"
+    finally:
+        store._db.close()
+
+
 def test_delete_outputs_by_rating_removes_only_matching_outputs_and_preserves_ledger(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -1078,7 +1771,10 @@ def test_workflow_library_records_can_be_bound_updated_and_deleted(tmp_path, mon
         )
         assert updated["name"] == "人物修复.json"
         assert updated["remote_workflow_id"] == "654321"
-        saved = json.loads(workflow_path.read_text(encoding="utf-8"))
+        renamed_path = tmp_path / "data" / "workflows" / f"{workflow_id}_人物修复.json"
+        assert renamed_path.exists()
+        assert not workflow_path.exists()
+        saved = json.loads(renamed_path.read_text(encoding="utf-8"))
         assert saved["__rh_meta__"] == {"workflowId": "654321", "accountId": account["id"]}
 
         replacement = {
@@ -1089,7 +1785,7 @@ def test_workflow_library_records_can_be_bound_updated_and_deleted(tmp_path, mon
         assert content_updated["file_count"] == 1
         assert content_updated["name"] == "人物修复.json"
         assert content_updated["account_id"] == account["id"]
-        saved = json.loads(workflow_path.read_text(encoding="utf-8"))
+        saved = json.loads(renamed_path.read_text(encoding="utf-8"))
         assert saved["1"]["inputs"]["image"] == "edited.png"
         assert saved["__rh_meta__"] == {"workflowId": "654321", "accountId": account["id"]}
 
@@ -1098,8 +1794,149 @@ def test_workflow_library_records_can_be_bound_updated_and_deleted(tmp_path, mon
         assert excinfo.value.code == "INVALID_WORKFLOW"
 
         store.delete_workflow(workflow_id)
-        assert not workflow_path.exists()
+        assert not renamed_path.exists()
         assert store.workflows() == []
+    finally:
+        store._db.close()
+
+
+def test_workflow_library_saves_and_loads_a_prompt_group_package(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        prompt_group = {
+            "id": "group-cinematic",
+            "name": "电影镜头",
+            "updated_at": 123,
+            "items": [
+                {"instance_id": "text-1", "kind": "text", "text": "缓慢推近"},
+            ],
+        }
+        workflow_id, workflow_path, _ = store.save_workflow(
+            "cinematic_api.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+            prompt_group=prompt_group,
+        )
+
+        package_path = web_app.WORKFLOW_ROOT / f"{workflow_id}.prompt_group.json"
+        assert workflow_path.exists()
+        assert package_path.exists()
+        assert json.loads(package_path.read_text(encoding="utf-8")) == prompt_group
+        record = store.workflow_record(workflow_id)
+        assert record["prompt_group_id"] == prompt_group["id"]
+        assert record["prompt_group_name"] == prompt_group["name"]
+        assert record["prompt_group_path"] == str(package_path.resolve())
+        assert store.workflow_detail(workflow_id)["prompt_group"] == prompt_group
+
+        store.update_workflow(workflow_id, {"prompt_group": None})
+        assert not package_path.exists()
+        assert store.workflow_detail(workflow_id)["prompt_group"] is None
+        assert store.workflow_record(workflow_id)["prompt_group_id"] == ""
+
+        store.update_workflow(workflow_id, {"prompt_group": prompt_group})
+        assert store.workflow_detail(workflow_id)["prompt_group"] == prompt_group
+        store.delete_workflow(workflow_id)
+        assert not package_path.exists()
+    finally:
+        store._db.close()
+
+
+def test_telegram_submission_repairs_stale_workflow_filename(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        workflow_id, original_path, _ = store.save_workflow(
+            "old-name.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+            remote_workflow_id="123456",
+        )
+        legacy_path = original_path.with_name(f"{workflow_id}_legacy-name.json")
+        original_path.rename(legacy_path)
+        registry = store._read_workflow_registry()
+        registry[0]["name"] = "telegram-name.json"
+        store._write_workflow_registry(registry)
+
+        task = manager.submit_task(
+            workflow_id,
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="123456",
+            submission_source="telegram",
+        )
+
+        expected_path = tmp_path / "data" / "workflows" / f"{workflow_id}_telegram-name.json"
+        assert task["workflow_name"] == "telegram-name.json"
+        assert Path(task["workflow_path"]) == expected_path.resolve()
+        assert expected_path.is_file()
+        assert not legacy_path.exists()
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_workflow_folders_persist_membership_and_restore_unclassified(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        workflow_id, _, _ = store.save_workflow(
+            "folder-demo.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+        )
+        folder = store.create_workflow_folder("视频项目")
+        assert folder["workflow_count"] == 0
+        assert store.workflow_record(workflow_id)["folder_id"] == ""
+
+        moved = store.update_workflow(workflow_id, {"folder_id": folder["id"]})
+        assert moved["folder_id"] == folder["id"]
+        assert store.workflow_folders()[0]["workflow_count"] == 1
+
+        restored = store.update_workflow(workflow_id, {"folder_id": ""})
+        assert restored["folder_id"] == ""
+        assert store.workflow_folders()[0]["workflow_count"] == 0
+
+        store.update_workflow(workflow_id, {"folder_id": folder["id"]})
+        store.delete_workflow_folder(folder["id"])
+        assert store.workflow_record(workflow_id)["folder_id"] == ""
+        assert store.workflow_folders() == []
+    finally:
+        store._db.close()
+
+
+def test_workflow_folder_can_be_renamed_without_changing_membership(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        folder = store.create_workflow_folder("视频项目")
+
+        renamed = store.rename_workflow_folder(folder["id"], "首帧项目")
+
+        assert renamed["id"] == folder["id"]
+        assert renamed["name"] == "首帧项目"
+        assert store.workflow_folders()[0]["name"] == "首帧项目"
+    finally:
+        store._db.close()
+
+
+def test_rename_workflow_changes_json_filename_and_registry_name(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        workflow_id, workflow_path, _ = store.save_workflow(
+            "original.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+        )
+
+        renamed = store.rename_workflow(workflow_id, "首帧工作流")
+
+        renamed_path = tmp_path / "data" / "workflows" / f"{workflow_id}_首帧工作流.json"
+        assert renamed["name"] == "首帧工作流.json"
+        assert renamed["workflow_path"] == str(renamed_path.resolve())
+        assert not workflow_path.exists()
+        assert renamed_path.exists()
+        assert store.workflow_record(workflow_id)["name"] == "首帧工作流.json"
     finally:
         store._db.close()
 
@@ -1127,6 +1964,41 @@ def test_save_workflow_persists_manual_input_config(tmp_path, monkeypatch):
         store._db.close()
 
 
+def test_legacy_workflow_registry_is_readable_and_migrates_on_write(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        legacy_record = {
+            "id": "wf_legacy123",
+            "name": "legacy.json",
+            "account_id": "",
+            "site": "",
+            "remote_workflow_id": "123",
+            "source_dir": "",
+            "source": "library",
+            "created_at": 1,
+            "updated_at": 2,
+            "input_config": {"mode": "manual", "items": []},
+        }
+        registry_path = store._workflow_registry_path()
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(json.dumps({"workflows": [legacy_record]}), encoding="utf-8")
+
+        assert store._read_workflow_registry() == [legacy_record]
+        store._write_workflow_registry([legacy_record])
+
+        index = json.loads(registry_path.read_text(encoding="utf-8"))
+        assert index == {
+            "version": 2,
+            "workflows": [{"id": "wf_legacy123", "file": "workflow-registry/wf_legacy123.json"}],
+        }
+        entry_path = store._workflow_registry_entry_path("wf_legacy123")
+        assert json.loads(entry_path.read_text(encoding="utf-8")) == legacy_record
+        assert store._read_workflow_registry() == [legacy_record]
+    finally:
+        store._db.close()
+
+
 def test_library_workflow_input_config_is_saved_and_replayed_in_task_snapshot(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -1149,7 +2021,11 @@ def test_library_workflow_input_config_is_saved_and_replayed_in_task_snapshot(tm
         })
         assert updated["input_config"]["mode"] == "manual"
         assert updated["input_config"]["items"][0]["id"] == "2:steps"
-        assert "input_config" in json.loads((store._workflow_registry_path()).read_text(encoding="utf-8"))["workflows"][0]
+        registry = json.loads((store._workflow_registry_path()).read_text(encoding="utf-8"))
+        assert registry["version"] == 2
+        assert registry["workflows"][0]["id"] == workflow_id
+        entry_path = store._workflow_registry_entry_path(workflow_id)
+        assert "input_config" in json.loads(entry_path.read_text(encoding="utf-8"))
         assert json.loads(workflow_path.read_text(encoding="utf-8"))["2"]["inputs"]["steps"] == 12
 
         task = manager.submit_task(
@@ -1360,6 +2236,110 @@ def test_submit_task_saves_and_loads_prompt_group_snapshot(tmp_path, monkeypatch
         store._db.close()
 
 
+def test_submit_task_writes_path_only_replay_manifest(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    input_path = tmp_path / "source.png"
+    input_path.write_bytes(b"source")
+    group = {
+        "id": "task-group-manifest",
+        "name": "可复现提示词",
+        "updated_at": 123456,
+        "items": [{"instance_id": "item-1", "kind": "text", "text": "A reproducible shot."}],
+    }
+    try:
+        task = manager.submit_task(
+            "unused",
+            {"1:image": str(input_path)},
+            {"2:text": "A fixed prompt."},
+            None,
+            str(tmp_path / "external-output"),
+            remote_workflow_id="123456",
+            workflow_data={
+                "1": {"class_type": "LoadImage", "inputs": {"image": "source.png"}},
+                "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "original"}},
+                "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            },
+            workflow_name="manifest_api.json",
+            prompt_group=group,
+        )
+
+        task_folder = Path(task["output_dir"]) / task["id"]
+        manifest_path = task_folder / web_app.TASK_MANIFEST_FILENAME
+        prompt_group_path = task_folder / web_app.PROMPT_GROUP_SNAPSHOT_FILENAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        assert task["workflow_snapshot_path"] == str((task_folder / "workflow_api.json").resolve())
+        assert task["prompt_group_snapshot_path"] == str(prompt_group_path.resolve())
+        assert task["manifest_path"] == str(manifest_path.resolve())
+        assert manifest["inputs"] == {
+            "files": {"1:image": str(input_path)},
+            "prompts": {"2:text": "A fixed prompt."},
+            "policy": "paths-only",
+        }
+        assert manifest["workflow"]["snapshot_path"] == task["workflow_snapshot_path"]
+        assert manifest["prompt_group"]["snapshot_path"] == task["prompt_group_snapshot_path"]
+        assert not (task_folder / "inputs").exists()
+        assert {path.name for path in task_folder.iterdir()} == {
+            "workflow_api.json",
+            "prompt_group.json",
+            "manifest.json",
+        }
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_load_task_workflow_backfills_replay_paths_and_prefers_registered_workflow(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    group = {
+        "id": "task-group-legacy",
+        "name": "旧任务提示词",
+        "updated_at": 123456,
+        "items": [{"instance_id": "item-1", "kind": "text", "text": "Legacy shot."}],
+    }
+    try:
+        registered_id, _, _ = store.save_workflow(
+            "registered.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+        )
+        temporary_id, temporary_path, _ = store.save_workflow(
+            "temporary.json",
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+            register=False,
+        )
+        assert temporary_id != registered_id
+        task = {
+            "id": "task_legacy_replay",
+            "created_at": 1,
+            "workflow_path": str(temporary_path),
+            "workflow_name": "temporary.json",
+            "registered_workflow_id": registered_id,
+            "files": {},
+            "prompts": {},
+            "key_id": None,
+            "remote_workflow_id": "123456",
+            "output_dir": str(tmp_path / "external-output"),
+        }
+        store.create_task(task)
+        store.save_task_prompt_group_snapshot(task, group)
+
+        loaded = store.load_task_workflow(task["id"])
+        saved_task = loaded["task"]
+        task_folder = Path(task["output_dir"]) / task["id"]
+
+        assert loaded["workflow_id"] == registered_id
+        assert loaded["prompt_group"] == group
+        assert saved_task["workflow_snapshot_path"] == str((task_folder / "workflow_api.json").resolve())
+        assert saved_task["prompt_group_snapshot_path"] == str((task_folder / "prompt_group.json").resolve())
+        assert saved_task["manifest_path"] == str((task_folder / "manifest.json").resolve())
+        assert (task_folder / "manifest.json").is_file()
+    finally:
+        store._db.close()
+
+
 def test_submit_task_uses_optional_file_defaults_when_not_overridden(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -1532,6 +2512,8 @@ def test_personal_queue_keeps_fourth_task_until_slot_is_free(tmp_path, monkeypat
         assert next(task["queue_position"] for task in manager.public_tasks() if task["id"] == waiting[0]) == 1
 
         manager._active_by_key["key_test"] = 2
+        active = [task_id for task_id in task_ids if store.task(task_id)["status"] == "submitting"]
+        store.update_task(active[-1], status="completed", completed_at=web_app.now_ms())
         manager._dispatch_once()
 
         assert store.task(waiting[0])["status"] == "submitting"
@@ -1874,6 +2856,100 @@ def test_run_task_uses_remote_id_and_strips_web_metadata(tmp_path, monkeypatch):
         assert "__rh_meta__" not in submitted["workflow"]
         assert submitted["instance_type"] == "default"
         assert store.task(task["id"])["status"] == "completed"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_run_task_quarantines_key_after_auth_failure(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        manager._stop.set()
+        manager._wake.set()
+        manager._dispatcher.join(timeout=1)
+        key = _saved_key()
+        store.save_keys([key])
+        task = manager.submit_task(
+            "unused",
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="987654",
+            workflow_data={"1": {"class_type": "SaveImage", "inputs": {}}},
+        )
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(web_app, "RhHttpClient", lambda *args, **kwargs: FakeClient())
+        monkeypatch.setattr(web_app, "_site_urls", lambda site: ("upload", "create", "outputs"))
+        monkeypatch.setattr(
+            web_app,
+            "_submit",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RhCliError("AUTH_FAILED", "invalid api key")),
+        )
+
+        manager._run_task(task["id"], key, threading.Event())
+
+        assert store.get_key("key_test")["status"] == "error"
+        assert manager._automatic_candidates(store.keys()) == []
+        assert store.task(task["id"])["status"] == "failed"
+    finally:
+        manager.close()
+        store._db.close()
+
+
+def test_run_task_requeues_remote_queue_full_without_holding_key_slot(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        manager._stop.set()
+        manager._wake.set()
+        manager._dispatcher.join(timeout=1)
+        key = _saved_key()
+        store.save_keys([key])
+        task = manager.submit_task(
+            "unused",
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="987654",
+            workflow_data={"1": {"class_type": "SaveImage", "inputs": {}}},
+        )
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(web_app, "RhHttpClient", lambda *args, **kwargs: FakeClient())
+        monkeypatch.setattr(web_app, "_site_urls", lambda site: ("upload", "create", "outputs"))
+        monkeypatch.setattr(
+            web_app,
+            "_submit",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RhCliError("REMOTE_QUEUE_FULL", "远程队列已满")
+            ),
+        )
+
+        manager._run_task(task["id"], key, threading.Event(), automatic_dispatch=True)
+
+        requeued = store.task(task["id"])
+        assert requeued["status"] == "queued"
+        assert requeued["key_id"] is None
+        assert "重新排队" in requeued["progress"]
+        assert manager._active_by_key["key_test"] == 0
     finally:
         manager.close()
         store._db.close()

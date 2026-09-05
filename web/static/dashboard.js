@@ -132,6 +132,9 @@
     $("dashboardSubmissionsMeta").textContent = accountLabel + " · 包含成功、失败和取消的提交";
     $("dashboardProcessing").textContent = formatDuration(summary.processing_seconds);
     $("dashboardProcessingMeta").textContent = accountLabel + " · 有记录的任务处理时长总和";
+    var videoSeconds = numeric(summary.video_seconds);
+    $("dashboardVideoDuration").textContent = videoSeconds > 0 ? formatDuration(videoSeconds) : "—";
+    $("dashboardVideoDurationMeta").textContent = videoSeconds > 0 ? accountLabel + " · 可识别视频产物总时长" : "暂无可识别视频产物";
     $("dashboardSuccess").textContent = summary.submissions ? formatNumber(summary.success_rate, 1) + "%" : "—";
     $("dashboardSuccessMeta").textContent = "完成 " + String(summary.completed || 0) + " · 失败 " + String(summary.failed || 0);
     $("dashboardCompleted").textContent = String(summary.completed || 0);
@@ -155,81 +158,53 @@
     $("dashboardBalanceNote").textContent = checkedAt ? "最近查询：" + formatTimestamp(checkedAt) : "余额尚未成功查询，请到设置中刷新 API Key。";
   }
 
-  function heatCellMarkup(value, max, label) {
-    var ratio = max > 0 ? Math.min(1, numeric(value) / max) : 0;
-    var heat = (0.1 + ratio * 0.82).toFixed(2);
-    return '<span class="dashboard-heatmap-cell" style="--dashboard-heat:' + heat + '" title="' + esc(label) + '"></span>';
+  function renderResponse(data) {
+    var summary = data.summary || {};
+    var videoSeconds = numeric(summary.video_seconds);
+    var wallClockSeconds = numeric(summary.wall_clock_seconds);
+    var responseRate = numeric(summary.response_seconds_per_video_second);
+    var hasRate = videoSeconds > 0 && wallClockSeconds > 0 && responseRate > 0;
+    $("dashboardResponseRate").textContent = hasRate ? formatNumber(responseRate, 3) : "—";
+    $("dashboardWallClock").textContent = wallClockSeconds > 0 ? formatDuration(wallClockSeconds) : "—";
+    $("dashboardVideoSeconds").textContent = videoSeconds > 0 ? formatNumber(videoSeconds, 3) + " 秒" : "—";
+    $("dashboardVideoTasks").textContent = String(summary.video_task_count || 0);
+    $("dashboardResponseProcessing").textContent = formatDuration(summary.processing_seconds);
+    if (hasRate) {
+      $("dashboardResponseNote").textContent = "按 " + formatDuration(wallClockSeconds) + " 并发墙钟 ÷ " + formatNumber(videoSeconds, 3) + " 秒视频时长计算；重叠任务只计一次。";
+    } else if (videoSeconds > 0) {
+      $("dashboardResponseNote").textContent = "已识别视频时长，但当前时间范围没有可用的任务墙钟区间。";
+    } else {
+      $("dashboardResponseNote").textContent = "完成视频任务后，这里会按并发合并后的实际墙钟时间计算。";
+    }
   }
 
-  function dateKey(date) {
-    return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0");
-  }
-
-  function renderAnnualHeatmap(data) {
-    var heatmap = data.heatmap || {};
-    var daily = Array.isArray(heatmap.daily) ? heatmap.daily : [];
-    var chart = $("dashboardDailyChart");
-    if (!daily.length) {
-      chart.innerHTML = '<div class="dashboard-recent-empty"><strong>还没有可统计的数据</strong><span>提交工作流后，这里会按天保留消耗和处理记录。</span></div>';
+  function renderWorkflowScores(data) {
+    var scores = data.workflow_scores || {};
+    var items = Array.isArray(scores.items) ? scores.items : [];
+    var registeredCount = Number(scores.registered_count || 0);
+    var ratedCount = Number(scores.rated_count || 0);
+    $("dashboardWorkflowRegistryCount").textContent = registeredCount + " 个已登记";
+    $("dashboardWorkflowRatedCount").textContent = String(ratedCount);
+    if (!items.length) {
+      var emptyMessage = registeredCount
+        ? "当前范围还没有已评分的注册工作流"
+        : "还没有注册工作流";
+      var emptyHint = registeredCount
+        ? "去成片页为产物评分后，这里会按总得分显示前 5 个工作流。"
+        : "先在工作流页面保存工作流，之后即可在成片评分后查看排行。";
+      $("dashboardWorkflowScoreNote").textContent = emptyHint;
+      $("dashboardTopWorkflows").innerHTML = '<div class="dashboard-workflow-score-empty"><strong>' + esc(emptyMessage) + '</strong><span>' + esc(emptyHint) + '</span></div>';
       return;
     }
-    var maxCoins = Math.max.apply(null, daily.map(function (item) { return numeric(item.coins); }).concat([0]));
-    var maxRuns = Math.max.apply(null, daily.map(function (item) { return numeric(item.submissions); }).concat([0]));
-    var maxTime = Math.max.apply(null, daily.map(function (item) { return numeric(item.processing_seconds); }).concat([0]));
-    function activityScore(item) {
-      var coinRatio = maxCoins > 0 ? numeric(item.coins) / maxCoins : 0;
-      var runRatio = maxRuns > 0 ? numeric(item.submissions) / maxRuns : 0;
-      var timeRatio = maxTime > 0 ? numeric(item.processing_seconds) / maxTime : 0;
-      return Math.min(1, (coinRatio + runRatio + timeRatio) / 3);
-    }
-    var firstDate = new Date(numeric(heatmap.start));
-    var lastDate = new Date(Math.max(numeric(heatmap.start), numeric(heatmap.end) - 86400000));
-    if (isNaN(firstDate.getTime()) || isNaN(lastDate.getTime())) return;
-    var calendarStart = new Date(firstDate);
-    calendarStart.setDate(calendarStart.getDate() - calendarStart.getDay());
-    var calendarEnd = new Date(lastDate);
-    calendarEnd.setDate(calendarEnd.getDate() + (6 - calendarEnd.getDay()));
-    var weekCount = Math.floor((calendarEnd - calendarStart) / 86400000 / 7) + 1;
-    var compactLayout = window.matchMedia && window.matchMedia("(max-width: 650px)").matches;
-    var rowHeadWidth = compactLayout ? 76 : 98;
-    var rowGap = compactLayout ? 9 : 14;
-    var calendarChrome = 33;
-    var maxVisibleWeeks = Math.max(1, Math.floor((chart.clientWidth - rowHeadWidth - rowGap - calendarChrome + 4) / 14));
-    var visibleWeekCount = Math.min(weekCount, maxVisibleWeeks);
-    var visibleCalendarStart = new Date(calendarEnd);
-    visibleCalendarStart.setDate(visibleCalendarStart.getDate() - (visibleWeekCount * 7 - 1));
-    var gridWidth = Math.max(10, visibleWeekCount * 14 - 4);
-    var gridStyle = "--dashboard-weeks:" + visibleWeekCount + ";--dashboard-grid-width:" + gridWidth + "px";
-    var dailyByDate = {};
-    daily.forEach(function (item) { dailyByDate[item.date] = item; });
-    var monthLabels = [];
-    for (var monthOffset = 0; monthOffset < visibleWeekCount * 7; monthOffset += 1) {
-      var monthDate = new Date(visibleCalendarStart);
-      monthDate.setDate(visibleCalendarStart.getDate() + monthOffset);
-      if (monthOffset !== 0 && monthDate.getDate() !== 1) continue;
-      var monthWeekIndex = Math.floor(monthOffset / 7);
-      monthLabels.push('<span style="grid-column:' + (monthWeekIndex + 1) + '">' + esc(monthDate.toLocaleDateString("zh-CN", { month: "short" })) + '</span>');
-    }
-    var monthMarkup = '<div class="dashboard-heatmap-months" style="' + gridStyle + '">' + monthLabels.join("") + '</div>';
-    var weekdayMarkup = '<div class="dashboard-heatmap-weekdays"><span>日</span><span></span><span>二</span><span></span><span>四</span><span></span><span>六</span></div>';
-    var cells = [];
-    for (var week = 0; week < visibleWeekCount; week += 1) {
-      for (var weekday = 0; weekday < 7; weekday += 1) {
-        var cellDate = new Date(visibleCalendarStart);
-        cellDate.setDate(visibleCalendarStart.getDate() + week * 7 + weekday);
-        var item = dailyByDate[dateKey(cellDate)];
-        if (!item) {
-          cells.push('<span class="dashboard-heatmap-cell is-empty" aria-hidden="true"></span>');
-          continue;
-        }
-        var score = activityScore(item);
-        var label = item.label + " · 综合活跃度 " + formatNumber(score * 100, 0) + "% · RH 币 " + formatNumber(item.coins, 4) + " · 提交 " + formatNumber(item.submissions, 0) + " 次 · 处理 " + formatDuration(item.processing_seconds);
-        cells.push(heatCellMarkup(score, 1, label));
-      }
-    }
-    var activeDays = daily.filter(function (item) { return numeric(item.coins) || numeric(item.submissions) || numeric(item.processing_seconds); }).length;
-    var rowMarkup = '<div class="dashboard-heatmap-row combined"><div class="dashboard-heatmap-row-head"><span class="dashboard-heatmap-row-label">综合活动</span><strong class="dashboard-heatmap-row-total">' + esc(activeDays + " 天") + '</strong></div><div class="dashboard-heatmap-calendar" style="' + gridStyle + '">' + weekdayMarkup + '<div class="dashboard-heatmap-grid" style="' + gridStyle + '">' + cells.join("") + '</div></div></div>';
-    chart.innerHTML = '<div class="dashboard-annual-heatmap">' + monthMarkup + rowMarkup + '</div>';
+    $("dashboardWorkflowScoreNote").textContent = "按当前时间范围和账号筛选；总得分 = 成片页可见产物的已评分星级之和。";
+    $("dashboardTopWorkflows").innerHTML = items.map(function (item, index) {
+      var ratedOutputs = Number(item.rated_output_count || 0);
+      var runCount = Number(item.run_count || 0);
+      var average = formatNumber(item.average_rating, 1);
+      var detail = ratedOutputs + " 个已评分成片 · 平均 " + average + " 星";
+      if (runCount > 0) detail += " · " + runCount + " 次运行";
+      return '<article class="dashboard-workflow-score-item"><span class="dashboard-workflow-score-rank" aria-label="第 ' + (index + 1) + ' 名">' + String(index + 1).padStart(2, "0") + '</span><div class="dashboard-workflow-score-identity"><strong title="' + esc(item.name) + '">' + esc(item.name) + '</strong><span>' + esc(detail) + '</span></div><div class="dashboard-workflow-score-value"><strong>' + esc(item.total_score) + '</strong><small>总得分</small></div></article>';
+    }).join("");
   }
 
   function recentCost(record) {
@@ -256,8 +231,9 @@
     renderAccountOptions(data);
     renderRangeState();
     renderSummary(data);
+    renderResponse(data);
     renderBalances(data);
-    renderAnnualHeatmap(data);
+    renderWorkflowScores(data);
     renderRecent(data);
     $("dashboardSourceLabel").textContent = data.source && data.source.label ? data.source.label : "独立用量记录";
     $("dashboardUpdated").textContent = "更新于 " + formatTimestamp(Date.now());
@@ -298,7 +274,8 @@
   }
 
   function bindEvents() {
-    $("themeToggle").addEventListener("click", function () {
+    var dashboardThemeToggle = $("themeToggle");
+    if (dashboardThemeToggle) dashboardThemeToggle.addEventListener("click", function () {
       var nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
       document.documentElement.dataset.theme = nextTheme;
       try { localStorage.setItem("rh-workflow-theme", nextTheme); } catch (error) {}
@@ -318,15 +295,15 @@
       loadDashboard(false, true, false);
     });
     $("refreshDashboard").addEventListener("click", function () { loadDashboard(true, true, true); });
-    window.addEventListener("resize", function () {
-      if (state.data) renderAnnualHeatmap(state.data);
-      updateRangeIndicator();
-    });
+    window.addEventListener("resize", function () { updateRangeIndicator(); });
   }
 
-  document.addEventListener("DOMContentLoaded", function () {
+  function initializeDashboard() {
     bindEvents();
     renderRangeState();
     loadDashboard(false, false, false);
-  });
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initializeDashboard);
+  else initializeDashboard();
 }());

@@ -4,23 +4,29 @@ import base64
 import binascii
 import json
 import mimetypes
+import os
+import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 import webbrowser
+import zipfile
 from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from rh_cli.errors import RhCliError
 
-from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_dashboard, public_key, public_outputs, public_state, safe_name
+from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_dashboard, public_key, public_output_media, public_outputs, public_state, safe_name, workflow_input_catalog
 from .action_store import ActionStore
 from .prompt_store import PromptStore
+from .prompt_writer import AliyunPromptWriter
 from .reference_store import ReferenceStore
 from .translation import AliyunTranslationClient
 from .vision import AliyunVisionClient
@@ -67,6 +73,99 @@ PROMPT_MEDIA_MIME_EXTENSIONS = {
     "video/x-ms-wmv": ".wmv",
 }
 PROMPT_MEDIA_LIMIT = 100 * 1024 * 1024
+
+
+def open_local_directory(path: Path) -> bool:
+    """Open a local directory with the operating system's file manager."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        elif os.name == "nt":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        else:
+            opener = shutil.which("xdg-open")
+            if not opener:
+                return False
+            subprocess.Popen(
+                [opener, str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except OSError:
+        return False
+    return True
+
+FOCUS_PAGE_DEFINITIONS = (
+    ("workflows", "工作流", "workflows.html", "workflows.js"),
+    ("prompt", "提示词工坊", "prompt.html", "prompt.js"),
+    ("submit", "任务提交", "index.html", "app.js"),
+    ("outputs", "成片", "outputs.html", "outputs.js"),
+    ("dashboard", "仪表盘", "dashboard.html", "dashboard.js"),
+    ("settings", "设置", "settings.html", "settings.js"),
+)
+
+
+def _focus_remove_element(source: str, *, element_id: str | None = None, class_name: str | None = None) -> str:
+    """Remove one balanced HTML element while composing the focus-mode document."""
+    if element_id:
+        target = re.escape(element_id)
+        pattern = rf"<(?P<tag>[A-Za-z][\w:-]*)\b(?=[^>]*\bid=[\"']{target}[\"'])[^>]*>"
+    elif class_name:
+        target = re.escape(class_name)
+        pattern = rf"<(?P<tag>[A-Za-z][\w:-]*)\b(?=[^>]*\bclass=[\"'][^\"']*\b{target}\b[^\"']*[\"'])[^>]*>"
+    else:
+        return source
+    match = re.search(pattern, source, flags=re.IGNORECASE)
+    if not match:
+        return source
+    tag = match.group("tag").lower()
+    token_pattern = re.compile(rf"</?{re.escape(tag)}\b[^>]*>", flags=re.IGNORECASE)
+    depth = 0
+    end = None
+    for token in token_pattern.finditer(source, match.start()):
+        if token.group(0).startswith("</"):
+            depth -= 1
+            if depth == 0:
+                end = token.end()
+                break
+        elif not token.group(0).rstrip().endswith("/>"):
+            depth += 1
+    if end is None:
+        return source
+    return source[:match.start()] + source[end:]
+
+
+def focus_page_fragment(filename: str) -> str:
+    """Extract a page body without its standalone shell/header/scripts for focus mode."""
+    source = (STATIC_ROOT / filename).read_text(encoding="utf-8")
+    body_match = re.search(r"<body\b[^>]*>(?P<body>.*?)</body\s*>", source, flags=re.IGNORECASE | re.DOTALL)
+    if not body_match:
+        raise ValueError(f"页面缺少 body：{filename}")
+    fragment = body_match.group("body")
+    fragment = _focus_remove_element(fragment, class_name="topbar")
+    fragment = _focus_remove_element(fragment, class_name="top-nav")
+    fragment = re.sub(r"<script\b[^>]*>.*?</script\s*>", "", fragment, flags=re.IGNORECASE | re.DOTALL)
+    if filename == "index.html":
+        # Settings and workflow configuration are supplied by their dedicated page/modal below.
+        fragment = _focus_remove_element(fragment, element_id="settingsModal")
+        fragment = _focus_remove_element(fragment, element_id="workflowConfigModal")
+    return fragment.strip()
+
+
+def focus_page_fragments() -> list[dict[str, str]]:
+    return [
+        {
+            "id": page_id,
+            "title": title,
+            "script": script,
+            "html": focus_page_fragment(filename),
+        }
+        for page_id, title, filename, script in FOCUS_PAGE_DEFINITIONS
+    ]
 
 
 def prompt_image_data_url(path_value: str, roots: list[Path]) -> str:
@@ -330,7 +429,7 @@ def prepare_prompt_resource_body(
     root_value: str | Path,
     current: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Copy browser-selected resource media into ref and return Markdown-ready paths."""
+    """Copy browser-selected resource media into ref and return JSON-ready paths."""
     payload = dict(body)
     media = body.get("media")
     if not isinstance(media, list) or not media:
@@ -343,7 +442,7 @@ def prepare_prompt_resource_body(
     decoded: dict[str, tuple[bytes, str]] = {}
     for item in media:
         role = str(item.get("role") or "").strip().lower() if isinstance(item, dict) else ""
-        allowed_roles = {"color", "depth"} if kind == "action" else {"audio"} if kind == "audio" else {"image"}
+        allowed_roles = {"color", "depth", "skeleton"} if kind == "action" else {"audio"} if kind == "audio" else {"image"}
         if role not in allowed_roles:
             raise RhCliError("INVALID_PROMPT_MEDIA", "未知的素材槽位。")
         if role in decoded:
@@ -353,26 +452,36 @@ def prepare_prompt_resource_body(
     if kind == "action":
         color_current = str(current.get("color_image_path") or current.get("image_path") or "").strip()
         depth_current = str(current.get("depth_image_path") or "").strip()
+        skeleton_current = str(current.get("skeleton_image_path") or "").strip()
         color_item = decoded.get("color")
         depth_item = decoded.get("depth")
-        pair_source = color_current or depth_current
+        skeleton_item = decoded.get("skeleton")
+        pair_source = color_current or depth_current or skeleton_current
         if not pair_source and color_item:
             pair_source = color_item[1]
         if not pair_source and depth_item:
             pair_source = depth_item[1]
+        if not pair_source and skeleton_item:
+            pair_source = skeleton_item[1]
         pair_stem = Path(pair_source).stem
-        if pair_stem.endswith("_depth"):
-            pair_stem = pair_stem[:-6]
+        for marker in ("_depth", "_skeleton"):
+            if pair_stem.endswith(marker):
+                pair_stem = pair_stem[: -len(marker)]
+                break
         pair_stem = safe_name(pair_stem, "action")
         color_dir = root / "pose" / "color"
         depth_dir = root / "pose" / "depth"
-        current_paths = {color_current, depth_current}
-        if not color_current and not depth_current:
+        current_paths = {color_current, depth_current, skeleton_current}
+        if not color_current and not depth_current and not skeleton_current:
             counter = 2
             original_stem = pair_stem
             while any(
                 candidate.is_file() and _prompt_relative(root, candidate) not in current_paths
-                for candidate in list(color_dir.glob(pair_stem + ".*")) + list(depth_dir.glob(pair_stem + "_depth.*"))
+                for candidate in (
+                    list(color_dir.glob(pair_stem + ".*"))
+                    + list(depth_dir.glob(pair_stem + "_depth.*"))
+                    + list((root / "pose" / "skeleton").glob(pair_stem + "_skeleton.*"))
+                )
             ):
                 pair_stem = f"{original_stem}-{counter}"
                 counter += 1
@@ -386,6 +495,11 @@ def prepare_prompt_resource_body(
             depth_suffix = Path(depth_current).suffix or Path(depth_item[1]).suffix
             payload["depth_image_path"] = _write_prompt_media(
                 root, depth_dir, pair_stem + "_depth" + depth_suffix, depth_item[0], replace_relative=depth_current,
+            )
+        if skeleton_item:
+            skeleton_suffix = Path(skeleton_current).suffix or Path(skeleton_item[1]).suffix
+            payload["skeleton_image_path"] = _write_prompt_media(
+                root, root / "pose" / "skeleton", pair_stem + "_skeleton" + skeleton_suffix, skeleton_item[0], replace_relative=skeleton_current,
             )
     else:
         media_role = "audio" if kind == "audio" else "image"
@@ -418,6 +532,33 @@ def _depth_runtime_paths(root: Path) -> tuple[Path, Path]:
     raise RhCliError(
         "DEPTH_GENERATOR_UNAVAILABLE",
         "找不到 Depth Anything 运行环境，请确认 VideoMake/tools/depth_anything_macos.py 和 .runtime/depth_anything_v2_small_f16/venv 存在。",
+    )
+
+
+def _skeleton_runtime_paths(root: Path) -> tuple[Path, Path, Path]:
+    """Locate the VideoMake DWPose runtime beside the ref root."""
+    project_roots = []
+    if root.name == "ref":
+        project_roots.append(root.parent)
+    project_roots.append(Path("/Users/apple/Documents/VideoMake"))
+    seen: set[Path] = set()
+    for project_root in project_roots:
+        project_root = project_root.resolve()
+        if project_root in seen:
+            continue
+        seen.add(project_root)
+        script = project_root / "tools" / "pose_skeleton_macos.py"
+        runtime = project_root / ".runtime" / "pose_dwpose"
+        python = runtime / "venv" / "bin" / "python"
+        model = runtime / "checkpoints" / "dw-ll_ucoco_384.onnx"
+        detector = runtime / "checkpoints" / "yolox_l.onnx"
+        if script.is_file() and python.is_file() and model.is_file() and detector.is_file():
+            return python, script, model
+    raise RhCliError(
+        "SKELETON_GENERATOR_UNAVAILABLE",
+        "找不到人体骨骼图运行环境，请确认 VideoMake/tools/pose_skeleton_macos.py、"
+        ".runtime/pose_dwpose/venv 和 checkpoints/dw-ll_ucoco_384.onnx、"
+        "checkpoints/yolox_l.onnx 存在。",
     )
 
 
@@ -471,6 +612,65 @@ def generate_prompt_depth(body: dict[str, object], root_value: str | Path) -> di
         }
     except subprocess.TimeoutExpired as exc:
         raise RhCliError("DEPTH_GENERATION_TIMEOUT", "深度图生成超时，请稍后重试。") from exc
+    finally:
+        try:
+            for path in temporary_dir.iterdir():
+                path.unlink(missing_ok=True)
+            temporary_dir.rmdir()
+        except OSError:
+            pass
+
+
+def generate_prompt_skeleton(body: dict[str, object], root_value: str | Path) -> dict[str, object]:
+    """Generate a temporary black-background skeleton PNG from one action image."""
+    root = Path(root_value).expanduser().resolve()
+    if not root.is_dir():
+        raise RhCliError("MEDIA_LIBRARY_NOT_FOUND", f"媒体库根目录不存在：{root}")
+    source_path = str(body.get("source_path") or "").strip()
+    temporary_parent = DATA_ROOT / "prompt"
+    temporary_parent.mkdir(parents=True, exist_ok=True)
+    temporary_dir = Path(tempfile.mkdtemp(prefix="skeleton-generation-", dir=str(temporary_parent)))
+    temporary_source: Path | None = None
+    try:
+        if source_path:
+            relative = Path(source_path)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RhCliError("INVALID_PROMPT_MEDIA", "原图路径必须位于媒体库根目录内。")
+            source = (root / relative).resolve()
+            if root not in source.parents or not source.is_file():
+                raise RhCliError("FILE_NOT_FOUND", "动作原图不存在，无法生成骨骼图。")
+            temporary_source = temporary_dir / source.name
+            temporary_source.write_bytes(source.read_bytes())
+            source = temporary_source
+        else:
+            source_item = body.get("source")
+            raw, filename = _decode_prompt_media(source_item, "action", "color")
+            temporary_source = temporary_dir / filename
+            temporary_source.write_bytes(raw)
+            source = temporary_source
+
+        output = temporary_dir / f"{source.stem}_skeleton.png"
+        python, script, model = _skeleton_runtime_paths(root)
+        completed = subprocess.run(
+            [str(python), str(script), str(source), "-o", str(output), "--model", str(model)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        if completed.returncode != 0 or not output.is_file():
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            suffix = f"：{detail[-1][:240]}" if detail else "。"
+            raise RhCliError("SKELETON_GENERATION_FAILED", "骨骼图生成失败" + suffix)
+        encoded = base64.b64encode(output.read_bytes()).decode("ascii")
+        return {
+            "name": output.name,
+            "mime": "image/png",
+            "data": encoded,
+            "data_url": "data:image/png;base64," + encoded,
+        }
+    except subprocess.TimeoutExpired as exc:
+        raise RhCliError("SKELETON_GENERATION_TIMEOUT", "骨骼图生成超时，请稍后重试。") from exc
     finally:
         try:
             for path in temporary_dir.iterdir():
@@ -564,6 +764,10 @@ class LocalHandler(BaseHTTPRequestHandler):
             store, manager = self.state
             self._json(200, public_outputs(store, manager))
             return
+        if path == "/api/outputs/export/case":
+            _, manager = self.state
+            self._serve_case_outputs_archive(manager)
+            return
         if path == "/api/dashboard":
             store, manager = self.state
             try:
@@ -588,9 +792,19 @@ class LocalHandler(BaseHTTPRequestHandler):
             logs.sort(key=lambda item: int(item.get("at") or 0))
             self._json(200, {"logs": logs[-limit:]})
             return
+        if path == "/api/focus/fragments":
+            try:
+                self._json(200, {"pages": focus_page_fragments()})
+            except (OSError, ValueError) as exc:
+                self._json(500, {"code": "FOCUS_FRAGMENT_ERROR", "message": str(exc)})
+            return
         if path == "/api/workflows":
             store, _ = self.state
             self._json(200, {"workflows": store.workflows()})
+            return
+        if path == "/api/workflow-folders":
+            store, _ = self.state
+            self._json(200, {"folders": store.workflow_folders()})
             return
         if path.startswith("/api/workflows/") and path != "/api/workflows/analyze":
             workflow_id = path.rsplit("/", 1)[-1]
@@ -603,9 +817,16 @@ class LocalHandler(BaseHTTPRequestHandler):
         if path == "/api/prompt/state":
             self._json(200, self.server.prompt_store.snapshot())  # type: ignore[attr-defined]
             return
+        if path == "/api/prompt/groups":
+            prompt_store = self.server.prompt_store  # type: ignore[attr-defined]
+            self._json(200, {"groups": prompt_store.groups(), "folders": prompt_store.prompt_group_folders()})
+            return
+        if path == "/api/prompt/group-folders":
+            self._json(200, {"folders": self.server.prompt_store.prompt_group_folders()})  # type: ignore[attr-defined]
+            return
         if path == "/api/prompt/actions":
             action_store = self.server.action_store  # type: ignore[attr-defined]
-            # The configured pose Markdown file is the source of truth. A hash check makes edits visible
+            # The configured pose JSON file is the source of truth; refresh reads it directly.
             # while the app is open without requiring a server restart.
             action_store.refresh()
             self._json(200, {"actions": action_store.public_actions(), "source_status": action_store.source_status()})
@@ -635,11 +856,17 @@ class LocalHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/prompt/actions/") and path.endswith("/depth-path"):
             self._serve_action_path(path, "depth")
             return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/skeleton-path"):
+            self._serve_action_path(path, "skeleton")
+            return
         if path.startswith("/api/prompt/actions/") and path.endswith("/image-path"):
             self._serve_action_path(path, "color")
             return
         if path.startswith("/api/prompt/actions/") and path.endswith("/depth"):
             self._serve_action_image(path, "depth")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/skeleton"):
+            self._serve_action_image(path, "skeleton")
             return
         if path.startswith("/api/prompt/actions/") and path.endswith("/image"):
             self._serve_action_image(path, "color")
@@ -722,6 +949,15 @@ class LocalHandler(BaseHTTPRequestHandler):
                 result = AliyunTranslationClient(access_key_id, access_key_secret).translate(str(body.get("text") or ""))
                 self._json(200, result)
                 return
+            if path == "/api/prompt/ai-prompt":
+                body = self._body()
+                store, _ = self.state
+                result = AliyunPromptWriter(store.aliyun_vision_api_key()).write(
+                    str(body.get("context") or ""),
+                    str(body.get("question") or ""),
+                )
+                self._json(200, result)
+                return
             if path == "/api/prompt/vision":
                 body = self._body()
                 image = str(body.get("image") or "").strip()
@@ -751,6 +987,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                 action_store = self.server.action_store  # type: ignore[attr-defined]
                 self._json(200, generate_prompt_depth(self._body(), action_store.source_root))
                 return
+            if path == "/api/prompt/actions/generate-skeleton":
+                action_store = self.server.action_store  # type: ignore[attr-defined]
+                self._json(200, generate_prompt_skeleton(self._body(), action_store.source_root))
+                return
             if path == "/api/prompt/actions":
                 action_store = self.server.action_store  # type: ignore[attr-defined]
                 body = self._body()
@@ -778,23 +1018,40 @@ class LocalHandler(BaseHTTPRequestHandler):
                 _, manager = self.state
                 self._json(200, manager.upload_task_to_telegram(task_id, self._body().get("output_index")))
                 return
+            if path.startswith("/api/tasks/") and path.endswith("/open-folder"):
+                parts = path.split("/")
+                if len(parts) != 5 or parts[3] == "":
+                    self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
+                    return
+                task_id = parts[3]
+                store, _ = self.state
+                task = store.task(task_id)
+                if not task:
+                    raise RhCliError("TASK_NOT_FOUND", "找不到任务")
+                folder = LocalStore.task_output_path(task)
+                if not folder.is_dir():
+                    raise RhCliError("OUTPUT_FOLDER_NOT_FOUND", "媒体所在文件夹不存在")
+                if not open_local_directory(folder):
+                    raise RhCliError("OPEN_FOLDER_UNAVAILABLE", "当前系统无法打开媒体所在文件夹")
+                self._json(200, {"opened": True, "message": "已打开媒体所在文件夹"})
+                return
             if path == "/api/dashboard/refresh-balances":
                 _, manager = self.state
                 self._json(200, manager.refresh_balances())
                 return
             if path == "/api/pick-action-resources":
-                selected = pick_local_file_on_macos("选择动作库 Markdown 文件")
+                selected = pick_local_file_on_macos("选择动作库 JSON 文件")
                 self._json(200, {"path": str(selected), "name": selected.name})
                 return
             if path == "/api/pick-prompt-resource":
                 body = self._body()
                 labels = {
-                    "library": "基础积木 Markdown 文件",
-                    "action": "动作库 Markdown 文件",
-                    "character": "人物库 Markdown 文件",
-                    "audio": "音频库 Markdown 文件",
-                    "background": "背景库 Markdown 文件",
-                    "clothes": "服装库 Markdown 文件",
+                    "library": "基础积木 JSON 文件",
+                    "action": "动作库 JSON 文件",
+                    "character": "人物库 JSON 文件",
+                    "audio": "音频库 JSON 文件",
+                    "background": "背景库 JSON 文件",
+                    "clothes": "服装库 JSON 文件",
                 }
                 kind = str(body.get("kind") or "").strip()
                 if kind not in labels:
@@ -816,6 +1073,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if not isinstance(content, str):
                     raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
                 store, _ = self.state
+                prompt_group = (
+                    self.server.prompt_store.task_group_snapshot()  # type: ignore[attr-defined]
+                    if body.get("include_current_prompt_group")
+                    else self.server.prompt_store.get_group(str(body.get("prompt_group_id") or ""))  # type: ignore[attr-defined]
+                )
                 workflow_id, _, _ = store.save_workflow(
                     str(body.get("filename") or "workflow.json"),
                     content,
@@ -823,8 +1085,14 @@ class LocalHandler(BaseHTTPRequestHandler):
                     remote_workflow_id=str(body.get("remote_workflow_id") or ""),
                     source_dir=str(body.get("source_dir") or ""),
                     input_config=body.get("input_config") if isinstance(body.get("input_config"), dict) else None,
+                    prompt_group=prompt_group,
                 )
                 self._json(201, store.workflow_detail(workflow_id))
+                return
+            if path == "/api/workflow-folders":
+                store, _ = self.state
+                folder = store.create_workflow_folder(str(self._body().get("name") or ""))
+                self._json(201, {"folder": folder})
                 return
             if path == "/api/workflows/analyze":
                 body = self._body()
@@ -841,6 +1109,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     register=False,
                 )
                 saved_workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                analysis["input_catalog"] = workflow_input_catalog(saved_workflow, analysis)
                 saved_metadata = saved_workflow.get("__rh_meta__") if isinstance(saved_workflow, dict) else {}
                 saved_metadata = saved_metadata if isinstance(saved_metadata, dict) else {}
                 self._json(
@@ -868,9 +1137,16 @@ class LocalHandler(BaseHTTPRequestHandler):
             if path == "/api/prompt/groups":
                 body = self._body()
                 group = self.server.prompt_store.save_group(  # type: ignore[attr-defined]
-                    str(body.get("name") or ""), body.get("items"), str(body.get("id") or "") or None
+                    str(body.get("name") or ""),
+                    body.get("items"),
+                    str(body.get("id") or "") or None,
+                    body.get("folder_id") if "folder_id" in body else None,
                 )
                 self._json(200, {"group": group})
+                return
+            if path == "/api/prompt/group-folders":
+                folder = self.server.prompt_store.create_prompt_group_folder(str(self._body().get("name") or ""))  # type: ignore[attr-defined]
+                self._json(201, {"folder": folder})
                 return
             if path == "/api/keys":
                 body = self._body()
@@ -897,7 +1173,18 @@ class LocalHandler(BaseHTTPRequestHandler):
             if path == "/api/tasks":
                 body = self._body()
                 _, manager = self.state
-                prompt_group = self.server.prompt_store.task_group_snapshot()  # type: ignore[attr-defined]
+                prompt_store = self.server.prompt_store  # type: ignore[attr-defined]
+                if "prompt_group" in body:
+                    prompt_group = body.get("prompt_group")
+                    if not isinstance(prompt_group, dict):
+                        raise RhCliError("INVALID_PROMPT_GROUP", "任务提交的 prompt_group 必须是对象。")
+                elif str(body.get("prompt_group_id") or "").strip():
+                    prompt_group_id = str(body.get("prompt_group_id") or "").strip()
+                    prompt_group = prompt_store.get_group(prompt_group_id)
+                    if not prompt_group:
+                        raise RhCliError("PROMPT_GROUP_NOT_FOUND", f"找不到提示词组：{prompt_group_id}")
+                else:
+                    prompt_group = prompt_store.task_group_snapshot()
                 bypassed_nodes = body.get("bypassed_nodes")
                 if not isinstance(bypassed_nodes, (list, dict)):
                     bypassed_nodes = body.get("bypassed_inputs") if isinstance(body.get("bypassed_inputs"), (list, dict)) else None
@@ -933,18 +1220,44 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:
         path = unquote(urlparse(self.path).path)
         try:
+            if path.startswith("/api/prompt/library/") and path.endswith("/rating"):
+                block_id = path.split("/")[4]
+                block = self.server.prompt_store.update_block_rating(block_id, self._body().get("rating"))  # type: ignore[attr-defined]
+                self._json(200, {"block": block})
+                return
+            if path.startswith("/api/prompt/actions/") and path.endswith("/rating"):
+                action_id = path.split("/")[4]
+                action_store = self.server.action_store  # type: ignore[attr-defined]
+                action_store.refresh()
+                action = action_store.update_action_rating(action_id, self._body().get("rating"))
+                public_action = next(item for item in action_store.public_actions() if item["id"] == action["id"])
+                self._json(200, {"action": public_action})
+                return
+            if path.startswith("/api/prompt/references/") and path.endswith("/rating"):
+                reference_id = path.split("/")[4]
+                reference_store = self.server.reference_store  # type: ignore[attr-defined]
+                reference_store.refresh()
+                reference = reference_store.update_reference_rating(reference_id, self._body().get("rating"))
+                public_reference = next(item for item in reference_store.public_references() if item["id"] == reference["id"])
+                self._json(200, {"reference": public_reference})
+                return
             if path.startswith("/api/tasks/") and "/outputs/" in path:
                 parts = path.split("/")
                 if len(parts) != 6 or parts[4] != "outputs":
                     self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
                     return
                 task_id = parts[3]
+                body = self._body()
                 try:
                     output_index = int(parts[5])
                 except ValueError as exc:
-                    raise RhCliError("INVALID_OUTPUT_RATING", "产物索引无效。") from exc
+                    error_code = "INVALID_OUTPUT_TAGS" if "tags" in body else "INVALID_OUTPUT_RATING"
+                    raise RhCliError(error_code, "产物索引无效。") from exc
                 store, _ = self.state
-                output = store.update_output_rating(task_id, output_index, self._body().get("rating"))
+                if "tags" in body:
+                    output = store.update_output_tags(task_id, output_index, body.get("tags"))
+                else:
+                    output = store.update_output_rating(task_id, output_index, body.get("rating"))
                 self._json(200, {"output": output})
                 return
             if path == "/api/settings":
@@ -955,6 +1268,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     "douyin_cookie_path": store.douyin_cookie_path(),
                     "personal_capacity": store.personal_capacity(),
                     "api_key_strategy": store.api_key_strategy(),
+                    "pose_media_import_type": store.pose_media_import_type(),
                     "current_account_id": store.current_account_id(),
                     "prompt_library_path": str(self.server.prompt_store.library_path),  # type: ignore[attr-defined]
                     "action_resources_path": str(self.server.action_store.source_path),  # type: ignore[attr-defined]
@@ -977,6 +1291,8 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if "api_key_strategy" in body:
                     result["api_key_strategy"] = store.set_api_key_strategy(body.get("api_key_strategy"))
                     manager._wake.set()
+                if "pose_media_import_type" in body:
+                    result["pose_media_import_type"] = store.set_pose_media_import_type(body.get("pose_media_import_type"))
                 if "prompt_library_path" in body:
                     prompt_path = store.set_prompt_library_path(str(body.get("prompt_library_path") or ""))
                     self.server.prompt_store.set_library_path(prompt_path)  # type: ignore[attr-defined]
@@ -985,6 +1301,9 @@ class LocalHandler(BaseHTTPRequestHandler):
                     media_root = store.set_media_library_root(str(body.get("media_library_root") or ""))
                     self.server.action_store.set_source_root(media_root)  # type: ignore[attr-defined]
                     self.server.reference_store.set_source_root(media_root)  # type: ignore[attr-defined]
+                    indexed_library_path = store.prompt_library_path()
+                    if Path(indexed_library_path).is_file():
+                        self.server.prompt_store.set_library_path(indexed_library_path)  # type: ignore[attr-defined]
                     result["media_library_root"] = media_root
                     result["action_resources_path"] = str(self.server.action_store.source_path)  # type: ignore[attr-defined]
                     result["reference_resources_paths"] = self.server.reference_store.source_paths()  # type: ignore[attr-defined]
@@ -1011,17 +1330,41 @@ class LocalHandler(BaseHTTPRequestHandler):
                         str(body.get("telegram_chat_id") or ""),
                         body.get("telegram_enabled"),
                     )
-                if any(key in body for key in ("telegram_inbound_workflow_id", "telegram_inbound_enabled")):
+                if any(key in body for key in ("telegram_inbound_workflow_id", "telegram_inbound_folder_id", "telegram_inbound_mode", "telegram_inbound_enabled")):
                     result["telegram"] = store.set_telegram_inbound_settings(
                         str(body.get("telegram_inbound_workflow_id") or ""),
                         body.get("telegram_inbound_enabled"),
+                        mode=body.get("telegram_inbound_mode"),
+                        folder_id=str(body.get("telegram_inbound_folder_id") or ""),
                     )
                 self._json(200, result)
+                return
+            if path.startswith("/api/workflow-folders/"):
+                folder_id = path.rsplit("/", 1)[-1]
+                store, _ = self.state
+                folder = store.rename_workflow_folder(folder_id, str(self._body().get("name") or ""))
+                self._json(200, {"folder": folder})
+                return
+            if path.startswith("/api/prompt/group-folders/"):
+                folder_id = path.rsplit("/", 1)[-1]
+                folder = self.server.prompt_store.rename_prompt_group_folder(  # type: ignore[attr-defined]
+                    folder_id, str(self._body().get("name") or "")
+                )
+                self._json(200, {"folder": folder})
                 return
             if path.startswith("/api/workflows/"):
                 workflow_id = path.rsplit("/", 1)[-1]
                 store, _ = self.state
-                self._json(200, {"workflow": store.update_workflow(workflow_id, self._body())})
+                changes = self._body()
+                if "prompt_group_id" in changes:
+                    changes["prompt_group"] = self.server.prompt_store.get_group(  # type: ignore[attr-defined]
+                        str(changes.get("prompt_group_id") or "")
+                    )
+                if "name" in changes and set(changes).issubset({"name"}):
+                    workflow = store.rename_workflow(workflow_id, str(changes.get("name") or ""))
+                else:
+                    workflow = store.update_workflow(workflow_id, changes)
+                self._json(200, {"workflow": workflow})
                 return
             if path.startswith("/api/accounts/"):
                 account_id = path.rsplit("/", 1)[-1]
@@ -1100,6 +1443,17 @@ class LocalHandler(BaseHTTPRequestHandler):
                 store.delete_workflow(workflow_id)
                 self._json(200, {"ok": True})
                 return
+            if path.startswith("/api/workflow-folders/"):
+                folder_id = path.rsplit("/", 1)[-1]
+                store, _ = self.state
+                store.delete_workflow_folder(folder_id)
+                self._json(200, {"ok": True})
+                return
+            if path.startswith("/api/prompt/group-folders/"):
+                folder_id = path.rsplit("/", 1)[-1]
+                self.server.prompt_store.delete_prompt_group_folder(folder_id)  # type: ignore[attr-defined]
+                self._json(200, {"ok": True})
+                return
             if path.startswith("/api/prompt/groups/"):
                 group_id = path.rsplit("/", 1)[-1]
                 self.server.prompt_store.delete_group(group_id)  # type: ignore[attr-defined]
@@ -1151,6 +1505,49 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
 
         self._serve_file_with_ranges(file_path, "OUTPUT_NOT_FOUND", "产物不存在")
+
+    def _serve_case_outputs_archive(self, manager: TaskManager) -> None:
+        media = public_output_media(manager)
+        if not media:
+            self._json(404, {"code": "NO_CASE_OUTPUTS", "message": "还没有带“案例”标签的媒体文件。"})
+            return
+        archive_path: Path | None = None
+        try:
+            DATA_ROOT.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(prefix=".case-outputs-", suffix=".zip", dir=DATA_ROOT, delete=False) as temporary:
+                archive_path = Path(temporary.name)
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                for item in media:
+                    archive.write(item["path"], item["archive_name"])
+            self._serve_download_file(archive_path, "案例成片.zip", "application/zip")
+        except OSError as exc:
+            self._json(500, {"code": "CASE_OUTPUT_EXPORT_FAILED", "message": f"导出案例失败：{exc}"})
+        finally:
+            if archive_path is not None:
+                try:
+                    archive_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _serve_download_file(self, file_path: Path, download_name: str, content_type: str) -> None:
+        try:
+            file_size = file_path.stat().st_size
+        except OSError:
+            self._json(404, {"code": "DOWNLOAD_NOT_FOUND", "message": "下载文件不存在。"})
+            return
+        self.send_response(HTTPStatus.OK)
+        self._headers(content_type, file_size)
+        self.send_header("Content-Disposition", f"attachment; filename=case-outputs.zip; filename*=UTF-8''{quote(download_name, safe='')}")
+        self.end_headers()
+        try:
+            with file_path.open("rb") as stream:
+                while True:
+                    chunk = stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def _serve_local_preview(self, token: str) -> None:
         file_path = self.server.local_preview_path(token)  # type: ignore[attr-defined]
@@ -1232,13 +1629,13 @@ class LocalHandler(BaseHTTPRequestHandler):
         action_id = parts[4] if len(parts) == 6 else ""
         file_path = self.server.action_store.image_path(action_id, kind)  # type: ignore[attr-defined]
         if file_path is None:
-            label = "深度图" if kind == "depth" else "原图"
+            label = {"depth": "深度图", "skeleton": "骨骼图"}.get(kind, "原图")
             self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": f"动作{label}不存在"})
             return
         try:
             data = file_path.read_bytes()
         except OSError:
-            label = "深度图" if kind == "depth" else "原图"
+            label = {"depth": "深度图", "skeleton": "骨骼图"}.get(kind, "原图")
             self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": f"动作{label}不存在"})
             return
         self.send_response(HTTPStatus.OK)
@@ -1251,7 +1648,7 @@ class LocalHandler(BaseHTTPRequestHandler):
         action_id = parts[4] if len(parts) == 6 else ""
         file_path = self.server.action_store.image_path(action_id, kind)  # type: ignore[attr-defined]
         if file_path is None:
-            label = "深度图" if kind == "depth" else "原图"
+            label = {"depth": "深度图", "skeleton": "骨骼图"}.get(kind, "原图")
             self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": f"动作{label}不存在"})
             return
         self._json(200, {"path": str(file_path), "name": file_path.name, "kind": kind})
@@ -1296,6 +1693,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             relative = "dashboard.html"
         if relative in {"settings", "settings/"}:
             relative = "settings.html"
+        if relative in {"focus", "focus/"}:
+            relative = "focus.html"
         if relative.startswith("static/"):
             relative = relative[len("static/"):]
         file_path = (STATIC_ROOT / relative).resolve()

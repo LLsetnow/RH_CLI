@@ -1,12 +1,15 @@
 (function () {
   "use strict";
 
-  var state = { outputs: [], summary: {}, type: "all", rating: 0, search: "", sort: "newest", telegramConfigured: false };
+  var OUTPUT_PAGE_SIZE = 64;
+  var state = { outputs: [], summary: {}, type: "all", rating: 0, tags: [], search: "", sort: "newest", page: 1, telegramConfigured: false, contextArtifactId: "", selectedArtifactId: "" };
   var outputImport = { item: null, path: "" };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
   var pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1";
   var ratingBusy = {};
+  var tagBusy = {};
   var telegramUploadBusy = {};
+  var previewSeekSeconds = 1;
 
   function $(id) { return document.getElementById(id); }
   function esc(value) {
@@ -39,6 +42,13 @@
       showToast("提示词组状态无法暂存到本机", true);
     }
   }
+  function notifySubmitImport(detail) {
+    if (window.RHFocus && typeof window.RHFocus.importToSubmit === "function") {
+      window.RHFocus.importToSubmit(detail || {});
+      return true;
+    }
+    return false;
+  }
   function formatTime(timestamp) {
     if (!timestamp) return "—";
     var date = new Date(Number(timestamp));
@@ -54,6 +64,24 @@
   }
   function typeLabel(type) {
     return { image: "IMAGE", video: "VIDEO", audio: "AUDIO", text: "TEXT", other: "FILE" }[type] || "FILE";
+  }
+  function normalizedOutputTags(value) {
+    var raw = value && Array.isArray(value.tags) ? value.tags : [];
+    var tags = [];
+    raw.forEach(function (tag) {
+      var clean = String(tag || "").trim();
+      if (clean && tags.indexOf(clean) === -1) tags.push(clean);
+    });
+    return tags;
+  }
+  function hasOutputTag(item, tag) {
+    return normalizedOutputTags(item).indexOf(String(tag || "").trim()) !== -1;
+  }
+  function isMediaOutput(item) {
+    return item && item.kind === "file" && ["image", "video", "audio"].indexOf(item.display_type) !== -1;
+  }
+  function caseMediaOutputs() {
+    return state.outputs.filter(function (item) { return isMediaOutput(item) && hasOutputTag(item, "案例"); });
   }
   function costLabel(item) {
     if (!item.cost) return "";
@@ -78,6 +106,7 @@
       if (state.type !== "all" && item.display_type !== state.type) return false;
       if (state.rating === "unrated" && normalizedRating(item.rating) !== 0) return false;
       if (typeof state.rating === "number" && state.rating && normalizedRating(item.rating) !== state.rating) return false;
+      if (state.tags.length && !state.tags.every(function (tag) { return hasOutputTag(item, tag); })) return false;
       if (!query) return true;
       return String(item.name || "").toLowerCase().indexOf(query) !== -1 || String(item.task_name || "").toLowerCase().indexOf(query) !== -1;
     });
@@ -88,6 +117,48 @@
       return state.sort === "oldest" ? leftTime - rightTime : rightTime - leftTime;
     });
     return result;
+  }
+  function outputPageCount(items) {
+    var count = Array.isArray(items) ? items.length : Number(items) || 0;
+    return Math.max(1, Math.ceil(count / OUTPUT_PAGE_SIZE));
+  }
+  function outputPageItems(items) {
+    var pageCount = outputPageCount(items);
+    state.page = Math.min(Math.max(Number(state.page) || 1, 1), pageCount);
+    var start = (state.page - 1) * OUTPUT_PAGE_SIZE;
+    return (items || []).slice(start, start + OUTPUT_PAGE_SIZE);
+  }
+  function resetOutputPage() {
+    state.page = 1;
+  }
+  function pageNumberMarkup(page, currentPage) {
+    var active = page === currentPage;
+    return '<button class="output-page-number' + (active ? ' active' : '') + '" type="button" data-output-page="' + page + '"' + (active ? ' aria-current="page"' : '') + ' aria-label="第 ' + page + ' 页"' + (active ? ' aria-pressed="true"' : ' aria-pressed="false"') + '>' + page + '</button>';
+  }
+  function renderPagination(totalItems) {
+    var pagination = $("outputPagination");
+    if (!pagination) return;
+    var totalPages = outputPageCount(totalItems);
+    if (totalPages <= 1) {
+      pagination.hidden = true;
+      pagination.innerHTML = "";
+      return;
+    }
+    state.page = Math.min(Math.max(Number(state.page) || 1, 1), totalPages);
+    var currentPage = state.page;
+    var pageNumbers = [];
+    var start = Math.max(2, currentPage - 2);
+    var end = Math.min(totalPages - 1, currentPage + 2);
+    pageNumbers.push(pageNumberMarkup(1, currentPage));
+    if (start > 2) pageNumbers.push('<span class="output-page-ellipsis" aria-hidden="true">…</span>');
+    for (var page = start; page <= end; page += 1) pageNumbers.push(pageNumberMarkup(page, currentPage));
+    if (end < totalPages - 1) pageNumbers.push('<span class="output-page-ellipsis" aria-hidden="true">…</span>');
+    if (totalPages > 1) pageNumbers.push(pageNumberMarkup(totalPages, currentPage));
+    pagination.hidden = false;
+    pagination.innerHTML = '<button class="output-page-button" type="button" data-output-page="previous"' + (currentPage === 1 ? ' disabled' : '') + ' aria-label="上一页">上一页</button>' +
+      '<div class="output-page-numbers" role="list" aria-label="页码">' + pageNumbers.join("") + '</div>' +
+      '<span class="output-page-status">第 ' + currentPage + ' / ' + totalPages + ' 页 · 当前显示 ' + Math.min(OUTPUT_PAGE_SIZE, Math.max(0, totalItems - (currentPage - 1) * OUTPUT_PAGE_SIZE)) + ' 张</span>' +
+      '<button class="output-page-button" type="button" data-output-page="next"' + (currentPage === totalPages ? ' disabled' : '') + ' aria-label="下一页">下一页</button>';
   }
   function renderSummary() {
     var summary = state.summary || {};
@@ -113,16 +184,29 @@
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", active ? "true" : "false");
     });
+    document.querySelectorAll(".output-tag-filter").forEach(function (button) {
+      var tag = button.dataset.outputTag || "";
+      var active = state.tags.indexOf(tag) !== -1;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
     var deleteOneStarButton = $("deleteOneStarOutputs");
     if (deleteOneStarButton) {
       deleteOneStarButton.disabled = !oneStarCount;
       $("oneStarOutputCount").textContent = String(oneStarCount);
       deleteOneStarButton.title = oneStarCount ? "删除全部 " + oneStarCount + " 个一星成片" : "没有一星成片可删除";
     }
+    var exportCaseButton = $("exportCaseOutputs");
+    if (exportCaseButton) {
+      var caseCount = caseMediaOutputs().length;
+      exportCaseButton.disabled = !caseCount;
+      $("caseOutputCount").textContent = String(caseCount);
+      exportCaseButton.title = caseCount ? "下载 " + caseCount + " 个案例媒体（ZIP）" : "没有带“案例”标签的媒体文件可导出";
+    }
     updateFilterSlider();
   }
   function rebuildSummary() {
-    var summary = { total: state.outputs.length, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 } };
+    var summary = { total: state.outputs.length, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 }, tag_counts: { "案例": 0, "H": 0 } };
     var taskIds = {};
     state.outputs.forEach(function (item) {
       var type = String(item.display_type || "other");
@@ -131,6 +215,9 @@
       var rating = Number(item.rating || 0);
       if (rating >= 1 && rating <= 5) summary.rating_counts[String(rating)] += 1;
       else summary.rating_counts.unrated += 1;
+      normalizedOutputTags(item).forEach(function (tag) {
+        summary.tag_counts[tag] = (summary.tag_counts[tag] || 0) + 1;
+      });
       taskIds[String(item.task_id || "")] = true;
     });
     summary.tasks = Object.keys(taskIds).filter(function (taskId) { return taskId; }).length;
@@ -152,13 +239,15 @@
     }
     return '<div class="artifact-media artifact-media-other"><a class="output-link" href="' + url + '" target="_blank" rel="noreferrer">打开或下载文件</a></div>';
   }
+  function previewRatingMarkup(item) {
+    return '<span class="output-preview-rating-label">评分</span>' + ratingStarsMarkup(item, "output-preview-rating");
+  }
   function previewMediaMarkup(item) {
-    if (item.kind === "text") return '<div class="output-preview-text"><pre>' + esc(item.text || "") + "</pre></div>";
+    if (item.kind === "text") return '<div class="output-preview-text"><pre>' + esc(item.text || "") + '</pre></div><div class="output-preview-controls output-preview-controls-standalone">' + previewRatingMarkup(item) + '</div>';
     var url = outputUrl(item);
-    if (item.display_type === "image") return '<img src="' + url + '" alt="' + esc(item.name) + '" />';
-    if (item.display_type === "video") return window.RHMotion.videoPlayerMarkup(url, true);
-    if (item.display_type === "audio") return '<audio src="' + url + '" controls autoplay preload="metadata"></audio>';
-    return '<div class="output-preview-other"><a class="output-link" href="' + url + '" target="_blank" rel="noreferrer">打开或下载文件</a></div>';
+    if (item.display_type === "video") return window.RHMotion.videoPlayerMarkup(url, true, true, previewRatingMarkup(item));
+    var media = item.display_type === "image" ? '<img src="' + url + '" alt="' + esc(item.name) + '" />' : item.display_type === "audio" ? '<audio src="' + url + '" controls autoplay preload="metadata"></audio>' : '<div class="output-preview-other"><a class="output-link" href="' + url + '" target="_blank" rel="noreferrer">打开或下载文件</a></div>';
+    return media + '<div class="output-preview-controls output-preview-controls-standalone">' + previewRatingMarkup(item) + '</div>';
   }
   function stopPreviewMedia() {
     var content = $("outputPreviewContent");
@@ -175,6 +264,7 @@
   }
   function openOutputPreview(item) {
     if (!item) return;
+    selectArtifactCard(item, false);
     stopPreviewMedia();
     $("outputPreviewTitle").textContent = item.name || "产物预览";
     $("outputPreviewMeta").innerHTML = '<span>' + esc(typeLabel(item.display_type)) + '</span><span>任务：' + esc(item.task_name || item.task_id || "当前任务") + '</span><span>' + esc(formatTime(item.modified_at || item.task_completed_at || item.task_created_at)) + '</span>' + (item.kind === "file" ? '<span>' + esc(formatSize(item.size)) + '</span>' : '');
@@ -186,13 +276,71 @@
     var rating = Number(value || 0);
     return rating >= 1 && rating <= 5 ? Math.floor(rating) : 0;
   }
-  function ratingStarsMarkup(item) {
+  function ratingStarsMarkup(item, extraClass) {
     var rating = normalizedRating(item && item.rating);
     var stars = "";
     for (var index = 1; index <= 5; index += 1) {
       stars += '<button class="rating-star' + (index <= rating ? ' is-filled' : '') + '" type="button" data-rate-output="' + esc(item && item.id) + '" data-rating="' + index + '" aria-label="评分 ' + index + ' 星">' + (index <= rating ? '★' : '☆') + '</button>';
     }
-    return '<div class="artifact-rating" aria-label="' + esc(rating ? "评分 " + rating + " 星" : "未评分") + '"><span class="rating-stars rating-stars-' + rating + '">' + stars + '</span><span class="rating-value">' + (rating ? rating + " / 5" : "未评分") + '</span></div>';
+    return '<div class="artifact-rating' + (extraClass ? " " + extraClass : "") + '" aria-label="' + esc(rating ? "评分 " + rating + " 星" : "未评分") + '"><span class="rating-stars rating-stars-' + rating + '">' + stars + '</span><span class="rating-value">' + (rating ? rating + " / 5" : "未评分") + '</span></div>';
+  }
+  function artifactTagsMarkup(item) {
+    var tags = [];
+    if (hasOutputTag(item, "案例")) tags.push('<span class="artifact-tag artifact-tag-case" title="案例" aria-label="案例">案例</span>');
+    if (hasOutputTag(item, "H")) tags.push('<span class="artifact-tag artifact-tag-h" title="H" aria-label="H">H</span>');
+    return tags.join("");
+  }
+  function positiveDimension(value) {
+    var number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
+  }
+  function itemResolution(item) {
+    if (!item) return null;
+    var width = positiveDimension(item.width || item.video_width || item.media_width || item.natural_width);
+    var height = positiveDimension(item.height || item.video_height || item.media_height || item.natural_height);
+    return width && height ? { width: width, height: height } : null;
+  }
+  function formatResolution(resolution) {
+    return resolution ? resolution.width + " × " + resolution.height : "";
+  }
+  function artifactResolutionMarkup(item) {
+    if (!item || ["image", "video"].indexOf(item.display_type) === -1) return "";
+    var resolution = itemResolution(item);
+    return '<span class="artifact-resolution" title="媒体分辨率">' + esc(formatResolution(resolution) || "读取中…") + '</span>';
+  }
+  function updateArtifactResolution(card, item, media) {
+    var resolutionNode = card && card.querySelector(".artifact-resolution");
+    if (!resolutionNode) return;
+    var resolution = itemResolution(item);
+    if (!resolution && media) {
+      var width = media.tagName === "IMG" ? media.naturalWidth : media.videoWidth;
+      var height = media.tagName === "IMG" ? media.naturalHeight : media.videoHeight;
+      width = positiveDimension(width);
+      height = positiveDimension(height);
+      if (width && height) {
+        item.width = width;
+        item.height = height;
+        resolution = { width: width, height: height };
+      }
+    }
+    var isLoading = media && (media.tagName === "IMG" ? !media.complete : media.readyState === 0);
+    resolutionNode.textContent = formatResolution(resolution) || (isLoading ? "读取中…" : "—");
+    resolutionNode.title = resolution ? "媒体分辨率 " + formatResolution(resolution) : "暂时无法读取媒体分辨率";
+  }
+  function bindArtifactResolutionMetadata(container) {
+    if (!container) return;
+    container.querySelectorAll(".artifact-card").forEach(function (card) {
+      var item = artifactById(card.dataset.artifactId);
+      var media = card.querySelector("img, video");
+      if (!item || !media) return;
+      var update = function () { updateArtifactResolution(card, item, media); };
+      media.addEventListener(media.tagName === "IMG" ? "load" : "loadedmetadata", update, { once: true });
+      update();
+    });
+  }
+  function artifactCardHeadMarkup(item) {
+    var size = item && item.kind === "file" ? formatSize(item.size) : "文本";
+    return '<div class="artifact-card-head"><div class="artifact-card-labels"><span class="artifact-type ' + esc(item.display_type) + '">' + typeLabel(item.display_type) + '</span>' + artifactTagsMarkup(item) + '</div><span class="artifact-size">' + size + '</span></div>';
   }
   function refreshRatedArtifact(item) {
     var card = null;
@@ -203,15 +351,28 @@
     var stillVisible = filteredOutputs().some(function (output) { return String(output.id) === String(item.id); });
     if (!stillVisible) {
       card.remove();
-      if (!filteredOutputs().length) {
-        var message = state.outputs.length ? "没有符合筛选条件的产物" : "还没有可浏览的产物";
-        var hint = state.outputs.length ? "换一个类型或关键词试试。" : "完成任务并保存产物后，它们会自动出现在这里。";
-        $("outputGrid").innerHTML = '<div class="outputs-empty"><strong>' + message + '</strong><span>' + hint + "</span></div>";
-      }
+      render();
       return;
     }
     var ratingNode = card.querySelector(".artifact-rating");
     if (ratingNode) ratingNode.outerHTML = ratingStarsMarkup(item);
+  }
+  function refreshTaggedArtifact(item) {
+    var card = artifactCardById(item && item.id);
+    if (!card) return;
+    var stillVisible = filteredOutputs().some(function (output) { return String(output.id) === String(item.id); });
+    if (!stillVisible) {
+      card.remove();
+      render();
+      return;
+    }
+    var head = card.querySelector(".artifact-card-head");
+    if (head) head.outerHTML = artifactCardHeadMarkup(item);
+  }
+  function refreshPreviewRating(item) {
+    if (!outputPreviewIsOpen() || !item || String(state.selectedArtifactId) !== String(item.id)) return;
+    var ratingNode = $("outputPreviewModal").querySelector(".output-preview-rating");
+    if (ratingNode) ratingNode.outerHTML = ratingStarsMarkup(item, "output-preview-rating");
   }
   function setOutputRating(item, rating) {
     if (!item) return;
@@ -228,12 +389,49 @@
       rebuildSummary();
       renderSummary();
       refreshRatedArtifact(item);
+      refreshPreviewRating(item);
       showToast(item.rating ? "已评分 " + item.rating + " 星" : "已清除评分");
     }).catch(function (error) {
       showToast("保存评分失败：" + error.message, true);
     }).finally(function () {
       delete ratingBusy[key];
     });
+  }
+  function setOutputTags(item, tags, changedTag) {
+    if (!item) return;
+    var nextTags = normalizedOutputTags({ tags: tags });
+    var key = String(item.id || item.task_id + ":" + item.output_index);
+    if (tagBusy[key]) return;
+    tagBusy[key] = true;
+    request("/api/tasks/" + encodeURIComponent(item.task_id) + "/outputs/" + encodeURIComponent(item.output_index), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: nextTags })
+    }).then(function (data) {
+      item.tags = normalizedOutputTags(data.output || { tags: nextTags });
+      rebuildSummary();
+      renderSummary();
+      refreshTaggedArtifact(item);
+      showToast(hasOutputTag(item, changedTag) ? "已添加“" + changedTag + "”标签" : "已取消“" + changedTag + "”标签");
+    }).catch(function (error) {
+      showToast("保存标签失败：" + error.message, true);
+    }).finally(function () {
+      delete tagBusy[key];
+    });
+  }
+  function toggleOutputTag(item, tag) {
+    if (!item) return;
+    var tags = normalizedOutputTags(item);
+    var index = tags.indexOf(tag);
+    if (index === -1) tags.push(tag);
+    else tags.splice(index, 1);
+    setOutputTags(item, tags, tag);
+  }
+  function toggleCaseTag(item) {
+    toggleOutputTag(item, "案例");
+  }
+  function toggleHTag(item) {
+    toggleOutputTag(item, "H");
   }
   function taskWorkflowLabel(item) {
     var taskName = String(item && item.task_name || "未命名任务").trim() || "未命名任务";
@@ -244,21 +442,229 @@
   function telegramUploadKey(taskId, outputIndex) {
     return String(taskId || "") + ":" + String(outputIndex);
   }
-  function updateTelegramUploadButtons(key, busy) {
-    document.querySelectorAll("[data-upload-key]").forEach(function (button) {
-      if (button.dataset.uploadKey !== key) return;
-      button.disabled = busy;
-      button.textContent = busy ? "上传中" : "上传";
-      if (busy) button.setAttribute("aria-busy", "true");
-      else button.removeAttribute("aria-busy");
+  function artifactById(artifactId) {
+    return state.outputs.find(function (item) { return String(item && item.id) === String(artifactId); }) || null;
+  }
+  function artifactCardById(artifactId) {
+    var card = null;
+    document.querySelectorAll("#outputGrid .artifact-card").forEach(function (candidate) {
+      if (String(candidate.dataset.artifactId) === String(artifactId)) card = candidate;
+    });
+    return card;
+  }
+  function syncArtifactSelection(items) {
+    var visibleItems = Array.isArray(items) ? items : filteredOutputs();
+    var selected = visibleItems.find(function (item) { return String(item && item.id) === String(state.selectedArtifactId); }) || null;
+    if (!selected) selected = visibleItems[0] || null;
+    state.selectedArtifactId = selected ? String(selected.id || "") : "";
+    document.querySelectorAll("#outputGrid .artifact-card").forEach(function (card) {
+      var active = String(card.dataset.artifactId) === state.selectedArtifactId;
+      card.classList.toggle("is-selected", active);
+      card.setAttribute("aria-selected", active ? "true" : "false");
     });
   }
-  function telegramUploadButtonMarkup(item) {
-    var taskId = String(item && item.task_id || "");
+  function selectArtifactCard(item, focus) {
+    if (!item) return;
+    state.selectedArtifactId = String(item.id || "");
+    syncArtifactSelection();
+    var card = artifactCardById(state.selectedArtifactId);
+    if (!card) return;
+    if (focus) {
+      card.focus({ preventScroll: true });
+      var rect = card.getBoundingClientRect();
+      var topInset = 24;
+      var bottomInset = 24;
+      if (rect.top < topInset) {
+        window.scrollTo({ top: Math.max(0, window.scrollY + rect.top - topInset), behavior: "smooth" });
+      } else if (rect.bottom > window.innerHeight - bottomInset) {
+        window.scrollTo({ top: Math.max(0, window.scrollY + rect.bottom - window.innerHeight + bottomInset), behavior: "smooth" });
+      }
+    }
+  }
+  function selectedArtifactCard() {
+    return artifactCardById(state.selectedArtifactId);
+  }
+  function gridColumnCount() {
+    var grid = $("outputGrid");
+    if (!grid) return 1;
+    var columns = window.getComputedStyle(grid).gridTemplateColumns;
+    var count = columns && columns !== "none" ? columns.split(/\s+/).filter(Boolean).length : 1;
+    return Math.max(1, count);
+  }
+  function navigateSelectedArtifact(direction) {
+    var cards = Array.prototype.slice.call(document.querySelectorAll("#outputGrid .artifact-card"));
+    if (!cards.length) return false;
+    var currentIndex = cards.findIndex(function (card) { return String(card.dataset.artifactId) === String(state.selectedArtifactId); });
+    if (currentIndex < 0) {
+      var firstItem = artifactById(cards[0].dataset.artifactId);
+      selectArtifactCard(firstItem, true);
+      return Boolean(firstItem);
+    }
+    var columns = gridColumnCount();
+    var targetIndex = currentIndex;
+    if (direction === "left" && currentIndex % columns > 0) targetIndex = currentIndex - 1;
+    if (direction === "right" && currentIndex % columns < columns - 1 && currentIndex + 1 < cards.length) targetIndex = currentIndex + 1;
+    if (direction === "up" || direction === "down") {
+      var step = direction === "up" ? -columns : columns;
+      var indexedTarget = currentIndex + step;
+      if (indexedTarget >= 0 && indexedTarget < cards.length) targetIndex = indexedTarget;
+    }
+    if (targetIndex === currentIndex) return true;
+    var targetItem = artifactById(cards[targetIndex].dataset.artifactId);
+    if (!targetItem) return false;
+    closeArtifactContextMenu();
+    selectArtifactCard(targetItem, true);
+    return true;
+  }
+  function outputPreviewIsOpen() {
+    var modal = $("outputPreviewModal");
+    return Boolean(modal && !modal.hidden && modal.classList.contains("is-open"));
+  }
+  function previewMediaElement() {
+    var content = $("outputPreviewContent");
+    return content && content.querySelector("video, audio");
+  }
+  function seekPreviewMedia(delta) {
+    var media = previewMediaElement();
+    if (!media || !Number.isFinite(media.duration)) return false;
+    media.currentTime = Math.max(0, Math.min(media.duration, (Number(media.currentTime) || 0) + delta));
+    return true;
+  }
+  function togglePreviewMedia() {
+    var media = previewMediaElement();
+    if (!media) return false;
+    if (media.paused || media.ended) {
+      if (media.ended) media.currentTime = 0;
+      var playPromise = media.play();
+      if (playPromise && typeof playPromise.catch === "function") playPromise.catch(function () {});
+    } else {
+      media.pause();
+    }
+    return true;
+  }
+  function toggleSelectedVideo() {
+    var video = null;
+    if (outputPreviewIsOpen()) {
+      video = $("outputPreviewContent") && $("outputPreviewContent").querySelector("video");
+    } else {
+      var card = selectedArtifactCard();
+      video = card && card.querySelector(".artifact-media video");
+    }
+    if (!video) return false;
+    if (video.paused || video.ended) {
+      if (video.ended) video.currentTime = 0;
+      var playPromise = video.play();
+      if (playPromise && typeof playPromise.catch === "function") playPromise.catch(function () {});
+    } else {
+      video.pause();
+    }
+    return true;
+  }
+  function positionArtifactContextMenu(menu, event) {
+    var left = Math.min(event.clientX, Math.max(8, window.innerWidth - menu.offsetWidth - 8));
+    var top = Math.min(event.clientY, Math.max(8, window.innerHeight - menu.offsetHeight - 8));
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  }
+  function closeArtifactContextMenu() {
+    var menu = $("artifactContextMenu");
+    if (menu) menu.hidden = true;
+    state.contextArtifactId = "";
+  }
+  function openArtifactContextMenu(event, item) {
+    var menu = $("artifactContextMenu");
+    if (!menu || !item) return;
+    event.preventDefault();
+    closeArtifactContextMenu();
+    state.contextArtifactId = String(item.id || "");
+    var uploadAction = menu.querySelector('[data-artifact-menu-action="upload"]');
+    var importAction = menu.querySelector('[data-artifact-menu-action="import"]');
+    var folderAction = menu.querySelector('[data-artifact-menu-action="open-folder"]');
+    var canUpload = state.telegramConfigured && item.kind === "file";
+    if (uploadAction) {
+      var uploadBusy = Boolean(telegramUploadBusy[telegramUploadKey(item.task_id, item.output_index)]);
+      uploadAction.hidden = !canUpload;
+      uploadAction.disabled = uploadBusy;
+      uploadAction.textContent = uploadBusy ? "上传中" : "上传";
+      if (uploadBusy) uploadAction.setAttribute("aria-busy", "true");
+      else uploadAction.removeAttribute("aria-busy");
+    }
+    if (importAction) importAction.hidden = item.kind !== "file";
+    if (folderAction) folderAction.hidden = item.kind !== "file";
+    menu.hidden = false;
+    positionArtifactContextMenu(menu, event);
+    var firstAction = menu.querySelector('button:not([hidden])');
+    if (firstAction) firstAction.focus();
+  }
+  function handleArtifactContextMenu(event) {
+    var card = event.target.closest(".artifact-card");
+    if (!card || !$("outputGrid").contains(card)) return;
+    openArtifactContextMenu(event, artifactById(card.dataset.artifactId));
+  }
+  function handleArtifactMenuAction(event) {
+    var button = event.target.closest("[data-artifact-menu-action]");
+    if (!button) return;
+    var item = artifactById(state.contextArtifactId);
+    var action = button.dataset.artifactMenuAction;
+    closeArtifactContextMenu();
+    if (!item) return;
+    if (action === "upload") uploadArtifactToTelegram(item, button);
+    if (action === "import") openOutputImport(item, button);
+    if (action === "open-folder") openArtifactFolder(item, button);
+    if (action === "delete") deleteArtifactTask(item, button);
+  }
+  function openArtifactFolder(item, button) {
+    var taskId = String(item && item.task_id || "").trim();
+    if (!taskId || (button && button.disabled)) return;
+    var original = button ? button.textContent : "打开所在文件夹";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "打开中…";
+      button.setAttribute("aria-busy", "true");
+    }
+    request("/api/tasks/" + encodeURIComponent(taskId) + "/open-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    }).then(function (data) {
+      showToast(data.message || "已打开媒体所在文件夹");
+    }).catch(function (error) {
+      showToast("打开文件夹失败：" + error.message, true);
+    }).finally(function () {
+      if (button) {
+        button.disabled = false;
+        button.textContent = original;
+        button.removeAttribute("aria-busy");
+      }
+    });
+  }
+  function uploadArtifactToTelegram(item, button) {
+    var taskId = String(item && item.task_id || "").trim();
     var outputIndex = Number(item && item.output_index);
     var key = telegramUploadKey(taskId, outputIndex);
-    var busy = Boolean(telegramUploadBusy[key]);
-    return '<button class="artifact-upload-task" type="button" data-upload-task="' + esc(taskId) + '" data-upload-output-index="' + esc(item.output_index) + '" data-upload-key="' + esc(key) + '"' + (busy ? ' disabled aria-busy="true"' : '') + '>' + (busy ? "上传中" : "上传") + '</button>';
+    if (!taskId || !Number.isInteger(outputIndex) || outputIndex < 0 || (button && button.disabled) || telegramUploadBusy[key]) return;
+    telegramUploadBusy[key] = true;
+    if (button) {
+      button.disabled = true;
+      button.textContent = "上传中";
+      button.setAttribute("aria-busy", "true");
+    }
+    request("/api/tasks/" + encodeURIComponent(taskId) + "/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ output_index: outputIndex })
+    }).then(function (data) {
+      showToast(data.message || "已加入 Telegram 上传队列");
+    }).catch(function (error) {
+      showToast("上传到 Telegram 失败：" + error.message, true);
+    }).finally(function () {
+      delete telegramUploadBusy[key];
+      if (button) {
+        button.disabled = false;
+        button.textContent = "上传";
+        button.removeAttribute("aria-busy");
+      }
+    });
   }
   function taskDraftFromLoadData(data) {
     var task = data && data.task && typeof data.task === "object" ? data.task : {};
@@ -302,8 +708,9 @@
       if (!draft.workflow.id) throw new Error("任务中缺少本地工作流标识");
       queuePromptGroupSnapshot(data.prompt_group);
       window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
-      showToast("已加载工作流「" + draft.workflow.name + "」，正在打开任务提交页");
-      window.location.href = "/";
+      var focusImport = notifySubmitImport({ kind: "workflow", source: "task" });
+      showToast(focusImport ? "工作流已加载，任务提交面板已同步" : "已加载工作流「" + draft.workflow.name + "」，正在打开任务提交页");
+      if (!focusImport) window.location.href = "/";
     }).catch(function (error) {
       showToast("加载工作流失败：" + error.message, true);
     }).finally(function () {
@@ -334,7 +741,15 @@
     else if (raw && typeof raw === "object") Object.keys(raw).forEach(function (nodeId) { if (raw[nodeId]) result[String(nodeId)] = true; });
     return result;
   }
-  function taskFileTargets(draft) {
+  function fileInputMediaKind(item) {
+    var classType = String(item && item.class_type || "").toLowerCase();
+    var field = String(item && item.field || "").toLowerCase();
+    if (classType.indexOf("loadaudio") !== -1 || classType.indexOf("vhs_loadaudio") !== -1 || field === "audio") return "audio";
+    if (classType.indexOf("loadvideo") !== -1 || classType.indexOf("vhs_loadvideo") !== -1 || field === "video") return "video";
+    if (classType.indexOf("loadimage") !== -1 || field === "image" || field === "mask") return "image";
+    return "";
+  }
+  function taskFileTargets(draft, mediaKind) {
     if (!draft || !draft.workflow) return [];
     var workflow = draft.workflow.data || {};
     var values = draft.workflow.values && typeof draft.workflow.values === "object" ? draft.workflow.values : {};
@@ -370,10 +785,13 @@
         field: field,
         title: String(item.title || (node && node._meta && node._meta.title) || (node && node.class_type) || "文件输入"),
         classType: String(item.class_type || (node && node.class_type) || ""),
+        expectedKind: fileInputMediaKind({ class_type: item.class_type || (node && node.class_type) || "", field: field }),
         current: String(current == null ? "" : current),
         bypassed: Boolean(bypassed[nodeId])
       };
-    }).filter(function (item) { return item.inputId && item.nodeId && item.field; });
+    }).filter(function (item) {
+      return item.inputId && item.nodeId && item.field && (!mediaKind || !item.expectedKind || item.expectedKind === mediaKind);
+    });
   }
   function renderOutputImportTargets(draft) {
     var description = $("outputImportDescription");
@@ -389,9 +807,15 @@
       return;
     }
     description.textContent = "选择目标文件输入节点，产物会作为该节点的本机输入路径保存。";
-    var targets = taskFileTargets(draft);
+    var mediaKind = String(item && item.display_type || "").toLowerCase();
+    if (["image", "video", "audio"].indexOf(mediaKind) === -1) {
+      list.innerHTML = '<div class="output-import-empty"><strong>这个产物不是可导入的媒体</strong><span>这里只支持图片、视频或音频产物。</span></div>';
+      confirm.disabled = true;
+      return;
+    }
+    var targets = taskFileTargets(draft, mediaKind);
     if (!targets.length) {
-      list.innerHTML = '<div class="output-import-empty"><strong>没有找到文件输入节点</strong><span>请确认当前工作流包含 LoadImage、LoadVideo、LoadAudio 或其他文件输入节点。</span></div>';
+      list.innerHTML = '<div class="output-import-empty"><strong>没有找到匹配的文件输入节点</strong><span>当前产物是' + (mediaKind === "video" ? "视频" : (mediaKind === "audio" ? "音频" : "图片")) + '，请确认工作流包含对应的输入节点。</span></div>';
       confirm.disabled = true;
       return;
     }
@@ -408,8 +832,9 @@
     confirm.disabled = !selected;
   }
   function openOutputImport(item, button) {
-    if (!item || item.kind !== "file") return showToast("只有本地文件产物可以导入任务节点", true);
-    var original = button ? button.textContent : "导入任务";
+    if (!item || item.kind !== "file") return showToast("只有本地文件产物可以导入媒体", true);
+    if (["image", "video", "audio"].indexOf(String(item.display_type || "").toLowerCase()) === -1) return showToast("只有图片、视频或音频产物可以导入媒体", true);
+    var original = button ? button.textContent : "导入媒体";
     if (button) {
       button.disabled = true;
       button.textContent = "读取中…";
@@ -441,7 +866,8 @@
     var selected = $("outputImportTargets").querySelector('input[name="output-import-target"]:checked');
     if (!outputImport.path || !selected) return showToast("请先选择一个文件输入节点", true);
     var draft = readTaskDraft();
-    var target = taskFileTargets(draft).find(function (item) { return item.inputId === selected.value && !item.bypassed; });
+    var mediaKind = String(outputImport.item && outputImport.item.display_type || "").toLowerCase();
+    var target = taskFileTargets(draft, mediaKind).find(function (item) { return item.inputId === selected.value && !item.bypassed; });
     if (!draft || !target) return showToast("任务提交页的工作流已发生变化，请重新打开导入窗口", true);
     var workflow = draft.workflow.data;
     var node = workflow[target.nodeId];
@@ -457,34 +883,164 @@
       draft.workflow.values.files[target.inputId] = outputImport.path;
       draft.workflow.savedAt = Date.now();
       window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+      var focusImport = notifySubmitImport({ kind: "media", source: "output", inputId: target.inputId });
       closeOutputImport();
-      showToast("已将「" + itemName + "」导入「" + target.title + "」");
+      showToast(focusImport ? "已将「" + itemName + "」导入「" + target.title + "」，任务提交面板已同步" : "已将「" + itemName + "」导入「" + target.title + "」");
+      if (!focusImport) window.location.href = "/";
     } catch (error) {
       showToast("保存导入结果失败：" + error.message, true);
     } finally {
       button.disabled = false;
-      button.textContent = "导入任务";
+      button.textContent = "导入媒体";
     }
+  }
+  function deleteArtifactTask(item, button) {
+    var taskId = String(item && item.task_id || "").trim();
+    if (!taskId || (button && button.disabled)) return;
+    if (!window.confirm("删除这条本地任务记录及其 output 文件夹中的全部产物吗？此操作不可恢复。")) return;
+    var visibleBefore = filteredOutputs();
+    var selectedIndex = visibleBefore.findIndex(function (output) { return String(output.id) === String(state.selectedArtifactId); });
+    var deletingSelected = String(state.selectedArtifactId) === String(item.id);
+    if (button) button.disabled = true;
+    request("/api/tasks/" + encodeURIComponent(taskId), { method: "DELETE" }).then(function () {
+      state.outputs = state.outputs.filter(function (output) { return String(output.task_id || "") !== taskId; });
+      rebuildSummary();
+      var visibleAfter = filteredOutputs();
+      if (!visibleAfter.length) {
+        state.page = 1;
+        state.selectedArtifactId = "";
+        render();
+      } else {
+        render();
+        if (deletingSelected) {
+          var pageItems = outputPageItems(visibleAfter);
+          var pageStart = (state.page - 1) * OUTPUT_PAGE_SIZE;
+          var replacementIndex = Math.min(Math.max(selectedIndex - pageStart, 0), pageItems.length - 1);
+          var replacement = pageItems[replacementIndex] || pageItems[0];
+          if (replacement) selectArtifactCard(replacement, true);
+        }
+      }
+      if (outputPreviewIsOpen()) closeOutputPreview();
+      showToast("任务记录已删除");
+    }).catch(function (error) {
+      if (button) button.disabled = false;
+      showToast(error.message, true);
+    });
+  }
+  function handleOutputKeyboardShortcut(event) {
+    if (event.defaultPrevented || event.isComposing) return;
+    if (outputPreviewIsOpen()) {
+      if (event.key === "Escape" || event.key === "Enter") {
+        event.preventDefault();
+        closeOutputPreview();
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.preventDefault();
+        seekPreviewMedia(event.key === "ArrowLeft" ? -previewSeekSeconds : previewSeekSeconds);
+        return;
+      }
+      if (event.key === " ") {
+        event.preventDefault();
+        togglePreviewMedia();
+        return;
+      }
+      if (event.key === "6") {
+        var previewTagItem = artifactById(state.selectedArtifactId);
+        if (!previewTagItem) return;
+        event.preventDefault();
+        toggleCaseTag(previewTagItem);
+        return;
+      }
+      if (String(event.key || "").toLowerCase() === "h") {
+        var previewHTagItem = artifactById(state.selectedArtifactId);
+        if (!previewHTagItem) return;
+        event.preventDefault();
+        toggleHTag(previewHTagItem);
+        return;
+      }
+      if (/^[0-5]$/.test(event.key)) {
+        var previewItem = artifactById(state.selectedArtifactId);
+        if (!previewItem) return;
+        event.preventDefault();
+        setOutputRating(previewItem, event.key);
+        return;
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      var hasOverlay = outputPreviewIsOpen() || Boolean($("outputImportModal") && !$("outputImportModal").hidden) || Boolean($("artifactContextMenu") && !$("artifactContextMenu").hidden);
+      closeOutputPreview();
+      closeOutputImport();
+      closeArtifactContextMenu();
+      if (hasOverlay) event.preventDefault();
+      return;
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (event.target.closest && event.target.closest("button, a, input, select, textarea, [contenteditable=\"true\"]")) return;
+    var hasModal = Boolean(document.querySelector(".modal-backdrop.is-open:not([hidden])"));
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
+      if (hasModal) return;
+      if (navigateSelectedArtifact(event.key.slice(5).toLowerCase())) event.preventDefault();
+      return;
+    }
+    var selected = artifactById(state.selectedArtifactId);
+    if (!selected) return;
+    if (event.key === " ") {
+      if (selected.display_type === "video" && toggleSelectedVideo()) {
+        event.preventDefault();
+      }
+      return;
+    }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      if (hasModal && !outputPreviewIsOpen()) return;
+      event.preventDefault();
+      deleteArtifactTask(selected);
+      return;
+    }
+    if (event.key === "6") {
+      if (hasModal || (event.target.closest && event.target.closest("video, audio"))) return;
+      event.preventDefault();
+      toggleCaseTag(selected);
+      return;
+    }
+    if (String(event.key || "").toLowerCase() === "h") {
+      if (hasModal || (event.target.closest && event.target.closest("video, audio"))) return;
+      event.preventDefault();
+      toggleHTag(selected);
+      return;
+    }
+    if (!/^[0-5]$/.test(event.key) || hasModal || (event.target.closest && event.target.closest("video, audio"))) return;
+    var ratingCard = selectedArtifactCard() || document.querySelector(".artifact-card:hover");
+    var ratingItem = ratingCard && artifactById(ratingCard.dataset.artifactId);
+    if (!ratingItem) return;
+    event.preventDefault();
+    setOutputRating(ratingItem, event.key);
   }
   function render() {
     renderSummary();
     var items = filteredOutputs();
     if (!items.length) {
+      state.selectedArtifactId = "";
       $("outputGrid").innerHTML = '<div class="outputs-empty"><strong>' + (state.outputs.length ? "没有符合筛选条件的产物" : "还没有可浏览的产物") + '</strong><span>' + (state.outputs.length ? "换一个类型或关键词试试。" : "完成任务并保存产物后，它们会自动出现在这里。") + "</span></div>";
+      renderPagination(0);
       return;
     }
-    $("outputGrid").innerHTML = items.map(function (item, index) {
+    var visibleItems = outputPageItems(items);
+    $("outputGrid").innerHTML = visibleItems.map(function (item, index) {
       var cost = costLabel(item);
-      var size = item.kind === "file" ? formatSize(item.size) : "文本";
-      var taskLabel = "删除任务「" + String(item.task_name || item.task_id || "当前任务") + "」";
       var canCompare = item.display_type === "image" || item.display_type === "video";
       return '<article class="artifact-card' + (canCompare ? ' is-compare-draggable' : '') + '" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" data-compare-draggable="' + (canCompare ? 'true' : 'false') + '" draggable="' + (canCompare ? 'true' : 'false') + '" tabindex="0" role="button" aria-roledescription="' + (canCompare ? '可拖拽到内容对比' : '产物卡片') + '" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
-        '<div class="artifact-card-head"><span class="artifact-type ' + esc(item.display_type) + '">' + typeLabel(item.display_type) + '</span><span class="artifact-size">' + size + '</span></div>' +
+        artifactCardHeadMarkup(item) +
         mediaMarkup(item) +
-        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页">任务 · ' + taskWorkflowLabel(item) + '</div><div class="artifact-foot"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span><span class="artifact-foot-actions">' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + '<span class="artifact-task-actions">' + (state.telegramConfigured && item.kind === "file" ? telegramUploadButtonMarkup(item) : '') + (item.kind === "file" ? '<button class="artifact-import-task" type="button" data-import-output="' + esc(item.id) + '">导入任务</button>' : '') + '<button class="artifact-delete-task" type="button" data-delete-task="' + esc(item.task_id) + '" aria-label="' + esc(taskLabel) + '" title="' + esc(taskLabel) + '">删除任务</button></span></span></div></div>' +
+        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页">任务 · ' + taskWorkflowLabel(item) + '</div><div class="artifact-foot"><div class="artifact-foot-info"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span>' + artifactResolutionMarkup(item) + '</div>' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + '</div></div>' +
         '</article>';
     }).join("");
+    syncArtifactSelection(visibleItems);
     window.RHMotion.bindVideoLoopControls($("outputGrid"));
+    bindArtifactResolutionMetadata($("outputGrid"));
+    renderPagination(items.length);
   }
   function loadOutputs(showMessage) {
     $("refreshOutputs").disabled = true;
@@ -525,9 +1081,24 @@
       renderSummary();
     });
   }
+  function exportCaseOutputs() {
+    var count = caseMediaOutputs().length;
+    if (!count) return;
+    var button = $("exportCaseOutputs");
+    button.disabled = true;
+    button.classList.add("is-busy");
+    button.setAttribute("aria-busy", "true");
+    showToast("正在准备 " + count + " 个案例媒体的 ZIP…");
+    window.location.href = "/api/outputs/export/case";
+    window.setTimeout(function () {
+      button.classList.remove("is-busy");
+      button.removeAttribute("aria-busy");
+      renderSummary();
+    }, 1500);
+  }
   function bindEvents() {
     var themeButton = $("themeToggle");
-    themeButton.addEventListener("click", function () {
+    if (themeButton) themeButton.addEventListener("click", function () {
       var nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
       document.documentElement.dataset.theme = nextTheme;
       try { localStorage.setItem("rh-workflow-theme", nextTheme); } catch (error) {}
@@ -538,7 +1109,18 @@
       themeButton.title = light ? "切换到夜间模式" : "切换到日间模式";
     });
     $("refreshOutputs").addEventListener("click", function () { loadOutputs(true); });
+    $("exportCaseOutputs").addEventListener("click", exportCaseOutputs);
     $("deleteOneStarOutputs").addEventListener("click", deleteOneStarOutputs);
+    $("outputGrid").addEventListener("pointerdown", function (event) {
+      if (event.button !== 0 && event.button !== 2) return;
+      var card = event.target.closest(".artifact-card");
+      if (!card) return;
+      selectArtifactCard(artifactById(card.dataset.artifactId), false);
+    });
+    $("outputGrid").addEventListener("focusin", function (event) {
+      var card = event.target.closest(".artifact-card");
+      if (card) selectArtifactCard(artifactById(card.dataset.artifactId), false);
+    });
     $("outputGrid").addEventListener("dragstart", function (event) {
       var card = event.target.closest('.artifact-card[data-compare-draggable="true"]');
       if (!card || !event.dataTransfer) return;
@@ -574,83 +1156,70 @@
         if (!loadTaskButton.disabled) loadTaskWorkflowToSubmit(loadTaskButton.dataset.loadTaskWorkflow, loadTaskButton);
         return;
       }
-      var uploadButton = event.target.closest("[data-upload-task]");
-      if (uploadButton) {
-        var uploadTaskId = String(uploadButton.dataset.uploadTask || "").trim();
-        var outputIndex = Number(uploadButton.dataset.uploadOutputIndex);
-        var uploadKey = telegramUploadKey(uploadTaskId, outputIndex);
-        if (!uploadTaskId || !Number.isInteger(outputIndex) || outputIndex < 0 || uploadButton.disabled || telegramUploadBusy[uploadKey]) return;
-        telegramUploadBusy[uploadKey] = true;
-        updateTelegramUploadButtons(uploadKey, true);
-        request("/api/tasks/" + encodeURIComponent(uploadTaskId) + "/telegram", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ output_index: outputIndex })
-        }).then(function (data) {
-          showToast(data.message || "已加入 Telegram 上传队列");
-        }).catch(function (error) {
-          showToast("上传到 Telegram 失败：" + error.message, true);
-        }).finally(function () {
-          delete telegramUploadBusy[uploadKey];
-          updateTelegramUploadButtons(uploadKey, false);
-        });
-        return;
-      }
-      var importButton = event.target.closest("[data-import-output]");
-      if (importButton) {
-        var importItem = state.outputs.find(function (output) { return String(output.id) === String(importButton.dataset.importOutput); });
-        openOutputImport(importItem, importButton);
-        return;
-      }
-      var button = event.target.closest("[data-delete-task]");
-      if (button) {
-        if (button.disabled) return;
-        var taskId = String(button.dataset.deleteTask || "").trim();
-        if (!taskId || !window.confirm("删除这条本地任务记录及其 output 文件夹中的全部产物吗？此操作不可恢复。")) return;
-        button.disabled = true;
-        request("/api/tasks/" + encodeURIComponent(taskId), { method: "DELETE" }).then(function () {
-          state.outputs = state.outputs.filter(function (item) { return String(item.task_id || "") !== taskId; });
-          rebuildSummary();
-          document.querySelectorAll('.artifact-card[data-task-id="' + CSS.escape(taskId) + '"]').forEach(function (card) { card.remove(); });
-          renderSummary();
-          if (!filteredOutputs().length) render();
-          showToast("任务记录已删除");
-        }).catch(function (error) {
-          button.disabled = false;
-          showToast(error.message, true);
-        });
-        return;
-      }
       if (event.target.closest("button, a, audio, video, input, select, textarea")) return;
       var card = event.target.closest(".artifact-card");
       if (!card) return;
       var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
+      selectArtifactCard(item, false);
       openOutputPreview(item);
     });
+    $("outputGrid").addEventListener("contextmenu", handleArtifactContextMenu);
+    $("artifactContextMenu").addEventListener("click", handleArtifactMenuAction);
     $("outputGrid").addEventListener("keydown", function (event) {
-      if (event.key !== "Enter" && event.key !== " ") return;
+      if (event.key !== "Enter") return;
       var card = event.target.closest(".artifact-card");
       if (!card || event.target.closest("button, a, audio, video, input, select, textarea")) return;
       event.preventDefault();
+      event.stopPropagation();
       var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
+      selectArtifactCard(item, false);
       openOutputPreview(item);
     });
-    $("outputSearch").addEventListener("input", function () { state.search = this.value; render(); });
-    $("outputSort").addEventListener("change", function () { state.sort = this.value; render(); });
+    $("outputSearch").addEventListener("input", function () { state.search = this.value; resetOutputPage(); render(); });
+    $("outputSort").addEventListener("change", function () { state.sort = this.value; resetOutputPage(); render(); });
     $("outputFilters").addEventListener("click", function (event) {
       var button = event.target.closest("[data-output-type]");
       if (!button) return;
       state.type = button.dataset.outputType;
+      resetOutputPage();
       render();
     });
     $("outputRatingFilters").addEventListener("click", function (event) {
       var button = event.target.closest("[data-output-rating]");
       if (!button) return;
       state.rating = button.dataset.outputRating === "unrated" ? "unrated" : normalizedRating(button.dataset.outputRating);
+      resetOutputPage();
+      render();
+    });
+    $("outputTagFilters").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-output-tag]");
+      if (!button) return;
+      var tag = button.dataset.outputTag || "";
+      var index = state.tags.indexOf(tag);
+      if (index === -1) state.tags.push(tag);
+      else state.tags.splice(index, 1);
+      resetOutputPage();
+      render();
+    });
+    $("outputPagination").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-output-page]");
+      if (!button || button.disabled) return;
+      var nextPage = button.dataset.outputPage;
+      if (nextPage === "previous") state.page -= 1;
+      else if (nextPage === "next") state.page += 1;
+      else state.page = Number(nextPage);
+      closeArtifactContextMenu();
       render();
     });
     $("closeOutputPreview").addEventListener("click", closeOutputPreview);
-    $("outputPreviewModal").addEventListener("click", function (event) { if (event.target === $("outputPreviewModal")) closeOutputPreview(); });
+    $("outputPreviewModal").addEventListener("click", function (event) {
+      var ratingButton = event.target.closest("[data-rate-output]");
+      if (ratingButton) {
+        setOutputRating(artifactById(ratingButton.dataset.rateOutput), ratingButton.dataset.rating);
+        return;
+      }
+      if (event.target === $("outputPreviewModal")) closeOutputPreview();
+    });
     $("closeOutputImport").addEventListener("click", closeOutputImport);
     $("cancelOutputImport").addEventListener("click", closeOutputImport);
     $("confirmOutputImport").addEventListener("click", confirmOutputImport);
@@ -658,20 +1227,9 @@
       if (event.target.name === "output-import-target") $("confirmOutputImport").disabled = false;
     });
     $("outputImportModal").addEventListener("click", function (event) { if (event.target === $("outputImportModal")) closeOutputImport(); });
-    document.addEventListener("keydown", function (event) {
-      if (event.key === "Escape") {
-        closeOutputPreview();
-        closeOutputImport();
-      }
-      if (!/^[0-5]$/.test(event.key) || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      if (event.target.closest && event.target.closest("input, select, textarea, video, audio")) return;
-      if (document.querySelector(".modal-backdrop.is-open:not([hidden])")) return;
-      var card = document.querySelector(".artifact-card:hover");
-      if (!card) return;
-      var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
-      if (!item) return;
-      event.preventDefault();
-      setOutputRating(item, event.key);
+    document.addEventListener("keydown", handleOutputKeyboardShortcut);
+    document.addEventListener("click", function (event) {
+      if (!event.target.closest("#artifactContextMenu")) closeArtifactContextMenu();
     });
     window.addEventListener("resize", updateFilterSlider);
   }

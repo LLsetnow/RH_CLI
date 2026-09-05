@@ -133,6 +133,7 @@
   }
 
   function isInternalPageLink(link) {
+    if (document.body.classList.contains("focus-body")) return false;
     if (!link || link.hasAttribute("download") || link.target && link.target !== "_self") return false;
     if (!link.closest(".top-nav, .brand-home-link")) return false;
     try {
@@ -195,6 +196,10 @@
   }
 
   function requestGlobalTaskSubmit() {
+    if (document.body.classList.contains("focus-body")) {
+      document.dispatchEvent(new CustomEvent("rh-submit-task"));
+      return;
+    }
     if (navigationPath(window.location.pathname) === "/") {
       document.dispatchEvent(new CustomEvent("rh-submit-task"));
       return;
@@ -212,6 +217,7 @@
   });
 
   function topLevelNavigationLinks() {
+    if (document.body.classList.contains("focus-body")) return [];
     return Array.prototype.slice.call(document.querySelectorAll(".top-nav-link"));
   }
 
@@ -245,8 +251,9 @@
   }
 
   document.addEventListener("keydown", function (event) {
-    if (event.defaultPrevented || event.isComposing || !event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) return;
+    if (event.defaultPrevented || event.isComposing || !event.altKey || event.ctrlKey || event.shiftKey || event.metaKey) return;
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if (document.body.classList.contains("focus-body")) return;
     event.preventDefault();
     event.stopPropagation();
     handleGlobalPageNavigation(event.key === "ArrowLeft" ? "previous" : "next");
@@ -318,9 +325,11 @@
     modalTimers[id] = window.setTimeout(function () { finishClose(id, modal); }, MODAL_MS);
   }
 
-  function videoPlayerMarkup(url, autoplay, showLoop) {
+  function videoPlayerMarkup(url, autoplay, showLoop, leadingControlsMarkup) {
     var loopButton = showLoop === false ? "" : '<button class="video-loop-toggle" type="button" data-video-loop aria-pressed="false" title="开启循环播放">↻ 循环播放</button>';
-    return '<div class="video-player" data-video-player><video src="' + url + '" controls' + (autoplay ? ' autoplay' : '') + ' preload="metadata"></video>' + loopButton + '</div>';
+    var leadingControls = leadingControlsMarkup || "";
+    var controls = loopButton || leadingControls ? '<div class="video-player-controls">' + leadingControls + loopButton + '</div>' : "";
+    return '<div class="video-player" data-video-player><video src="' + url + '" controls' + (autoplay ? ' autoplay' : '') + ' preload="metadata"></video>' + controls + '</div>';
   }
 
   function syncVideoLoopButton(button, video) {

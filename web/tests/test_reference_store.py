@@ -23,22 +23,15 @@ def _reference_root(tmp_path: Path) -> Path:
     (root / "audio" / "voice.mp3").write_bytes(b"audio")
     (root / "background" / "room.jpg").write_bytes(b"jpg")
     (root / "clothes" / "uniform.webp").write_bytes(b"webp")
-    (root / "character" / "character.md").write_text(
-        "## character\n\n### 二次元\n\n#### 主角 · 正脸\n\n![200](hero.png)\n\n> 主角脸部参考。\n",
-        encoding="utf-8",
-    )
-    (root / "audio" / "audio.md").write_text(
-        "## audio\n\n### 音色\n\n#### 主角音色\n\n[音频](voice.mp3)\n\n> 主角的对白音色参考。\n",
-        encoding="utf-8",
-    )
-    (root / "background" / "background.md").write_text(
-        "## background\n\n### 室内\n\n#### 房间\n\n![200](room.jpg)\n\n> 室内场景参考。\n",
-        encoding="utf-8",
-    )
-    (root / "clothes" / "clothes.md").write_text(
-        "## clothes\n\n### 制服\n\n#### 学院制服\n\n![200](uniform.webp)\n\n> 学院制服参考。\n",
-        encoding="utf-8",
-    )
+    def write(kind: str, references: list[dict]) -> None:
+        (root / kind / f"{kind}.json").write_text(
+            json.dumps({"version": VERSION, "kind": kind, "references": references}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    write("character", [{"id": "character-hero", "category": "二次元", "tags": ["人物", "主角"], "source_tags": [], "title": "主角 · 正脸", "text": "主角脸部参考。", "image_path": "hero.png", "audio_path": ""}])
+    write("audio", [{"id": "audio-hero", "category": "音色", "tags": ["音频"], "source_tags": [], "title": "主角音色", "text": "主角的对白音色参考。", "image_path": "", "audio_path": "voice.mp3"}])
+    write("background", [{"id": "background-room", "category": "室内", "tags": ["背景"], "source_tags": [], "title": "房间", "text": "室内场景参考。", "image_path": "room.jpg", "audio_path": ""}])
+    write("clothes", [{"id": "clothes-uniform", "category": "制服", "tags": ["服装"], "source_tags": [], "title": "学院制服", "text": "学院制服参考。", "image_path": "uniform.webp", "audio_path": ""}])
     return root
 
 
@@ -61,18 +54,13 @@ def test_reference_store_parses_all_resource_kinds_and_serves_media(tmp_path):
     assert audio["audio_url"].endswith("/audio")
     assert store.media_path(audio["id"], "audio").name == "voice.mp3"
 
-    cached = json.loads((tmp_path / "data" / "prompt" / "references.json").read_text(encoding="utf-8"))
-    assert cached["source_sha256"]
-    assert len(cached["references"]) == 4
+    assert not (tmp_path / "data" / "prompt" / "references.json").exists()
 
 
 def test_reference_store_keeps_legacy_nested_character_variants_readable(tmp_path):
     root = _reference_root(tmp_path)
-    character = root / "character" / "character.md"
-    character.write_text(
-        "## character\n\n### 二次元\n\n#### 主角\n\n##### 三视图\n\n![200](hero.png)\n\n> 主角三视图。\n",
-        encoding="utf-8",
-    )
+    character = root / "character" / "character.json"
+    character.write_text(json.dumps({"version": VERSION, "references": [{"id": "character-variant", "category": "二次元", "tags": ["人物", "主角"], "title": "主角 · 三视图", "text": "主角三视图。", "image_path": "hero.png", "audio_path": ""}]}, ensure_ascii=False), encoding="utf-8")
     store = ReferenceStore(tmp_path / "data", root)
 
     item = next(item for item in store.references() if item["kind"] == "character")
@@ -83,38 +71,26 @@ def test_reference_store_keeps_legacy_nested_character_variants_readable(tmp_pat
 
 def test_reference_store_preserves_explicit_entry_tags(tmp_path):
     root = _reference_root(tmp_path)
-    character = root / "character" / "character.md"
-    character.write_text(
-        "## character\n\n### 二次元\n\n#### 主角 · 正脸\n\n"
-        "tags: 头像, 二次元, 3D\n\n![200](hero.png)\n\n> 主角脸部参考。\n",
-        encoding="utf-8",
-    )
+    character = root / "character" / "character.json"
+    character.write_text(json.dumps({"version": VERSION, "references": [{"id": "character-hero", "category": "二次元", "tags": ["人物", "头像", "二次元", "3D", "主角"], "source_tags": ["头像", "二次元", "3D"], "title": "主角 · 正脸", "text": "主角脸部参考。", "image_path": "hero.png", "audio_path": ""}]}, ensure_ascii=False), encoding="utf-8")
     store = ReferenceStore(tmp_path / "data", root)
 
     item = next(item for item in store.references() if item["kind"] == "character")
     assert item["tags"] == ["人物", "头像", "二次元", "3D", "主角"]
 
 
-def test_reference_store_rebuilds_cache_after_parser_version_changes(tmp_path):
+def test_reference_store_refreshes_from_json_source_changes(tmp_path):
     root = _reference_root(tmp_path)
-    character = root / "character" / "character.md"
-    character.write_text(
-        "## character\n\n### 二次元\n\n#### 主角 · 正脸\n\n"
-        "tags: 头像, 二次元, 3D\n\n![200](hero.png)\n\n> 主角脸部参考。\n",
-        encoding="utf-8",
-    )
-    data_root = tmp_path / "data"
-    ReferenceStore(data_root, root)
-    cache_path = data_root / "prompt" / "references.json"
-    cached = json.loads(cache_path.read_text(encoding="utf-8"))
-    cached["version"] = VERSION - 1
-    cached["references"][0]["tags"] = ["人物"]
-    cache_path.write_text(json.dumps(cached, ensure_ascii=False), encoding="utf-8")
+    character = root / "character" / "character.json"
+    store = ReferenceStore(tmp_path / "data", root)
+    document = json.loads(character.read_text(encoding="utf-8"))
+    document["references"][0]["text"] = "已更新的人物参考。"
+    character.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
-    store = ReferenceStore(data_root, root)
+    store.refresh()
 
     item = next(item for item in store.references() if item["kind"] == "character")
-    assert item["tags"] == ["人物", "头像", "二次元", "3D", "主角"]
+    assert item["text"] == "已更新的人物参考。"
 
 
 def test_reference_store_unwraps_angle_bracket_paths_and_keeps_same_titles_distinct(tmp_path):
@@ -123,12 +99,10 @@ def test_reference_store_unwraps_angle_bracket_paths_and_keeps_same_titles_disti
     (root / "character" / "樱井宁宁").mkdir()
     (root / "character" / "千夏" / "4.jpg").write_bytes(b"first")
     (root / "character" / "樱井宁宁" / "4.jpg").write_bytes(b"second")
-    (root / "character" / "character.md").write_text(
-        "## character\n\n"
-        "### 千夏\n\n#### 4.jpg\n\n![200](<千夏/4.jpg>)\n\n> 千夏参考。\n\n"
-        "### 樱井宁宁\n\n#### 4.jpg\n\n![200](<樱井宁宁/4.jpg>)\n\n> 樱井宁宁参考。\n",
-        encoding="utf-8",
-    )
+    (root / "character" / "character.json").write_text(json.dumps({"version": VERSION, "references": [
+        {"id": "character-one", "category": "千夏", "tags": ["人物"], "title": "4.jpg", "text": "千夏参考。", "image_path": "千夏/4.jpg", "audio_path": ""},
+        {"id": "character-two", "category": "樱井宁宁", "tags": ["人物"], "title": "4.jpg", "text": "樱井宁宁参考。", "image_path": "樱井宁宁/4.jpg", "audio_path": ""},
+    ]}, ensure_ascii=False), encoding="utf-8")
     store = ReferenceStore(tmp_path / "data", root)
 
     items = [item for item in store.references() if item["kind"] == "character"]
@@ -140,7 +114,7 @@ def test_reference_store_unwraps_angle_bracket_paths_and_keeps_same_titles_disti
 
 def test_reference_api_exposes_library_and_local_image(tmp_path, monkeypatch):
     source_root = Path("/Users/apple/Documents/VideoMake/ref")
-    source_file = source_root / "background" / "background.md"
+    source_file = source_root / "background" / "background.json"
     if not source_file.is_file():
         pytest.skip("本机未安装 VideoMake 的参考资源索引")
     data_root = tmp_path / "data"
@@ -161,7 +135,7 @@ def test_reference_api_exposes_library_and_local_image(tmp_path, monkeypatch):
         response = connection.getresponse()
         payload = json.loads(response.read())
         assert response.status == 200
-        assert payload["kind_counts"] == {"character": 162, "audio": 6, "background": 14, "clothes": 6}
+        assert payload["kind_counts"] == {"character": 157, "audio": 6, "background": 14, "clothes": 6}
         background = next(item for item in payload["references"] if item["kind"] == "background" and item["image_available"])
 
         connection.request("GET", background["image_url"])
@@ -182,13 +156,10 @@ def test_reference_api_exposes_library_and_local_image(tmp_path, monkeypatch):
         server.server_close()
 
 
-def test_reference_store_uses_per_kind_configured_markdown_paths(tmp_path):
+def test_reference_store_uses_per_kind_configured_json_paths(tmp_path):
     root = _reference_root(tmp_path)
-    alternate = tmp_path / "alternate-character.md"
-    alternate.write_text(
-        "## character\n\n### 写实\n\n#### 另一个人物\n\n> 另一个人物参考。\n",
-        encoding="utf-8",
-    )
+    alternate = tmp_path / "alternate-character.json"
+    alternate.write_text(json.dumps({"version": VERSION, "references": [{"id": "character-alt", "category": "写实", "tags": ["人物"], "title": "另一个人物", "text": "另一个人物参考。"}]}, ensure_ascii=False), encoding="utf-8")
     store = ReferenceStore(
         tmp_path / "data",
         root,
@@ -201,18 +172,18 @@ def test_reference_store_uses_per_kind_configured_markdown_paths(tmp_path):
     assert store.source_status()["source_paths"]["character"] == str(alternate.resolve())
 
 
-def test_reference_store_writes_tags_and_new_entries_back_to_kind_markdown(tmp_path):
+def test_reference_store_writes_tags_and_new_entries_back_to_kind_json(tmp_path):
     root = _reference_root(tmp_path)
     store = ReferenceStore(tmp_path / "data", root)
     character = next(item for item in store.references() if item["kind"] == "character")
 
     updated = store.update_reference(character["id"], {"tags": ["头像", "主角"], "text": "已更新的人物文本"})
-    source = root / "character" / "character.md"
-    content = source.read_text(encoding="utf-8")
+    source = root / "character" / "character.json"
+    content = json.loads(source.read_text(encoding="utf-8"))
     assert updated["source_tags"] == ["头像", "主角"]
-    assert f"id: {character['id']}" in content
-    assert "tags: 头像, 主角" in content
-    assert "> 已更新的人物文本" in content
+    saved = next(item for item in content["references"] if item["id"] == character["id"])
+    assert saved["tags"] == ["人物", "头像", "主角"]
+    assert saved["text"] == "已更新的人物文本"
 
     (root / "character" / "new.png").write_bytes(b"png")
     added = store.add_reference("character", {
@@ -224,7 +195,23 @@ def test_reference_store_writes_tags_and_new_entries_back_to_kind_markdown(tmp_p
     })
     assert added["title"] == "新人物"
     assert added["image_path"] == "character/new.png"
-    assert "#### 新人物" in source.read_text(encoding="utf-8")
+    assert any(item["title"] == "新人物" for item in json.loads(source.read_text(encoding="utf-8"))["references"])
+
+
+def test_reference_store_renames_target_image_when_title_changes(tmp_path):
+    root = _reference_root(tmp_path)
+    store = ReferenceStore(tmp_path / "data", root)
+    character = next(item for item in store.references() if item["kind"] == "character")
+
+    updated = store.update_reference(character["id"], {"title": "新人物名"})
+
+    assert updated["image_path"] == "新人物名.png"
+    assert (root / "character" / "新人物名.png").read_bytes() == b"png"
+    assert not (root / "character" / "hero.png").exists()
+    content = json.loads((root / "character" / "character.json").read_text(encoding="utf-8"))
+    renamed = next(item for item in content["references"] if item["id"] == character["id"])
+    assert renamed["title"] == "新人物名"
+    assert renamed["image_path"] == "新人物名.png"
 
 
 def test_reference_api_can_add_and_update_a_card_in_the_configured_root(tmp_path, monkeypatch):
@@ -266,7 +253,8 @@ def test_reference_api_can_add_and_update_a_card_in_the_configured_root(tmp_path
         updated_payload = json.loads(update_response.read())
         assert update_response.status == 200
         assert updated_payload["reference"]["source_tags"] == ["更新"]
-        assert "> 已更新" in (root / "background" / "background.md").read_text(encoding="utf-8")
+        saved = json.loads((root / "background" / "background.json").read_text(encoding="utf-8"))
+        assert any(item["text"] == "已更新" for item in saved["references"])
 
         media_body = json.dumps({
             "kind": "background",

@@ -2,6 +2,7 @@
   "use strict";
 
   var STORAGE_KEY = "rh-workflow-desk-prompt-builder-v1";
+  var LIBRARY_VIEW_STORAGE_KEY = "rh-workflow-desk-prompt-library-view-v1";
   var TASK_PROMPT_IMPORT_KEY = "rh-workflow-desk-pending-prompt-v1";
   var TASK_PROMPT_GROUP_IMPORT_KEY = "rh-workflow-desk-pending-prompt-group-v1";
   var draftStorageKey = "rh-workflow-desk-draft-v1";
@@ -15,9 +16,11 @@
   var pendingResourceMedia = {};
   var activeResourceMediaRole = "image";
   var depthGenerationBusy = false;
+  var skeletonGenerationBusy = false;
   var visionRecognitionBusy = false;
   var depthImportActionId = "";
   var workflowImportAsset = null;
+  var poseMediaImportType = "depth";
   var GRID_SPLITTER_STORAGE_KEY = "rh-workflow-desk-prompt-library-width-v2";
   var gridSplitterDrag = null;
   var referenceSuggest = { open: false, editor: null, item: null, range: null, query: "", candidates: [], selectedIndex: 0 };
@@ -26,6 +29,10 @@
   var mediaBlockPickerBusy = false;
   var activeMediaStageIndex = null;
   var mediaPreviewRequests = {};
+  var focusPromptUpdatePending = false;
+  var libraryRatingBusy = {};
+  var libraryImageContext = { src: "", title: "" };
+  var libraryImageCopyBusy = false;
   var REFERENCE_SENTINEL_PREFIX = "__RH_REF_";
   var REFERENCE_MODES = ["character", "audio", "background", "clothes"];
   var RESOURCE_LABELS = { action: "动作", character: "人物", audio: "音频", background: "背景", clothes: "服装" };
@@ -34,6 +41,7 @@
     action: [
       { role: "color", label: "原图", accept: "image/*", pathId: "resourceImagePath", paste: true },
       { role: "depth", label: "深度图", accept: "image/*", pathId: "resourceDepthPath", paste: true, autoDepth: true },
+      { role: "skeleton", label: "骨骼图", accept: "image/*", pathId: "resourceSkeletonPath", paste: true, autoSkeleton: true },
     ],
     character: [{ role: "image", label: "人物图片", accept: "image/*", pathId: "resourceImagePath", paste: true }],
     background: [{ role: "image", label: "背景图片", accept: "image/*", pathId: "resourceImagePath", paste: true }],
@@ -77,9 +85,11 @@
       category: candidate.category || "",
       color_image_url: candidate.colorImageUrl || candidate.imageUrl || "",
       depth_image_url: candidate.depthImageUrl || "",
+      skeleton_image_url: candidate.skeletonImageUrl || "",
       pair_status: candidate.pairStatus || "",
       color_image_path: candidate.colorImagePath || "",
       depth_image_path: candidate.depthImagePath || "",
+      skeleton_image_path: candidate.skeletonImagePath || "",
       image_url: candidate.imageUrl || "",
       image_path: candidate.imagePath || "",
       audio_url: candidate.audioUrl || "",
@@ -99,7 +109,7 @@
     if (sourceType === "action") {
       var action = state.actions.find(function (item) { return String(item.id) === id; });
       if (!action) return null;
-      return { key: "action:" + id, sourceType: "action", sourceId: id, title: action.title, text: action.text || "", tags: action.tags || [], category: action.category || "未分类", colorImageUrl: action.color_image_url || action.image_url || "", depthImageUrl: action.depth_image_url || "", colorImagePath: action.color_image_path || action.image_path || "", depthImagePath: action.depth_image_path || "", pairStatus: action.pair_status || "", sourceLabel: "动作库" };
+      return { key: "action:" + id, sourceType: "action", sourceId: id, title: action.title, text: action.text || "", tags: action.tags || [], category: action.category || "未分类", colorImageUrl: action.color_image_url || action.image_url || "", depthImageUrl: action.depth_image_url || "", skeletonImageUrl: action.skeleton_image_url || "", colorImagePath: action.color_image_path || action.image_path || "", depthImagePath: action.depth_image_path || "", skeletonImagePath: action.skeleton_image_path || "", pairStatus: action.pair_status || "", sourceLabel: "动作库" };
     }
     var reference = state.references.find(function (item) { return String(item.id) === id; });
     if (!reference) return null;
@@ -154,6 +164,8 @@
       tags: segment.snapshot && Array.isArray(segment.snapshot.tags) ? segment.snapshot.tags : [],
       colorImagePath: segment.snapshot && (segment.snapshot.color_image_path || segment.snapshot.image_path) || "",
       depthImagePath: segment.snapshot && segment.snapshot.depth_image_path || "",
+      skeletonImagePath: segment.snapshot && segment.snapshot.skeleton_image_path || "",
+      skeletonImageUrl: segment.snapshot && segment.snapshot.skeleton_image_url || "",
       imageUrl: segment.snapshot && (segment.snapshot.image_url || segment.snapshot.color_image_url) || "",
       imagePath: segment.snapshot && segment.snapshot.image_path || "",
       audioUrl: segment.snapshot && segment.snapshot.audio_url || "",
@@ -206,6 +218,83 @@
     return state.stage.map(function (item) {
       return promptTextForStageItem(item).trim();
     }).filter(Boolean).join("\n\n");
+  }
+  function aiPromptText(value) {
+    return String(value == null ? "" : value).replace(/\r\n?/g, "\n").trim();
+  }
+  function aiPromptTextItemContent(item, index, includeReferenceText) {
+    var segments = itemSegments(item);
+    var editor = document.querySelector('[data-stage-text="' + index + '"]');
+    if (editor) {
+      var liveSegments = [];
+      collectEditorSegments(editor, liveSegments);
+      segments = liveSegments;
+    }
+    return aiPromptText(segments.map(function (segment) {
+      if (segment.type !== "reference") return String(segment.text || "");
+      var label = segmentLabel(segment);
+      var referencedText = aiPromptText(segmentPromptText(segment));
+      return "@" + label + (includeReferenceText && referencedText ? "\n[引用卡片内容]\n" + referencedText : "");
+    }).join(""));
+  }
+  function aiPromptWorkbenchItem(item, index) {
+    if (!item) return "";
+    var typeLabel = item.kind === "text" ? "自由文本" : item.kind === "media" ? "媒体积木" : item.kind === "action" ? "动作库" : item.kind === "reference" ? (RESOURCE_LABELS[item.referenceKind] || "参考资源库") : "固定积木";
+    var lines = ["【" + typeLabel + "】"];
+    var title = aiPromptText(item.title);
+    if (title && item.kind !== "text") lines.push("标题：" + title);
+    if (item.category && item.kind !== "text") lines.push("分类：" + aiPromptText(item.category));
+    if (item.kind === "text") {
+      var textContent = aiPromptTextItemContent(item, index, true);
+      if (textContent) lines.push("输入内容：" + textContent);
+      if (aiPromptText(item.translatedText) && item.translatedText !== item.text) lines.push("英文翻译结果：" + aiPromptText(item.translatedText));
+    } else if (item.kind === "media") {
+      lines.push("媒体类型：" + aiPromptText(mediaTypeLabel(item.mediaKind || item.previewKind)));
+    } else {
+      var promptText = aiPromptText(item.text);
+      if (promptText) lines.push("提示词内容：" + promptText);
+    }
+    if (Array.isArray(item.tags) && item.tags.length) lines.push("标签：" + item.tags.map(aiPromptText).filter(Boolean).join("、"));
+    return lines.length > 1 ? lines.join("\n") : "";
+  }
+  function aiPromptWorkbenchContext() {
+    return state.stage.map(function (item, index) {
+      return aiPromptWorkbenchItem(item, index);
+    }).filter(Boolean).join("\n\n");
+  }
+  function generateAiPrompt(index) {
+    var item = state.stage[index];
+    if (!item || item.kind !== "text") return;
+    var question = aiPromptTextItemContent(item, index);
+    if (!question) return showToast("请先在输入内容框中填写问题", true);
+    var button = document.querySelector('.ai-prompt-button[data-ai-prompt-stage="' + index + '"]');
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.querySelector("span").textContent = "生成中…";
+    jsonRequest("/api/prompt/ai-prompt", "POST", {
+      context: aiPromptWorkbenchContext(),
+      question: question,
+    }).then(function (data) {
+      var generatedText = aiPromptText(data.text);
+      if (!generatedText) throw new Error("阿里云没有返回提示词内容");
+      var currentIndex = state.stage.indexOf(item);
+      if (currentIndex === -1) return;
+      item.segments = [{ type: "text", text: generatedText }];
+      item.text = generatedText;
+      item.translatedText = item.translationDisabled || item.generatedType ? generatedText : "";
+      saveState();
+      renderStage();
+      showToast("AI提示词已写入输入内容");
+    }).catch(function (error) {
+      showToast("AI提示词生成失败：" + error.message, true);
+    }).finally(function () {
+      var currentButton = document.querySelector('.stage-block[data-stage-instance-id="' + CSS.escape(String(item.instanceId)) + '"] .ai-prompt-button');
+      if (!currentButton) return;
+      currentButton.disabled = false;
+      currentButton.classList.remove("is-loading");
+      currentButton.querySelector("span").textContent = "AI提示词";
+    });
   }
   function pendingTranslationItems() {
     return state.stage.filter(function (item) {
@@ -373,6 +462,8 @@
         color_image_path: item.colorImagePath || item.imagePath || "",
         depth_image_url: item.depthImageUrl || "",
         depth_image_path: item.depthImagePath || "",
+        skeleton_image_url: item.skeletonImageUrl || "",
+        skeleton_image_path: item.skeletonImagePath || "",
         pair_status: item.pairStatus || "",
       };
     } else if (item.kind === "reference") {
@@ -459,6 +550,8 @@
       colorImagePath: source ? (source.color_image_path || source.image_path || "") : (snapshot.color_image_path || snapshot.image_path || ""),
       depthImageUrl: source ? (source.depth_image_url || "") : (snapshot.depth_image_url || ""),
       depthImagePath: source ? (source.depth_image_path || "") : (snapshot.depth_image_path || ""),
+      skeletonImageUrl: source ? (source.skeleton_image_url || "") : (snapshot.skeleton_image_url || ""),
+      skeletonImagePath: source ? (source.skeleton_image_path || "") : (snapshot.skeleton_image_path || ""),
       pairStatus: source ? (source.pair_status || "") : (snapshot.pair_status || ""),
       missing: !source,
     };
@@ -514,6 +607,31 @@
       return null;
     }
   }
+  function isValidLibraryMode(value) {
+    return value === "blocks" || value === "pose" || REFERENCE_MODES.indexOf(value) !== -1;
+  }
+  function restoreLibraryViewState() {
+    try {
+      var raw = window.localStorage.getItem(LIBRARY_VIEW_STORAGE_KEY);
+      var saved = raw ? JSON.parse(raw) : null;
+      if (!saved || typeof saved !== "object") return;
+      var mode = String(saved.libraryMode || "");
+      if (mode === "actions") mode = "pose";
+      if (isValidLibraryMode(mode)) state.libraryMode = mode;
+      if (typeof saved.categoryFilter === "string" && saved.categoryFilter.trim()) state.categoryFilter = saved.categoryFilter.trim();
+      if (typeof saved.filter === "string" && saved.filter.trim()) state.filter = saved.filter.trim();
+    } catch (error) {}
+  }
+  function persistLibraryViewState() {
+    try {
+      window.localStorage.setItem(LIBRARY_VIEW_STORAGE_KEY, JSON.stringify({
+        version: 1,
+        libraryMode: state.libraryMode,
+        categoryFilter: state.categoryFilter,
+        filter: state.filter,
+      }));
+    } catch (error) {}
+  }
   function persistState() {
     if (!promptApiReady) return Promise.resolve();
     return jsonRequest("/api/prompt/state", "PUT", { items: state.stage.map(stageItemToApi) }).catch(function (error) {
@@ -530,10 +648,12 @@
       jsonRequest("/api/prompt/actions").catch(function () { return { actions: [] }; }),
       jsonRequest("/api/prompt/references").catch(function () { return { references: [] }; }),
       jsonRequest("/api/prompt/state"),
+      jsonRequest("/api/state").catch(function () { return { settings: {} }; }),
     ]).then(function (snapshots) {
       applyActionSnapshot(snapshots[0]);
       applyReferenceSnapshot(snapshots[1]);
       applyPromptSnapshot(snapshots[2]);
+      applySettingsSnapshot(snapshots[3]);
       var legacy = readLegacyState();
       if (!legacy) return snapshots[2];
       return jsonRequest("/api/prompt/migrate", "POST", legacy).then(function (migrated) {
@@ -543,6 +663,18 @@
       });
     });
   }
+  function applyPromptGroup(group, notify) {
+    if (!group || !Array.isArray(group.items)) return false;
+    state.stage = group.items.map(stageItemFromApi).filter(Boolean);
+    state.activeGroupId = "";
+    state.assemblyView = "stage";
+    if ($("groupName")) $("groupName").value = String(group.name || "任务提交时组装台");
+    saveState();
+    try { window.localStorage.removeItem(TASK_PROMPT_GROUP_IMPORT_KEY); } catch (error) {}
+    if (notify) showToast("已从工作流快照加载组状态「" + (group.name || "任务提交时组装台") + "」");
+    return true;
+  }
+
   function applyPendingTaskPromptGroup() {
     var pending = null;
     try {
@@ -552,15 +684,15 @@
       pending = null;
     }
     var group = pending && pending.version === 1 && pending.group && typeof pending.group === "object" ? pending.group : null;
-    if (!group || !Array.isArray(group.items)) return false;
-    state.stage = group.items.map(stageItemFromApi).filter(Boolean);
-    state.activeGroupId = "";
-    state.assemblyView = "stage";
-    if ($("groupName")) $("groupName").value = String(group.name || "任务提交时组装台");
-    saveState();
-    try { window.localStorage.removeItem(TASK_PROMPT_GROUP_IMPORT_KEY); } catch (error) {}
-    showToast("已从任务快照加载组状态「" + (group.name || "任务提交时组装台") + "」");
-    return true;
+    return applyPromptGroup(group, true);
+  }
+
+  function notifySubmitImport(detail) {
+    if (window.RHFocus && typeof window.RHFocus.importToSubmit === "function") {
+      window.RHFocus.importToSubmit(detail || {});
+      return true;
+    }
+    return false;
   }
   function blockMatches(block) {
     var needle = state.search.toLowerCase();
@@ -602,7 +734,10 @@
       return;
     }
     var categories = unique(currentLibraryEntries().map(function (entry) { return String(entry.category || "未分类"); }));
-    if (state.categoryFilter !== "全部" && categories.indexOf(state.categoryFilter) === -1) state.categoryFilter = "全部";
+    if (state.categoryFilter !== "全部" && categories.indexOf(state.categoryFilter) === -1) {
+      state.categoryFilter = "全部";
+      persistLibraryViewState();
+    }
     container.innerHTML = ["全部"].concat(categories).map(function (category) {
       return '<button class="category-filter' + (state.categoryFilter === category ? " active" : "") + '" type="button" data-filter-category="' + esc(category) + '">' + esc(category) + '</button>';
     }).join("");
@@ -638,7 +773,10 @@
         return String(tag).trim() !== category;
       });
     })));
-    if (state.filter !== "全部" && tags.indexOf(state.filter) === -1) state.filter = "全部";
+    if (state.filter !== "全部" && tags.indexOf(state.filter) === -1) {
+      state.filter = "全部";
+      persistLibraryViewState();
+    }
     $("tagFilters").innerHTML = ["全部"].concat(tags).map(function (tag) {
       return '<button class="tag-filter' + (state.filter === tag ? " active" : "") + '" type="button" data-filter-tag="' + esc(tag) + '">' + esc(tag) + '</button>';
     }).join("");
@@ -654,6 +792,21 @@
       list.classList.remove("library-mode-switching");
     }, 360);
   }
+  function syncLibraryModeSticky() {
+    var panel = document.querySelector(".library-panel");
+    var sticky = document.querySelector(".library-mode-tabs-sticky");
+    if (!panel || !sticky) return;
+    var panelTop = panel.getBoundingClientRect().top;
+    var stickyTop = sticky.getBoundingClientRect().top;
+    sticky.classList.toggle("is-stuck", panel.scrollTop > 0 && stickyTop <= panelTop + 1);
+  }
+  function initLibraryModeSticky() {
+    var panel = document.querySelector(".library-panel");
+    if (!panel) return;
+    panel.addEventListener("scroll", syncLibraryModeSticky, { passive: true });
+    window.addEventListener("resize", syncLibraryModeSticky);
+    syncLibraryModeSticky();
+  }
   function renderLibraryMode() {
     var modeTabs = document.querySelector(".library-mode-tabs");
     if (!modeTabs) return;
@@ -665,6 +818,8 @@
     });
     var actionCount = $("actionModeCount");
     if (actionCount) actionCount.textContent = String(state.actions.length);
+    var blockCount = $("blockModeCount");
+    if (blockCount) blockCount.textContent = String(state.libraryBlocks.length);
     state.references.forEach(function (reference) {
       var count = $(reference.kind + "ModeCount");
       if (count) count.textContent = String(state.references.filter(function (item) { return item.kind === reference.kind; }).length);
@@ -683,19 +838,24 @@
     var title = action.title || "动作图片";
     var colorUrl = action.color_image_url || action.image_url || "";
     var depthUrl = action.depth_image_url || "";
+    var skeletonUrl = action.skeleton_image_url || "";
     var colorAvailable = Boolean(action.color_image_available && colorUrl);
     var depthAvailable = Boolean(action.depth_image_available && depthUrl);
+    var skeletonAvailable = Boolean(action.skeleton_image_available && skeletonUrl);
     var color = colorAvailable
-      ? '<button class="image-preview-trigger action-media-image is-active" type="button" data-action-media-image="color" data-image-preview="' + esc(colorUrl) + '" data-image-title="' + esc(title + " · 原图") + '" aria-label="放大查看「' + esc(title) + '」原图"><img src="' + esc(colorUrl) + '" alt="' + esc(title) + ' · 原图" loading="lazy" /></button>'
+      ? '<button class="image-preview-trigger action-media-image is-active" type="button" data-action-media-image="color" data-action-media-available="true" data-image-preview="' + esc(colorUrl) + '" data-image-title="' + esc(title + " · 原图") + '" aria-label="放大查看「' + esc(title) + '」原图"><img src="' + esc(colorUrl) + '" alt="' + esc(title) + ' · 原图" loading="lazy" /></button>'
       : '<div class="action-media-missing action-media-image is-active"><span>原图缺失</span></div>';
     var depth = depthAvailable
-      ? '<button class="image-preview-trigger action-media-image" type="button" data-action-media-image="depth" data-image-preview="' + esc(depthUrl) + '" data-image-title="' + esc(title + " · 深度图") + '" aria-label="放大查看「' + esc(title) + '」深度图" hidden><img src="' + esc(depthUrl) + '" alt="' + esc(title) + ' · 深度图" loading="lazy" /></button>'
+      ? '<button class="image-preview-trigger action-media-image" type="button" data-action-media-image="depth" data-action-media-available="true" data-image-preview="' + esc(depthUrl) + '" data-image-title="' + esc(title + " · 深度图") + '" aria-label="放大查看「' + esc(title) + '」深度图" hidden><img src="' + esc(depthUrl) + '" alt="' + esc(title) + ' · 深度图" loading="lazy" /></button>'
       : '<div class="action-media-missing action-media-image" hidden><span>深度图缺失</span></div>';
-    var toggle = depthAvailable
+    var skeleton = skeletonAvailable
+      ? '<button class="image-preview-trigger action-media-image" type="button" data-action-media-image="skeleton" data-action-media-available="true" data-image-preview="' + esc(skeletonUrl) + '" data-image-title="' + esc(title + " · 骨骼图") + '" aria-label="放大查看「' + esc(title) + '」骨骼图" hidden><img src="' + esc(skeletonUrl) + '" alt="' + esc(title) + ' · 骨骼图" loading="lazy" /></button>'
+      : '<div class="action-media-missing action-media-image" hidden><span>骨骼图缺失</span></div>';
+    var toggle = depthAvailable || skeletonAvailable
       ? '<button class="action-media-toggle" type="button" data-action-media-toggle data-action-media-current="color" aria-label="当前显示原图，点击切换到深度图" title="当前：原图；点击切换到深度图"></button>'
       : "";
     return '<div class="action-media-shell ' + (extraClass || "") + '" data-action-media>' +
-      '<div class="action-media-viewport">' + color + depth + '</div>' +
+      '<div class="action-media-viewport">' + color + depth + skeleton + '</div>' +
       toggle +
       '</div>';
   }
@@ -710,13 +870,87 @@
   function resourceTagsMarkup(resource, kind) {
     var tags = resource.tags || [];
     var content = tags.length
-      ? '<span class="block-tags">' + tags.map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</span>'
+      ? '<span class="block-tags">' + libraryTagsMarkup(tags) + '</span>'
       : "";
     return '<button class="resource-tags-edit' + (tags.length ? "" : " is-empty") + '" type="button" data-edit-resource data-resource-kind="' + esc(kind) + '" data-resource-id="' + esc(resource.id) + '" aria-label="编辑「' + esc(resource.title || "资源") + '」标签">' + content + '</button>';
   }
+  function libraryRatingFromTags(tags) {
+    var values = Array.isArray(tags) ? tags : [];
+    var rating = 0;
+    values.forEach(function (tag) {
+      if (/^[1-5]$/.test(String(tag || "").trim())) rating = Number(tag);
+    });
+    return rating;
+  }
+  function libraryTagsMarkup(tags) {
+    return (Array.isArray(tags) ? tags : []).map(function (tag) {
+      var value = String(tag || "").trim();
+      var isRating = /^[1-5]$/.test(value);
+      return '<span class="' + (isRating ? "block-tag library-rating-tag" : "block-tag") + '"' + (isRating ? ' title="评分 ' + value + '"' : "") + '>' + esc(value) + '</span>';
+    }).join("");
+  }
+  function libraryCardTarget(card) {
+    if (!card) return null;
+    if (card.dataset.libraryBlockId) {
+      return { kind: "block", id: card.dataset.libraryBlockId, entry: state.libraryBlocks.find(function (item) { return item.id === card.dataset.libraryBlockId; }) };
+    }
+    if (card.dataset.actionId) {
+      return { kind: "action", id: card.dataset.actionId, entry: state.actions.find(function (item) { return item.id === card.dataset.actionId; }) };
+    }
+    if (card.dataset.referenceId) {
+      return { kind: "reference", id: card.dataset.referenceId, entry: state.references.find(function (item) { return item.id === card.dataset.referenceId; }) };
+    }
+    return null;
+  }
+  function libraryCardRatingEndpoint(target) {
+    return "/api/prompt/" + (target.kind === "block" ? "library" : target.kind === "action" ? "actions" : "references") + "/" + encodeURIComponent(target.id) + "/rating";
+  }
+  function refreshLibraryCardTags(card, target) {
+    if (!card || !target || !target.entry) return;
+    if (target.kind === "block") {
+      var blockTags = card.querySelector(".block-tags");
+      if (blockTags) blockTags.innerHTML = libraryTagsMarkup(target.entry.tags);
+      return;
+    }
+    var tagsButton = card.querySelector(".resource-tags-edit");
+    if (tagsButton) tagsButton.outerHTML = resourceTagsMarkup(target.entry, target.kind === "action" ? "action" : target.entry.kind);
+  }
+  function setLibraryCardRating(card, rating) {
+    var target = libraryCardTarget(card);
+    if (!target || !target.entry) return;
+    var nextRating = Number(rating);
+    if (!Number.isInteger(nextRating) || nextRating < 0 || nextRating > 5) return;
+    var key = target.kind + ":" + target.id;
+    if (libraryRatingBusy[key] || libraryRatingFromTags(target.entry.tags) === nextRating) return;
+    libraryRatingBusy[key] = true;
+    card.classList.add("is-rating");
+    jsonRequest(libraryCardRatingEndpoint(target), "PATCH", { rating: nextRating }).then(function (data) {
+      var updated = data.block || data.action || data.reference;
+      if (!updated || !Array.isArray(updated.tags)) throw new Error("服务器没有返回最新标签");
+      target.entry.tags = updated.tags;
+      refreshLibraryCardTags(card, target);
+      showToast(nextRating ? "已评分 " + nextRating : "已清除评分");
+    }).catch(function (error) {
+      showToast("保存积木评分失败：" + error.message, true);
+    }).finally(function () {
+      delete libraryRatingBusy[key];
+      card.classList.remove("is-rating");
+    });
+  }
+  function actionMediaKinds(container) {
+    return ["color", "depth", "skeleton"].filter(function (kind) {
+      return Boolean(container && container.querySelector('[data-action-media-image="' + kind + '"][data-action-media-available="true"]'));
+    });
+  }
+  function nextActionMediaKind(container, current) {
+    var kinds = actionMediaKinds(container);
+    if (kinds.length < 2) return current;
+    var index = kinds.indexOf(current);
+    return kinds[(index + 1 + kinds.length) % kinds.length];
+  }
   function setActionMediaView(container, kind) {
-    if (!container || (kind !== "color" && kind !== "depth")) return;
-    var target = container.querySelector('[data-action-media-image="' + kind + '"]');
+    if (!container || ["color", "depth", "skeleton"].indexOf(kind) === -1) return;
+    var target = container.querySelector('[data-action-media-image="' + kind + '"][data-action-media-available="true"]');
     if (!target) return;
     container.querySelectorAll("[data-action-media-image]").forEach(function (image) {
       image.hidden = image.dataset.actionMediaImage !== kind;
@@ -724,11 +958,13 @@
     });
     var toggle = container.querySelector("[data-action-media-toggle]");
     if (toggle) {
-      var nextKind = kind === "color" ? "depth" : "color";
-      var currentLabel = kind === "color" ? "原图" : "深度图";
-      var nextLabel = nextKind === "color" ? "原图" : "深度图";
+      var nextKind = nextActionMediaKind(container, kind);
+      var labels = { color: "原图", depth: "深度图", skeleton: "骨骼图" };
+      var currentLabel = labels[kind];
+      var nextLabel = labels[nextKind];
       toggle.dataset.actionMediaCurrent = kind;
       toggle.classList.toggle("is-depth", kind === "depth");
+      toggle.classList.toggle("is-skeleton", kind === "skeleton");
       toggle.setAttribute("aria-label", "当前显示" + currentLabel + "，点击切换到" + nextLabel);
       toggle.title = "当前：" + currentLabel + "；点击切换到" + nextLabel;
     }
@@ -773,6 +1009,31 @@
     var nodeIds = minimaxConditioningNodes(workflow);
     return { draft: draft, workflow: workflow, minimaxNodeIds: nodeIds, hasMiniMax: nodeIds.length > 0 };
   }
+  function normalizePoseMediaImportType(value) {
+    return String(value || "").toLowerCase() === "skeleton" ? "skeleton" : "depth";
+  }
+  function poseMediaImportLabel(value) {
+    return normalizePoseMediaImportType(value) === "skeleton" ? "骨骼图" : "深度图";
+  }
+  function actionPoseImportInfo(action) {
+    var importType = normalizePoseMediaImportType(poseMediaImportType);
+    var skeleton = importType === "skeleton";
+    var available = skeleton
+      ? Boolean(action && (action.skeleton_image_available || action.skeletonImageUrl || action.skeletonImagePath))
+      : Boolean(action && (action.depth_image_available || action.depthImageUrl || action.depthImagePath));
+    return {
+      type: importType,
+      label: poseMediaImportLabel(importType),
+      available: available,
+      url: skeleton ? String(action && (action.skeleton_image_url || action.skeletonImageUrl) || "") : String(action && (action.depth_image_url || action.depthImageUrl) || ""),
+      path: skeleton ? String(action && (action.skeleton_image_path || action.skeletonImagePath) || "") : String(action && (action.depth_image_path || action.depthImagePath) || ""),
+      endpoint: skeleton ? "skeleton-path" : "depth-path",
+    };
+  }
+  function applySettingsSnapshot(snapshot) {
+    var settings = snapshot && snapshot.settings && typeof snapshot.settings === "object" ? snapshot.settings : {};
+    poseMediaImportType = normalizePoseMediaImportType(settings.pose_media_import_type);
+  }
   function referenceMediaDescriptor(candidate) {
     if (!candidate || candidate.sourceType === "block") return null;
     var sourceId = String(candidate.sourceId || "");
@@ -787,14 +1048,17 @@
     var mediaType = String(candidate.mediaType || "").toLowerCase();
     var isAction = candidate.sourceType === "action";
     var isAudio = candidate.sourceType === "reference" && (referenceKind === "audio" || mediaType === "audio" || (!candidate.imagePath && candidate.audioPath));
-    if (isAction && !candidate.depthImagePath && !candidate.depthImageUrl) return null;
+    var poseImportInfo = isAction ? actionPoseImportInfo(candidate) : null;
+    if (isAction && !poseImportInfo.available) return null;
     var kind = isAudio ? "audio" : "image";
     var path = isAudio
       ? String(candidate.audioPath || "")
-      : (isAction ? String(candidate.depthImagePath || "") : String(candidate.colorImagePath || candidate.imagePath || ""));
+      : (isAction ? (poseImportInfo.type === "skeleton" ? String(candidate.skeletonImagePath || "") : String(candidate.depthImagePath || "")) : String(candidate.colorImagePath || candidate.imagePath || ""));
     var endpoint = "";
     if (candidate.sourceType === "action" && sourceId) {
-      endpoint = "/api/prompt/actions/" + encodeURIComponent(sourceId) + "/depth-path";
+      endpoint = poseImportInfo.type === "skeleton"
+        ? "/api/prompt/actions/" + encodeURIComponent(sourceId) + "/skeleton-path"
+        : "/api/prompt/actions/" + encodeURIComponent(sourceId) + "/depth-path";
     } else if (candidate.sourceType === "reference" && sourceId) {
       endpoint = "/api/prompt/references/" + encodeURIComponent(sourceId) + "/" + kind + "-path";
     }
@@ -1133,6 +1397,8 @@
         if (!draft.workflow.id) draft.workflow.id = String(analysisResult.workflow_id || "");
         draft.workflow.savedAt = Date.now();
         window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
+        var focusImport = notifySubmitImport({ kind: "media", mediaCount: mediaAssets.length });
+        if (!focusImport) window.location.href = "/";
         showToast("已导入 " + mediaAssets.filter(function (item) { return item.kind === "image"; }).length + " 张参考图和 " + mediaAssets.filter(function (item) { return item.kind === "audio"; }).length + " 条参考音频，任务提交页草稿已更新");
       });
     }).catch(function (error) {
@@ -1213,18 +1479,26 @@
     }).join("");
     confirm.disabled = !selected;
   }
+  function workflowImportKicker(label) {
+    return label === "骨骼图" ? "IMPORT SKELETON MAP" : label === "深度图" ? "IMPORT DEPTH MAP" : "IMPORT TO WORKFLOW";
+  }
+  function applyWorkflowImportDialogLabels(title, label) {
+    $("depthImportTitle").textContent = title || "导入媒体";
+    $("depthImportKicker").textContent = workflowImportKicker(label || "");
+    $("confirmDepthImport").textContent = "导入媒体";
+  }
   function openDepthImport(action) {
-    if (!action || !action.depth_image_url || !action.depth_image_available) return showToast("这个动作没有可用的深度图", true);
+    var poseImportInfo = actionPoseImportInfo(action);
+    if (!action || !poseImportInfo.available) return showToast("这个动作没有可用的" + poseImportInfo.label, true);
     depthImportActionId = action.id;
     workflowImportAsset = {
-      endpoint: "/api/prompt/actions/" + encodeURIComponent(action.id) + "/depth-path",
-      label: "深度图",
-      title: action.title + " · 深度图",
-      toastLabel: "深度图",
+      endpoint: "/api/prompt/actions/" + encodeURIComponent(action.id) + "/" + poseImportInfo.endpoint,
+      label: poseImportInfo.label,
+      title: action.title + " · " + poseImportInfo.label,
+      toastLabel: poseImportInfo.label,
     };
     renderDepthImportTargets(readTaskDraft());
-    $("depthImportTitle").textContent = "导入深度图";
-    $("depthImportKicker").textContent = "IMPORT DEPTH MAP";
+    applyWorkflowImportDialogLabels("导入" + poseImportInfo.label, poseImportInfo.label);
     window.RHMotion.openModal("depthImportModal", "closeDepthImport");
   }
   function openWorkflowImport(asset) {
@@ -1232,8 +1506,7 @@
     depthImportActionId = "";
     workflowImportAsset = asset;
     renderDepthImportTargets(readTaskDraft());
-    $("depthImportTitle").textContent = "导入任务";
-    $("depthImportKicker").textContent = "IMPORT TO WORKFLOW";
+    applyWorkflowImportDialogLabels("导入媒体", asset.label || "");
     window.RHMotion.openModal("depthImportModal", "closeDepthImport");
   }
   function openWorkflowImportFromTrigger(trigger) {
@@ -1241,12 +1514,13 @@
     var id = trigger.dataset.importWorkflowId || "";
     if (kind === "action") {
       var action = state.actions.find(function (item) { return item.id === id; });
-      if (!action || !action.depth_image_available || !action.depth_image_url) return showToast("这个动作没有可用的深度图", true);
+      var poseImportInfo = actionPoseImportInfo(action);
+      if (!action || !poseImportInfo.available) return showToast("这个动作没有可用的" + poseImportInfo.label, true);
       return openWorkflowImport({
-        endpoint: "/api/prompt/actions/" + encodeURIComponent(id) + "/depth-path",
-        label: "深度图",
-        title: action.title + " · 深度图",
-        toastLabel: "深度图",
+        endpoint: "/api/prompt/actions/" + encodeURIComponent(id) + "/" + poseImportInfo.endpoint,
+        label: poseImportInfo.label,
+        title: action.title + " · " + poseImportInfo.label,
+        toastLabel: poseImportInfo.label,
       });
     }
     if (kind === "reference") {
@@ -1264,8 +1538,7 @@
   function closeDepthImport() {
     depthImportActionId = "";
     workflowImportAsset = null;
-    $("depthImportTitle").textContent = "导入深度图";
-    $("depthImportKicker").textContent = "IMPORT DEPTH MAP";
+    applyWorkflowImportDialogLabels("导入媒体", "");
     window.RHMotion.closeModal("depthImportModal");
   }
   function confirmWorkflowImport() {
@@ -1289,14 +1562,16 @@
       draft.workflow.values.files[target.inputId] = asset.path;
       draft.workflow.savedAt = Date.now();
       window.localStorage.setItem("rh-workflow-desk-draft-v1", JSON.stringify(draft));
+      var focusImport = notifySubmitImport({ kind: "media", inputId: target.inputId });
       closeDepthImport();
       showToast(toastLabel + "已导入「" + target.title + "」，已保存到任务草稿");
+      if (!focusImport) window.location.href = "/";
     }).catch(function (error) {
       showToast(importedLabel + "导入失败：" + error.message, true);
     }).finally(function () {
       if ($("confirmDepthImport")) {
         $("confirmDepthImport").disabled = false;
-        $("confirmDepthImport").textContent = "导入任务";
+        $("confirmDepthImport").textContent = "导入媒体";
       }
     });
   }
@@ -1313,9 +1588,10 @@
     }
     $("libraryList").innerHTML = actions.map(function (action, index) {
       var hasColorImage = Boolean(action.image_available || action.color_image_available);
-      var hasDepthImage = Boolean(action.depth_image_available);
+      var poseImportInfo = actionPoseImportInfo(action);
+      var missingPoseImportMessage = poseImportInfo.type === "skeleton" ? "暂无可用骨骼图，请先为动作准备对应文件" : "暂无可用深度图，请先完成原图与深度图配对";
       var importWorkflowButton = hasColorImage
-        ? '<button class="import-workflow-button action-card-import" type="button" data-import-workflow data-import-workflow-kind="action" data-import-workflow-id="' + esc(action.id) + '" title="' + esc(hasDepthImage ? "选择 LoadImage 节点并导入深度图" : "暂无可用深度图，请先完成原图与深度图配对") + '"' + (hasDepthImage ? "" : ' disabled aria-disabled="true"') + '>导入任务</button>'
+        ? '<button class="import-workflow-button action-card-import" type="button" data-import-workflow data-import-workflow-kind="action" data-import-workflow-id="' + esc(action.id) + '" title="' + esc(poseImportInfo.available ? "选择 LoadImage 节点并导入" + poseImportInfo.label : missingPoseImportMessage) + '"' + (poseImportInfo.available ? "" : ' disabled aria-disabled="true"') + '>导入媒体</button>'
         : "";
       var category = action.category || "未分类";
       return '<article class="action-library-card" draggable="true" data-action-id="' + esc(action.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
@@ -1389,7 +1665,7 @@
     $("libraryList").innerHTML = references.map(function (reference, index) {
       var label = reference.kind_label || "参考资源";
       var importWorkflowButton = reference.image_available
-        ? '<button class="import-workflow-button" type="button" data-import-workflow data-import-workflow-kind="reference" data-import-workflow-id="' + esc(reference.id) + '" title="选择 LoadImage 节点并导入图片">导入任务</button>'
+        ? '<button class="import-workflow-button" type="button" data-import-workflow data-import-workflow-kind="reference" data-import-workflow-id="' + esc(reference.id) + '" title="选择 LoadImage 节点并导入图片">导入媒体</button>'
         : "";
       return '<article class="reference-library-card" draggable="true" data-reference-id="' + esc(reference.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
         referenceMediaMarkup(reference, "reference-card-media") +
@@ -1422,7 +1698,7 @@
         return '<article class="library-block" draggable="true" data-library-block-id="' + esc(block.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
           '<div class="library-block-top"><button class="library-block-title library-block-title-button" type="button" data-edit-block="' + esc(block.id) + '" aria-label="编辑「' + esc(block.title) + '」"><span class="block-type-dot" aria-hidden="true"></span><span>' + esc(block.title) + '</span></button>' +
           '<span class="library-block-label">JSON</span></div>' +
-          '<div class="block-tags">' + (block.tags || []).map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' +
+          '<div class="block-tags">' + libraryTagsMarkup(block.tags) + '</div>' +
           '<div class="library-block-text">' + esc(block.text) + '</div>' +
           '<div class="library-block-footer">' +
           '<span class="library-block-manage-actions"><button class="delete-block-button" type="button" data-delete-block="' + esc(block.id) + '">删除</button></span></div></article>';
@@ -1725,8 +2001,10 @@
     return true;
   }
   function promptStructureField(item) {
-    var content = [item && item.generatedType, item && item.title, item && item.text].join(" ").toLowerCase();
-    return PROMPT_STRUCTURE_FIELDS.find(function (field) { return content.indexOf(field) !== -1; }) || "";
+    var content = String(item && item.text || "").toLowerCase();
+    return PROMPT_STRUCTURE_FIELDS.find(function (field) {
+      return new RegExp("(^|\\n)\\s*" + field + "\\s*:").test(content);
+    }) || "";
   }
   function stageBlockMarkup(item, index) {
     var isText = item.kind === "text";
@@ -1735,16 +2013,18 @@
     var isReference = item.kind === "reference";
     var isMedia = item.kind === "media";
     var structureField = promptStructureField(item);
+    var stageDataAttributes = (structureField ? ' data-prompt-structure-field="' + esc(structureField) + '"' : "") + (isMedia ? ' data-media-stage-dropzone aria-label="媒体积木，可在卡片任意位置拖入媒体文件替换"' : "");
     var tags = item.tags || [];
     var sourceAction = isAction && !item.missing ? state.actions.find(function (action) { return action.id === item.sourceId; }) : null;
+    var sourceActionImport = sourceAction ? actionPoseImportInfo(sourceAction) : isAction ? actionPoseImportInfo(item) : null;
     var canImportWorkflow = Boolean(
-      (sourceAction && sourceAction.depth_image_available && sourceAction.depth_image_url) ||
+      (sourceActionImport && sourceActionImport.available) ||
       (isReference && !item.missing && item.imageUrl)
     );
     var hasStagePreview = isAction || isReference || isMedia;
     var stagePreviewMarkup = "";
     if (isAction) {
-      stagePreviewMarkup = actionMediaMarkup({ title: item.title || "动作图片", color_image_url: item.colorImageUrl || item.imageUrl || "", depth_image_url: item.depthImageUrl || "", color_image_available: Boolean(item.colorImageUrl || item.imageUrl), depth_image_available: Boolean(item.depthImageUrl), pair_status: item.pairStatus || "" }, "stage-action-media");
+      stagePreviewMarkup = actionMediaMarkup({ title: item.title || "动作图片", color_image_url: item.colorImageUrl || item.imageUrl || "", depth_image_url: item.depthImageUrl || "", skeleton_image_url: item.skeletonImageUrl || "", color_image_available: Boolean(item.colorImageUrl || item.imageUrl), depth_image_available: Boolean(item.depthImageUrl), skeleton_image_available: Boolean(item.skeletonImageUrl), pair_status: item.pairStatus || "" }, "stage-action-media");
     } else if (isReference) {
       stagePreviewMarkup = referenceMediaMarkup({ title: item.title, imageUrl: item.imageUrl, audioUrl: item.audioUrl, image_available: Boolean(item.imageUrl), audio_available: Boolean(item.audioUrl), media_type: item.mediaType }, "stage-reference-media");
     } else if (isMedia) {
@@ -1755,7 +2035,7 @@
     var stageTitle = isText ? "自由文本" : (item.title || (isMedia ? item.mediaName : "固定积木") || "固定积木");
     var stageTitleButton = '<button class="stage-block-title-button" type="button" data-edit-stage="' + index + '" title="编辑组装台积木" aria-label="编辑组装台积木：' + esc(stageTitle) + '"><h3>' + esc(stageTitle) + '</h3></button>';
     var importWorkflowButton = canImportWorkflow
-      ? '<button class="import-workflow-button stage-workflow-import" type="button" data-import-workflow data-import-workflow-kind="' + (isAction ? "action" : "reference") + '" data-import-workflow-id="' + esc(item.sourceId) + '" title="选择 LoadImage 节点并导入' + (isAction ? "深度图" : "图片") + '">导入任务</button>'
+      ? '<button class="import-workflow-button stage-workflow-import" type="button" data-import-workflow data-import-workflow-kind="' + (isAction ? "action" : "reference") + '" data-import-workflow-id="' + esc(item.sourceId) + '" title="选择 LoadImage 节点并导入' + (isAction ? sourceActionImport.label : "图片") + '">导入媒体</button>'
       : "";
     var mediaControlsMarkup = isMedia
       ? '<div class="stage-media-controls"><div class="stage-media-control-buttons"><button class="stage-media-select" type="button" data-open-media-stage data-media-stage-index="' + index + '">选择文件</button><button class="stage-media-paste" type="button" data-paste-media-stage data-media-stage-index="' + index + '">粘贴图片</button></div><span class="stage-media-drop-hint">拖入图片、音频或视频到卡片任意位置可替换</span></div>'
@@ -1770,10 +2050,10 @@
       : '<div class="stage-block-copy">' + esc(item.text) + '</div>';
     var titleMarkup = isText
       ? (isRawText
-        ? '<div class="stage-block-title-row">' + stageTitleButton + '<span class="stage-raw-text-label">原文直出</span></div>'
-        : '<div class="stage-block-title-row">' + stageTitleButton + '<button class="secondary-button button-compact translate-text-button" type="button" data-translate-stage="' + index + '" title="将输入内容翻译为英文"><span>翻译</span></button></div>')
+        ? '<div class="stage-block-title-row">' + stageTitleButton + '<div class="stage-block-title-actions"><span class="stage-raw-text-label">原文直出</span><button class="secondary-button button-compact ai-prompt-button" type="button" data-ai-prompt-stage="' + index + '" title="使用提示词工作台内容生成中文提示词"><span>AI提示词</span></button></div></div>'
+        : '<div class="stage-block-title-row">' + stageTitleButton + '<div class="stage-block-title-actions"><button class="secondary-button button-compact ai-prompt-button" type="button" data-ai-prompt-stage="' + index + '" title="使用提示词工作台内容生成中文提示词"><span>AI提示词</span></button><button class="secondary-button button-compact translate-text-button" type="button" data-translate-stage="' + index + '" title="将输入内容翻译为英文"><span>翻译</span></button></div></div>')
       : stageTitleButton;
-    return '<article class="stage-block ' + (isText ? "text" : (isMedia ? "media" : (isAction ? "action" : (isReference ? "reference" : "fixed")))) + (hasStagePreview ? " stage-block--with-preview" : " stage-block--content-only") + (structureField ? " stage-block--prompt-structure" : "") + (isRawText ? " raw-text" : "") + (item.missing ? " missing" : "") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + (structureField ? '" data-prompt-structure-field="' + esc(structureField) : '"') + (isMedia ? '" data-media-stage-dropzone aria-label="媒体积木，可在卡片任意位置拖入媒体文件替换"' : '"') + '>' +
+    return '<article class="stage-block ' + (isText ? "text" : (isMedia ? "media" : (isAction ? "action" : (isReference ? "reference" : "fixed")))) + (hasStagePreview ? " stage-block--with-preview" : " stage-block--content-only") + (structureField ? " stage-block--prompt-structure" : "") + (isRawText ? " raw-text" : "") + (item.missing ? " missing" : "") + '" draggable="false" data-stage-index="' + index + '" data-stage-instance-id="' + esc(item.instanceId) + '"' + stageDataAttributes + '>' +
       '<div class="stage-block-content"><div class="stage-block-copy-content"><div class="stage-block-top"><span class="stage-index">' + String(index + 1).padStart(2, "0") + '</span><span class="stage-type-label">' + typeLabel + '</span></div>' +
       titleMarkup +
       ((tags.length || importWorkflowButton) ? '<div class="stage-block-tags">' + importWorkflowButton + tags.map(function (tag) { return '<span class="block-tag">' + esc(tag) + '</span>'; }).join("") + '</div>' : "") +
@@ -1783,7 +2063,8 @@
   function updateStageDom() {
     var cards = $("stageList").querySelectorAll(".stage-block");
     $("stageCount").textContent = state.stage.length + " 个积木";
-    $("stageTabCount").textContent = String(state.stage.length);
+    var stageTabCount = $("stageTabCount");
+    if (stageTabCount) stageTabCount.textContent = String(state.stage.length);
     cards.forEach(function (card, index) {
       card.dataset.stageIndex = String(index);
       var indexLabel = card.querySelector(".stage-index");
@@ -1828,11 +2109,13 @@
     var importMediaButton = $("importMedia");
     if (importMediaButton) {
       var workflowContext = currentWorkflowContext();
-      var hasImportableMedia = usedReferenceMedia().some(function (entry) { return entry.media.kind === "image" || entry.media.kind === "audio"; });
+      var importableEntries = usedReferenceMedia();
+      var hasImportableMedia = importableEntries.some(function (entry) { return entry.media.kind === "image" || entry.media.kind === "audio"; });
+      var hasActionMedia = importableEntries.some(function (entry) { return entry.media.sourceType === "action"; });
       importMediaButton.hidden = !workflowContext.hasMiniMax || !hasImportableMedia;
       importMediaButton.title = !workflowContext.hasMiniMax
         ? "当前工作流不包含 MiniMax H3 节点"
-        : (hasImportableMedia ? "按当前组装台的参考媒体重建 MiniMax H3 输入" : "请先把媒体积木加入提示词工作台");
+        : (hasImportableMedia ? "按当前组装台的参考媒体重建 MiniMax H3 输入" + (hasActionMedia ? "；动作引用使用" + poseMediaImportLabel(poseMediaImportType) : "") : "请先把媒体积木加入提示词工作台");
     }
     refreshSubjectDefinitionsButton();
   }
@@ -1871,6 +2154,8 @@
     return date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
   }
   function renderGroups() {
+    var saveButton = $("saveGroup");
+    if (saveButton) saveButton.textContent = state.activeGroupId ? "保存提示词组" : "新建提示词组";
     var list = $("groupList");
     if (!list) return;
     if (!state.groups.length) {
@@ -1884,8 +2169,6 @@
           '</article>';
       }).join("");
     }
-    var saveButton = $("saveGroup");
-    if (saveButton) saveButton.textContent = state.activeGroupId ? "覆盖保存" : "新建并保存";
     var groupCount = $("groupTabCount");
     if (groupCount) groupCount.textContent = String(state.groups.length);
   }
@@ -1909,6 +2192,8 @@
         colorImagePath: action.color_image_path || action.image_path || "",
         depthImageUrl: action.depth_image_url || "",
         depthImagePath: action.depth_image_path || "",
+        skeletonImageUrl: action.skeleton_image_url || "",
+        skeletonImagePath: action.skeleton_image_path || "",
         pairStatus: action.pair_status || "",
         missing: false,
       };
@@ -2295,10 +2580,12 @@
     if (!name) return showToast("请先给组状态命名", true);
     var button = $("saveGroup");
     button.disabled = true;
+    var currentGroup = state.groups.find(function (item) { return item.id === state.activeGroupId; });
     jsonRequest("/api/prompt/groups", "POST", {
       id: state.activeGroupId,
       name: name,
       items: state.stage.map(stageItemToApi),
+      folder_id: currentGroup ? (currentGroup.folder_id || "") : "",
     }).then(function (data) {
       var group = data.group;
       var index = state.groups.findIndex(function (item) { return item.id === group.id; });
@@ -2323,7 +2610,7 @@
   }
   function loadGroup(groupId) {
     var group = state.groups.find(function (item) { return item.id === groupId; });
-    if (!group) return;
+    if (!group) return false;
     state.activeGroupId = group.id;
     $("groupName").value = group.name;
     state.stage = (group.items || []).map(stageItemFromApi).filter(Boolean);
@@ -2333,6 +2620,19 @@
     state.assemblyView = "stage";
     renderAssemblyView();
     showToast("已加载「" + group.name + "」");
+    return true;
+  }
+  function loadPromptGroupFromQuery() {
+    var query = new URLSearchParams(window.location.search || "");
+    var groupId = String(query.get("group_id") || "").trim();
+    if (!groupId) return false;
+    var loaded = loadGroup(groupId);
+    if (!loaded) {
+      showToast("找不到要加载的提示词组", true);
+      return false;
+    }
+    if (window.history && window.history.replaceState) window.history.replaceState({}, document.title, "/prompt");
+    return true;
   }
   function overwriteGroup(groupId, button) {
     var group = state.groups.find(function (item) { return item.id === groupId; });
@@ -2591,8 +2891,10 @@
       var pasteButton = slot.paste
         ? '<button class="resource-media-slot-button" type="button" data-resource-media-paste="' + esc(slot.role) + '">粘贴图片</button>'
         : "";
-      var generateButton = slot.autoDepth
-        ? '<button class="resource-media-slot-button resource-media-generate-button" type="button" data-resource-media-generate="depth"' + (depthGenerationBusy ? " disabled" : "") + '>' + (depthGenerationBusy ? "生成中…" : "自动生成") + '</button>'
+      var generationKind = slot.autoDepth ? "depth" : slot.autoSkeleton ? "skeleton" : "";
+      var generationBusy = generationKind === "depth" ? depthGenerationBusy : skeletonGenerationBusy;
+      var generateButton = generationKind
+        ? '<button class="resource-media-slot-button resource-media-generate-button" type="button" data-resource-media-generate="' + generationKind + '"' + (generationBusy ? " disabled" : "") + '>' + (generationBusy ? "生成中…" : "自动生成") + '</button>'
         : "";
       return '<div class="resource-media-slot' + (selected ? " is-selected" : "") + '" tabindex="0" role="group" data-resource-media-slot="' + esc(slot.role) + '">' +
         '<div class="resource-media-slot-head"><span class="resource-media-slot-label">' + esc(slot.label) + '</span><span class="resource-media-slot-status' + statusClass + '" title="' + esc(status) + '">' + esc(status) + '</span></div>' +
@@ -2630,12 +2932,13 @@
       showToast(error.message, true);
     });
   }
-  function generateActionDepth() {
-    if (editingResourceKind !== "action" || depthGenerationBusy) return;
+  function generateActionAuxiliary(kind) {
+    if (editingResourceKind !== "action" || (kind === "depth" ? depthGenerationBusy : skeletonGenerationBusy)) return;
     var colorFile = pendingResourceMedia.color || null;
     var sourcePath = colorFile ? "" : resourceMediaPath("resourceImagePath");
     if (!colorFile && !sourcePath) return showToast("请先选择原图", true);
-    depthGenerationBusy = true;
+    if (kind === "depth") depthGenerationBusy = true;
+    if (kind === "skeleton") skeletonGenerationBusy = true;
     renderResourceMediaSlots();
     var sourcePromise = colorFile
       ? (colorFile.data_url
@@ -2643,24 +2946,25 @@
         : fileToBase64(colorFile).then(function (data) { return { name: resourceMediaFileName(colorFile), mime: String(colorFile.type || ""), data: data }; }))
       : Promise.resolve(null);
     sourcePromise.then(function (source) {
-      return jsonRequest("/api/prompt/actions/generate-depth", "POST", source ? { source: source } : { source_path: sourcePath });
+      return jsonRequest("/api/prompt/actions/generate-" + kind, "POST", source ? { source: source } : { source_path: sourcePath });
     }).then(function (generated) {
       if (colorFile && pendingResourceMedia.color !== colorFile) {
-        throw new Error("原图已变化，请重新生成深度图");
+        throw new Error("原图已变化，请重新生成" + (kind === "depth" ? "深度图" : "骨骼图"));
       }
-      pendingResourceMedia.depth = {
-        name: generated.name || "generated_depth.png",
+      pendingResourceMedia[kind] = {
+        name: generated.name || (kind === "depth" ? "generated_depth.png" : "generated_skeleton.png"),
         type: generated.mime || "image/png",
         data_url: generated.data_url || "data:image/png;base64," + String(generated.data || ""),
         generated: true,
       };
-      $("resourceDepthPath").value = "";
+      $(kind === "depth" ? "resourceDepthPath" : "resourceSkeletonPath").value = "";
       renderResourceMediaSlots();
-      showToast("深度图已生成，保存动作后写入媒体库");
+      showToast((kind === "depth" ? "深度图" : "骨骼图") + "已生成，保存动作后写入媒体库");
     }).catch(function (error) {
-      showToast("深度图生成失败：" + error.message, true);
+      showToast((kind === "depth" ? "深度图" : "骨骼图") + "生成失败：" + error.message, true);
     }).finally(function () {
-      depthGenerationBusy = false;
+      if (kind === "depth") depthGenerationBusy = false;
+      if (kind === "skeleton") skeletonGenerationBusy = false;
       renderResourceMediaSlots();
     });
   }
@@ -2691,11 +2995,13 @@
     pendingResourceMedia = {};
     activeResourceMediaRole = "image";
     depthGenerationBusy = false;
+    skeletonGenerationBusy = false;
     visionRecognitionBusy = false;
     $("resourceMediaFields").hidden = true;
     $("resourceVisionButton").hidden = true;
     $("resourceImagePath").value = "";
     $("resourceDepthPath").value = "";
+    $("resourceSkeletonPath").value = "";
     $("resourceAudioPath").value = "";
     $("resourceMediaSlots").innerHTML = "";
     var textField = $("customBlockText").closest(".field-group");
@@ -2736,7 +3042,7 @@
     $("customBlockCategoryField").hidden = false;
     $("customBlockTitle").textContent = (resource ? "编辑" : "添加") + (RESOURCE_LABELS[kind] || "参考资源");
     $("customBlockModal").querySelector(".section-kicker").textContent = resource ? "EDIT RESOURCE" : "NEW RESOURCE";
-    $("customBlockDescription").textContent = "保存后会把选择的素材复制到 ref 对应目录，并将相对路径回写到 Markdown 文件。";
+    $("customBlockDescription").textContent = "保存后会把选择的素材复制到 ref 对应目录，并将相对路径回写到 JSON 文件；修改名称时会同步重命名关联文件。动作会同时处理原图、深度图和骨骼图。";
     $("customBlockForm").querySelector('button[type="submit"]').textContent = resource ? "保存修改" : "保存资源";
     $("customBlockNameLabel").textContent = (RESOURCE_LABELS[kind] || "资源") + "名称";
     $("customBlockTextLabel").textContent = "文本内容";
@@ -2751,12 +3057,13 @@
     $("resourceVisionButton").textContent = "AI 识图填充";
     $("resourceImagePath").value = resource ? resource.image_path || resource.color_image_path || "" : "";
     $("resourceDepthPath").value = resource ? resource.depth_image_path || "" : "";
+    $("resourceSkeletonPath").value = resource ? resource.skeleton_image_path || "" : "";
     $("resourceAudioPath").value = resource ? resource.audio_path || "" : "";
     pendingResourceMedia = {};
     activeResourceMediaRole = resourceMediaSlots(kind)[0] ? resourceMediaSlots(kind)[0].role : "image";
     renderResourceMediaSlots();
     $("resourceMediaHint").textContent = kind === "action"
-      ? "动作素材会自动复制到 ref/pose/color 和 ref/pose/depth，并保持原图与深度图的文件名配对。"
+      ? "动作素材会自动复制到 ref/pose/color、ref/pose/depth 和 ref/pose/skeleton，并保持三类文件的 basename 配对。"
       : "素材会自动复制到 ref/" + kind + "；已有素材无需重新选择，选择新文件即可替换。";
     renderResourceCategoryOptions(kind);
     setEditorCategory(resourceCategory);
@@ -2857,6 +3164,94 @@
   function closeImagePreview() {
     window.RHMotion.closeModal("imagePreviewModal");
   }
+  function closeLibraryImageContextMenu() {
+    var menu = $("libraryImageContextMenu");
+    if (!menu) return;
+    menu.hidden = true;
+    menu.style.left = "";
+    menu.style.top = "";
+    libraryImageContext = { src: "", title: "" };
+  }
+  function positionLibraryImageContextMenu(menu, clientX, clientY) {
+    var margin = 8;
+    var rect = menu.getBoundingClientRect();
+    var left = Math.min(clientX, window.innerWidth - rect.width - margin);
+    var top = Math.min(clientY, window.innerHeight - rect.height - margin);
+    menu.style.left = Math.max(margin, left) + "px";
+    menu.style.top = Math.max(margin, top) + "px";
+  }
+  function openLibraryImageContextMenu(event, imageButton) {
+    var src = imageButton && imageButton.dataset.imagePreview;
+    if (!src) return;
+    event.preventDefault();
+    libraryImageContext = { src: src, title: imageButton.dataset.imageTitle || "图片" };
+    var menu = $("libraryImageContextMenu");
+    var copyButton = menu.querySelector('[data-library-image-menu-action="copy"]');
+    copyButton.disabled = libraryImageCopyBusy;
+    copyButton.textContent = libraryImageCopyBusy ? "复制中…" : "复制";
+    menu.hidden = false;
+    positionLibraryImageContextMenu(menu, event.clientX, event.clientY);
+    copyButton.focus();
+  }
+  function imageBlobAsPng(blob) {
+    if (String(blob.type || "").toLowerCase() === "image/png") return Promise.resolve(blob);
+    return new Promise(function (resolve, reject) {
+      var objectUrl = URL.createObjectURL(blob);
+      var image = new Image();
+      image.onload = function () {
+        URL.revokeObjectURL(objectUrl);
+        if (!image.naturalWidth || !image.naturalHeight) return reject(new Error("图片尺寸无效"));
+        var canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        var context = canvas.getContext("2d");
+        if (!context) return reject(new Error("当前环境不支持图片转换"));
+        context.drawImage(image, 0, 0);
+        canvas.toBlob(function (png) {
+          if (!png) return reject(new Error("图片转换失败"));
+          resolve(png);
+        }, "image/png");
+      };
+      image.onerror = function () {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("图片读取失败"));
+      };
+      image.src = objectUrl;
+    });
+  }
+  function copyLibraryImageToClipboard(src, title) {
+    if (!src || libraryImageCopyBusy) return;
+    if (!navigator.clipboard || !navigator.clipboard.write || !window.ClipboardItem) {
+      showToast("当前环境不支持复制图片到剪贴板", true);
+      return;
+    }
+    libraryImageCopyBusy = true;
+    var copyButton = $("libraryImageContextMenu").querySelector('[data-library-image-menu-action="copy"]');
+    copyButton.disabled = true;
+    copyButton.textContent = "复制中…";
+    var imageBlob = fetch(src, { credentials: "same-origin" }).then(function (response) {
+      if (!response.ok) throw new Error("图片加载失败");
+      return response.blob();
+    }).then(function (blob) {
+      return imageBlobAsPng(blob);
+    });
+    var clipboardData = { "image/png": imageBlob };
+    var writePromise;
+    try {
+      writePromise = navigator.clipboard.write([new ClipboardItem(clipboardData)]);
+    } catch (error) {
+      writePromise = Promise.reject(error);
+    }
+    writePromise.then(function () {
+      showToast("「" + (title || "图片") + "」已复制到剪贴板");
+    }).catch(function (error) {
+      showToast("图片复制失败：" + (error && error.message ? error.message : "请检查剪贴板权限"), true);
+    }).finally(function () {
+      libraryImageCopyBusy = false;
+      copyButton.disabled = false;
+      copyButton.textContent = "复制";
+    });
+  }
   function openTextPreview(content, title) {
     $("textPreviewTitle").textContent = title || "文本预览";
     $("textPreviewContent").textContent = content || "暂无文本内容";
@@ -2870,7 +3265,9 @@
     if (!output) return;
     try {
       localStorage.setItem(TASK_PROMPT_IMPORT_KEY, JSON.stringify({ version: 1, text: output, createdAt: Date.now() }));
-      showToast("提示词已写入任务提交页草稿");
+      var focusImport = notifySubmitImport({ kind: "prompt" });
+      showToast(focusImport ? "提示词已导入任务提交面板" : "提示词已写入任务提交页草稿");
+      if (!focusImport) window.location.href = "/";
     } catch (error) {
       showToast("导入失败：无法保存本机跳转数据", true);
     }
@@ -2878,23 +3275,16 @@
   function bindEvents() {
     updateThemeToggle();
     initPromptGridSplitter();
+    initLibraryModeSticky();
     $("toggleLibraryExpand").addEventListener("click", function () {
       setLibraryExpanded(!state.libraryExpanded);
     });
-    $("themeToggle").addEventListener("click", function () {
+    var promptThemeToggle = $("themeToggle");
+    if (promptThemeToggle) promptThemeToggle.addEventListener("click", function () {
       var nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
       document.documentElement.dataset.theme = nextTheme;
       try { localStorage.setItem("rh-workflow-theme", nextTheme); } catch (error) {}
       updateThemeToggle();
-    });
-    $("assemblyViewStage").addEventListener("click", function () {
-      state.assemblyView = "stage";
-      renderAssemblyView();
-    });
-    $("assemblyViewGroups").addEventListener("click", function () {
-      state.assemblyView = "groups";
-      renderGroups();
-      renderAssemblyView();
     });
     document.querySelector(".library-mode-tabs").addEventListener("click", function (event) {
       var button = event.target.closest("[data-library-mode]");
@@ -2904,6 +3294,7 @@
       state.libraryMode = nextMode;
       state.categoryFilter = "全部";
       state.filter = "全部";
+      persistLibraryViewState();
       renderCategoryFilters();
       renderFilters();
       renderLibrary();
@@ -2921,6 +3312,7 @@
       if (!button) return;
       state.categoryFilter = button.dataset.filterCategory;
       state.filter = "全部";
+      persistLibraryViewState();
       renderCategoryFilters();
       renderFilters();
       renderLibrary();
@@ -2929,22 +3321,16 @@
       var button = event.target.closest("[data-filter-tag]");
       if (!button) return;
       state.filter = button.dataset.filterTag;
+      persistLibraryViewState();
       renderFilters();
       renderLibrary();
     });
-    $("groupList").addEventListener("click", function (event) {
-      var loadButton = event.target.closest("[data-load-group]");
-      if (loadButton) return loadGroup(loadButton.dataset.loadGroup);
-      var overwriteButton = event.target.closest("[data-overwrite-group]");
-      if (overwriteButton) return overwriteGroup(overwriteButton.dataset.overwriteGroup, overwriteButton);
-      var deleteButton = event.target.closest("[data-delete-group]");
-      if (deleteButton) deleteGroup(deleteButton.dataset.deleteGroup);
-    });
     $("libraryList").addEventListener("click", function (event) {
+      closeLibraryImageContextMenu();
       var mediaToggle = event.target.closest("[data-action-media-toggle]");
       if (mediaToggle) {
         var mediaContainer = mediaToggle.closest("[data-action-media]");
-        return setActionMediaView(mediaContainer, mediaToggle.dataset.actionMediaCurrent === "depth" ? "color" : "depth");
+        return setActionMediaView(mediaContainer, nextActionMediaKind(mediaContainer, mediaToggle.dataset.actionMediaCurrent || "color"));
       }
       var audioButton = event.target.closest("[data-audio-toggle]");
       if (audioButton) return toggleReferenceAudio(audioButton);
@@ -2977,6 +3363,18 @@
         deleteButton.disabled = false;
         showToast("积木删除失败：" + error.message, true);
       });
+    });
+    $("libraryList").addEventListener("contextmenu", function (event) {
+      var imageButton = event.target.closest("[data-image-preview]");
+      if (!imageButton || !event.currentTarget.contains(imageButton)) return;
+      openLibraryImageContextMenu(event, imageButton);
+    });
+    $("libraryImageContextMenu").addEventListener("click", function (event) {
+      var copyButton = event.target.closest('[data-library-image-menu-action="copy"]');
+      if (!copyButton) return;
+      var context = libraryImageContext;
+      closeLibraryImageContextMenu();
+      copyLibraryImageToClipboard(context.src, context.title);
     });
     $("libraryList").addEventListener("dragstart", function (event) {
       var card = event.target.closest(".library-block, .action-library-card, .reference-library-card");
@@ -3056,12 +3454,14 @@
       if (mediaStageButton) return openMediaBlockPicker(Number(mediaStageButton.dataset.mediaStageIndex));
       var mediaPasteButton = event.target.closest("[data-paste-media-stage]");
       if (mediaPasteButton) return pasteMediaStageImage(Number(mediaPasteButton.dataset.mediaStageIndex));
+      var aiPromptButton = event.target.closest("[data-ai-prompt-stage]");
+      if (aiPromptButton) return generateAiPrompt(Number(aiPromptButton.dataset.aiPromptStage));
       var translateButton = event.target.closest("[data-translate-stage]");
       if (translateButton) return translateTextBlock(Number(translateButton.dataset.translateStage));
       var mediaToggle = event.target.closest("[data-action-media-toggle]");
       if (mediaToggle) {
         var mediaContainer = mediaToggle.closest("[data-action-media]");
-        return setActionMediaView(mediaContainer, mediaToggle.dataset.actionMediaCurrent === "depth" ? "color" : "depth");
+        return setActionMediaView(mediaContainer, nextActionMediaKind(mediaContainer, mediaToggle.dataset.actionMediaCurrent || "color"));
       }
       var audioButton = event.target.closest("[data-audio-toggle]");
       if (audioButton) return toggleReferenceAudio(audioButton);
@@ -3249,7 +3649,7 @@
       var pasteButton = event.target.closest("[data-resource-media-paste]");
       if (pasteButton) return pasteResourceMedia(pasteButton.dataset.resourceMediaPaste);
       var generateButton = event.target.closest("[data-resource-media-generate]");
-      if (generateButton) return generateActionDepth();
+      if (generateButton) return generateActionAuxiliary(generateButton.dataset.resourceMediaGenerate);
       var slot = event.target.closest("[data-resource-media-slot]");
       if (slot) chooseResourceMedia(slot.dataset.resourceMediaSlot);
     });
@@ -3346,6 +3746,7 @@
           audio_path: $("resourceAudioPath").value.trim(),
           color_image_path: $("resourceImagePath").value.trim(),
           depth_image_path: $("resourceDepthPath").value.trim(),
+          skeleton_image_path: $("resourceSkeletonPath").value.trim(),
         };
         var resourceSubmitButton = event.target.querySelector('button[type="submit"]');
         resourceSubmitButton.disabled = true;
@@ -3383,7 +3784,7 @@
           });
           closeCustomModal();
           renderAll();
-          showToast((resourceId ? "资源已更新并同步 Markdown" : "资源已添加并同步 Markdown"));
+          showToast((resourceId ? "资源已更新，名称和文件名已同步" : "资源已添加并同步 JSON"));
         }).catch(function (error) {
           showToast("资源保存失败：" + error.message, true);
         }).finally(function () {
@@ -3414,6 +3815,7 @@
         }
         closeCustomModal();
         state.filter = "全部";
+        persistLibraryViewState();
         renderAll();
         showToast(blockId ? "固定积木已更新并同步源文件" : "固定积木已保存");
       }).catch(function (error) {
@@ -3423,33 +3825,65 @@
       });
     });
     document.addEventListener("keydown", function (event) {
+      if (/^[0-5]$/.test(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+        if (!(event.target.closest && event.target.closest("input, select, textarea, video, audio")) && !document.querySelector(".modal-backdrop.is-open:not([hidden])")) {
+          var ratingCard = document.querySelector(".library-block:hover, .action-library-card:hover, .reference-library-card:hover");
+          if (ratingCard) {
+            event.preventDefault();
+            setLibraryCardRating(ratingCard, event.key);
+            return;
+          }
+        }
+      }
       if (referenceSuggest.open && event.key === "Escape") {
         event.preventDefault();
         closeReferenceSuggestions();
         return;
       }
       if (event.key !== "Escape") return;
+      closeLibraryImageContextMenu();
       closeCustomModal();
       closeImagePreview();
       closeTextPreview();
       closeDepthImport();
     });
     document.addEventListener("pointerdown", function (event) {
+      if (!event.target.closest("#libraryImageContextMenu")) closeLibraryImageContextMenu();
       if (referenceSuggest.open) {
         if (!event.target.closest("#promptReferenceSuggest, [data-stage-text]")) closeReferenceSuggestions();
       }
       if (referenceHover.token && !event.target.closest("#promptReferenceHover, .prompt-reference-token")) closeReferenceHover();
     });
     window.addEventListener("resize", function () {
+      closeLibraryImageContextMenu();
       positionReferenceHover();
       positionReferenceSuggestions();
     });
   }
 
+  restoreLibraryViewState();
   bindEvents();
+  window.addEventListener("rh-focus-prompt-update", function (event) {
+    var detail = event && event.detail && typeof event.detail === "object" ? event.detail : {};
+    if (!promptApiReady) {
+      focusPromptUpdatePending = true;
+      return;
+    }
+    var groupChanged = Object.prototype.hasOwnProperty.call(detail, "promptGroup")
+      ? applyPromptGroup(detail.promptGroup, false)
+      : applyPendingTaskPromptGroup();
+    if (groupChanged) renderAll();
+    else renderOutput();
+  });
   loadState().then(function () {
     applyPendingTaskPromptGroup();
+    loadPromptGroupFromQuery();
     renderAll();
+    if (focusPromptUpdatePending) {
+      focusPromptUpdatePending = false;
+      applyPendingTaskPromptGroup();
+      renderAll();
+    }
   }).catch(function (error) {
     renderAll();
     showToast("积木数据读取失败：" + error.message, true);

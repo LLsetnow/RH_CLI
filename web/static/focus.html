@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/png" href="/static/assets/rh-workflow-desk-icon.png" />
+    <title>专注模式 · RH Workflow Desk</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/prompt.css" />
+    <link rel="stylesheet" href="/static/outputs.css" />
+    <link rel="stylesheet" href="/static/dashboard.css" />
+    <link rel="stylesheet" href="/static/workflows.css" />
+    <link rel="stylesheet" href="/static/settings.css" />
+    <link rel="stylesheet" href="/static/focus.css" />
+    <script>
+      (function () {
+        try {
+          var storedTheme = localStorage.getItem("rh-workflow-theme");
+          document.documentElement.dataset.theme = storedTheme === "dark" ? "dark" : "light";
+        } catch (error) {}
+      }());
+    </script>
+    <script src="/static/motion.js"></script>
+  </head>
+  <body class="focus-body focus-mode-page">
+    <div class="focus-shell">
+      <header class="topbar focus-header">
+        <div class="brand-lockup" aria-label="RH Workflow Desk 专注模式">
+          <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
+          <span>
+            <span class="brand-name">RH Workflow Desk</span>
+            <span class="brand-subtitle">本地工作流提交台</span>
+          </span>
+        </div>
+        <nav id="focusNavigation" class="top-nav focus-navigation" aria-label="专注模式页面导航">
+          <button class="top-nav-link focus-nav-link active" type="button" data-focus-index="0" data-focus-page="workflows" aria-pressed="true" title="隐藏工作流"><span class="focus-nav-icon" aria-hidden="true">●</span><span>工作流</span></button>
+          <button class="top-nav-link focus-nav-link" type="button" data-focus-index="1" data-focus-page="prompt" aria-pressed="true" title="隐藏提示词工坊"><span class="focus-nav-icon" aria-hidden="true">●</span><span>提示词工坊</span></button>
+          <button class="top-nav-link focus-nav-link" type="button" data-focus-index="2" data-focus-page="submit" aria-pressed="true" title="隐藏任务提交"><span class="focus-nav-icon" aria-hidden="true">●</span><span>任务提交</span></button>
+          <button class="top-nav-link focus-nav-link" type="button" data-focus-index="3" data-focus-page="outputs" aria-pressed="true" title="隐藏成片"><span class="focus-nav-icon" aria-hidden="true">●</span><span>成片</span></button>
+          <button class="top-nav-link focus-nav-link" type="button" data-focus-index="4" data-focus-page="dashboard" aria-pressed="true" title="隐藏仪表盘"><span class="focus-nav-icon" aria-hidden="true">●</span><span>仪表盘</span></button>
+          <button class="top-nav-link focus-nav-link" type="button" data-focus-index="5" data-focus-page="settings" aria-pressed="true" title="隐藏设置"><span class="focus-nav-icon" aria-hidden="true">●</span><span>设置</span></button>
+        </nav>
+        <div class="topbar-actions focus-header-actions">
+          <button id="focusExit" class="settings-button focus-exit" type="button" aria-label="退出专注模式" title="退出专注模式">
+            <span class="settings-icon" aria-hidden="true">↗</span><span>退出专注</span>
+          </button>
+          <button id="focusThemeToggle" class="settings-button theme-toggle" type="button" aria-label="切换到夜间模式">
+            <span id="focusThemeToggleIcon" class="settings-icon" aria-hidden="true">☾</span><span id="focusThemeToggleLabel">夜间</span>
+          </button>
+          <span class="focus-wheel-hint">导航按钮显示/隐藏页面 · <kbd>Alt</kbd> + <kbd>←/→</kbd> 聚焦 · <kbd>Ctrl</kbd> + <kbd>M</kbd> 居中 · <kbd>Shift</kbd> + 滚轮横移</span>
+        </div>
+      </header>
+
+      <main id="focusStage" class="focus-stage" tabindex="0" aria-label="六个页面横向工作区">
+        <section class="focus-panel" data-focus-panel="0" data-focus-page="workflows" aria-label="工作流">
+          <div class="focus-page-slot" data-focus-slot="workflows"><div class="focus-loading">正在载入工作流…</div></div>
+        </section>
+        <div class="focus-panel-divider" data-focus-divider="0" role="separator" aria-orientation="vertical" aria-valuemin="420" aria-valuemax="1400" aria-valuenow="0" tabindex="0" title="拖动调整左右页面宽度"></div>
+        <section class="focus-panel" data-focus-panel="1" data-focus-page="prompt" aria-label="提示词工坊">
+          <div class="focus-page-slot" data-focus-slot="prompt"><div class="focus-loading">正在载入提示词工坊…</div></div>
+        </section>
+        <div class="focus-panel-divider" data-focus-divider="1" role="separator" aria-orientation="vertical" aria-valuemin="420" aria-valuemax="1400" aria-valuenow="0" tabindex="0" title="拖动调整左右页面宽度"></div>
+        <section class="focus-panel" data-focus-panel="2" data-focus-page="submit" aria-label="任务提交">
+          <div class="focus-page-slot" data-focus-slot="submit"><div class="focus-loading">正在载入任务提交…</div></div>
+        </section>
+        <div class="focus-panel-divider" data-focus-divider="2" role="separator" aria-orientation="vertical" aria-valuemin="420" aria-valuemax="1400" aria-valuenow="0" tabindex="0" title="拖动调整左右页面宽度"></div>
+        <section class="focus-panel" data-focus-panel="3" data-focus-page="outputs" aria-label="成片">
+          <div class="focus-page-slot" data-focus-slot="outputs"><div class="focus-loading">正在载入成片…</div></div>
+        </section>
+        <div class="focus-panel-divider" data-focus-divider="3" role="separator" aria-orientation="vertical" aria-valuemin="420" aria-valuemax="1400" aria-valuenow="0" tabindex="0" title="拖动调整左右页面宽度"></div>
+        <section class="focus-panel" data-focus-panel="4" data-focus-page="dashboard" aria-label="仪表盘">
+          <div class="focus-page-slot" data-focus-slot="dashboard"><div class="focus-loading">正在载入仪表盘…</div></div>
+        </section>
+        <div class="focus-panel-divider" data-focus-divider="4" role="separator" aria-orientation="vertical" aria-valuemin="420" aria-valuemax="1400" aria-valuenow="0" tabindex="0" title="拖动调整左右页面宽度"></div>
+        <section class="focus-panel" data-focus-panel="5" data-focus-page="settings" aria-label="设置">
+          <div class="focus-page-slot" data-focus-slot="settings"><div class="focus-loading">正在载入设置…</div></div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/focus.js"></script>
+  </body>
+</html>

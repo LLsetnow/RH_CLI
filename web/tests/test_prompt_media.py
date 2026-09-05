@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,6 +44,7 @@ def test_prepare_prompt_action_media_copies_paired_files_and_returns_relative_pa
             "media": [
                 {"role": "color", "name": "walk.png", "data_url": _data_url(b"color")},
                 {"role": "depth", "name": "depth-map.png", "data_url": _data_url(b"depth")},
+                {"role": "skeleton", "name": "skeleton-map.png", "data_url": _data_url(b"skeleton")},
             ],
         },
         "action",
@@ -51,18 +53,21 @@ def test_prepare_prompt_action_media_copies_paired_files_and_returns_relative_pa
 
     assert prepared["color_image_path"] == "pose/color/walk.png"
     assert prepared["depth_image_path"] == "pose/depth/walk_depth.png"
+    assert prepared["skeleton_image_path"] == "pose/skeleton/walk_skeleton.png"
     assert (root / prepared["color_image_path"]).read_bytes() == b"color"
     assert (root / prepared["depth_image_path"]).read_bytes() == b"depth"
+    assert (root / prepared["skeleton_image_path"]).read_bytes() == b"skeleton"
 
-    source = root / "pose" / "pose.md"
+    source = root / "pose" / "pose.json"
     action = ActionStore(tmp_path / "data", source_root=root).add_action(prepared)
-    content = source.read_text(encoding="utf-8")
+    content = json.loads(source.read_text(encoding="utf-8"))
     assert action["color_image_path"] == "pose/color/walk.png"
-    assert "![200](pose/color/walk.png)" in content
-    assert "![200](pose/depth/walk_depth.png)" in content
+    assert content["actions"][0]["color_image_path"] == "pose/color/walk.png"
+    assert content["actions"][0]["depth_image_path"] == "pose/depth/walk_depth.png"
+    assert content["actions"][0]["skeleton_image_path"] == "pose/skeleton/walk_skeleton.png"
 
 
-def test_prepare_prompt_reference_media_copies_into_kind_directory_and_updates_markdown(tmp_path):
+def test_prepare_prompt_reference_media_copies_into_kind_directory_and_updates_json(tmp_path):
     root = tmp_path / "ref"
     root.mkdir()
 
@@ -81,9 +86,9 @@ def test_prepare_prompt_reference_media_copies_into_kind_directory_and_updates_m
     assert (root / "character" / "hero.webp").read_bytes() == b"hero"
 
     reference = ReferenceStore(tmp_path / "data", root).add_reference("character", prepared)
-    content = (root / "character" / "character.md").read_text(encoding="utf-8")
+    content = json.loads((root / "character" / "character.json").read_text(encoding="utf-8"))
     assert reference["image_path"] == "character/hero.webp"
-    assert "![200](character/hero.webp)" in content
+    assert content["references"][0]["image_path"] == "character/hero.webp"
 
 
 def test_prepare_prompt_media_rejects_a_wrong_slot_type(tmp_path):
@@ -135,3 +140,40 @@ def test_generate_prompt_depth_uses_videomake_script_and_cleans_up_temp_files(tm
         commands[0][4],
     ]]
     assert not list((tmp_path / "data" / "prompt").glob("depth-generation-*"))
+
+
+def test_generate_prompt_skeleton_uses_dwpose_runtime_and_cleans_up_temp_files(tmp_path, monkeypatch):
+    root = tmp_path / "ref"
+    root.mkdir()
+    commands = []
+
+    monkeypatch.setattr(web_server, "DATA_ROOT", tmp_path / "data")
+    monkeypatch.setattr(
+        web_server,
+        "_skeleton_runtime_paths",
+        lambda configured_root: (Path("/runtime/python"), Path("/videomake/tools/pose_skeleton_macos.py"), Path("/videomake/.runtime/pose_dwpose/checkpoints/dw-ll_ucoco_384.onnx")),
+    )
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        Path(command[command.index("-o") + 1]).write_bytes(b"generated-skeleton")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(web_server.subprocess, "run", fake_run)
+    result = web_server.generate_prompt_skeleton(
+        {"source": {"name": "walk.jpg", "mime": "image/jpeg", "data": base64.b64encode(b"source").decode("ascii")}},
+        root,
+    )
+
+    assert result["name"] == "walk_skeleton.png"
+    assert base64.b64decode(result["data"]) == b"generated-skeleton"
+    assert commands == [[
+        "/runtime/python",
+        "/videomake/tools/pose_skeleton_macos.py",
+        commands[0][2],
+        "-o",
+        commands[0][4],
+        "--model",
+        "/videomake/.runtime/pose_dwpose/checkpoints/dw-ll_ucoco_384.onnx",
+    ]]
+    assert not list((tmp_path / "data" / "prompt").glob("skeleton-generation-*"))

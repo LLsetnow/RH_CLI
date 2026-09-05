@@ -140,6 +140,23 @@ def test_submit_includes_generic_runninghub_options():
     }
 
 
+def test_submit_classifies_runtime_key_errors_for_scheduler_failover():
+    auth_client = _SubmitClient({"code": 401, "msg": "invalid api key"})
+    with pytest.raises(RhCliError) as auth_info:
+        _submit(auth_client, "key", None, "{}")
+    assert auth_info.value.code == "AUTH_FAILED"
+
+    balance_client = _SubmitClient({"code": 402, "msg": "insufficient balance"})
+    with pytest.raises(RhCliError) as balance_info:
+        _submit(balance_client, "key", None, "{}")
+    assert balance_info.value.code == "INSUFFICIENT_BALANCE"
+
+    queue_client = _SubmitClient({"code": 421, "msg": "queue full"})
+    with pytest.raises(RhCliError) as queue_info:
+        _submit(queue_client, "key", None, "{}", requeue_on_queue_full=True)
+    assert queue_info.value.code == "REMOTE_QUEUE_FULL"
+
+
 def test_submit_rejects_invalid_retain_seconds():
     client = _SubmitClient()
 

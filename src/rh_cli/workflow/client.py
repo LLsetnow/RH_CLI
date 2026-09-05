@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from rh_cli.config import require_api_key
-from rh_cli.errors import RhCliError
+from rh_cli.errors import RhCliError, classify_api_error
 from rh_cli.http import BASE_URL_CN, BASE_URL_AI, API_HOST_CN, API_HOST_AI, RhHttpClient, get_site_config
 from rh_cli.media import upload_app_file
 from rh_cli.output import RunResult, resolve_output_path
@@ -254,6 +254,8 @@ def _validate_api_workflow(workflow: dict[str, Any]) -> None:
     if not workflow:
         raise RhCliError("INVALID_WORKFLOW", "工作流 JSON 不能为空。")
     for node_id, node in workflow.items():
+        if node_id == "__rh_meta__":
+            continue
         if not isinstance(node, dict):
             raise RhCliError("INVALID_WORKFLOW", f"节点 {node_id} 必须是对象。")
         class_type = node.get("class_type")
@@ -300,6 +302,7 @@ def _submit(
     retain_seconds: int | None = None,
     use_personal_queue: bool = False,
     add_metadata: bool | None = None,
+    requeue_on_queue_full: bool = False,
 ) -> str:
     url = create_url or CREATE_URL
     payload: dict[str, Any] = {"apiKey": api_key, "workflow": workflow_json}
@@ -329,11 +332,22 @@ def _submit(
             if not task_id:
                 raise RhCliError("SUBMIT_FAILED", "提交成功但响应中没有 taskId。", detail=response)
             return str(task_id)
-        if code == 421 and attempt < 4:  # TASK_QUEUE_MAXED：队列已满，退避重试
+        if code == 421 and requeue_on_queue_full:
+            raise RhCliError(
+                "REMOTE_QUEUE_FULL",
+                "RunningHub 远程队列已满，任务稍后重新进入本地队列。",
+                detail=response,
+            )
+        if code == 421 and attempt < 4:  # TASK_QUEUE_MAXED：CLI 退避重试
             time.sleep(delay)
             delay = int(delay * 1.5)
             continue
-        raise RhCliError("SUBMIT_FAILED", f"任务提交失败：{response.get('msg', response)}", detail=response)
+        message = str(response.get("msg") or response.get("message") or response)
+        classified = classify_api_error(message, code)
+        if classified.code != "API_ERROR":
+            classified.detail = response
+            raise classified
+        raise RhCliError("SUBMIT_FAILED", f"任务提交失败：{message}", detail=response)
     raise RhCliError("SUBMIT_FAILED", "队列持续繁忙，多次重试后仍失败。")
 
 
@@ -498,11 +512,14 @@ def run_workflow(
             if on_file:
                 on_file(changes)
 
+        # __rh_meta__ 只属于本地工作流库，不是 ComfyUI API 节点，也不发送给远端。
+        workflow_for_submit = dict(workflow)
+        workflow_for_submit.pop("__rh_meta__", None)
         task_id = _submit(
             client,
             api_key,
             workflow_id,
-            json.dumps(workflow, ensure_ascii=False),
+            json.dumps(workflow_for_submit, ensure_ascii=False),
             instance_type,
             s_create,
             access_password=access_password,

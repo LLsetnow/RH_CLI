@@ -16,8 +16,8 @@ let backendProcess = null;
 let backendPort = null;
 const accountWindows = new Map();
 const pageNavigationShortcuts = [
-  ["Control+Left", "previous"],
-  ["Control+Right", "next"]
+  ["Alt+Left", "previous"],
+  ["Alt+Right", "next"]
 ];
 
 function normaliseAccount(value) {
@@ -395,9 +395,8 @@ function registerPageNavigationShortcuts() {
       if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused()) return;
       mainWindow.webContents.send("rh-global-page-navigation", direction);
     });
-    if (!registered) {
-      console.warn(`[rh-electron] 无法注册全局快捷键：${accelerator}`);
-    }
+    const message = registered ? "已注册全局快捷键" : "无法注册全局快捷键";
+    (registered ? console.log : console.warn)(`[rh-electron] ${message}：${accelerator}`);
   });
 }
 
