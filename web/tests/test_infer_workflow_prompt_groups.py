@@ -83,6 +83,8 @@ def test_apply_plan_writes_new_groups_in_prompt_store_split_format(tmp_path) -> 
     assert workflow_index["workflows"] == [{"id": "wf_new", "file": "workflow-registry/wf_new.json"}]
     workflow_entry = json.loads((data_root / "workflow-registry" / "wf_new.json").read_text(encoding="utf-8"))
     assert workflow_entry["prompt_group_id"] == group_id
+    assert workflow_entry["workflow_file"] == "workflows/wf_new.json"
+    assert workflow_entry["prompt_group_file"] == "workflows/wf_new.prompt_group.json"
 
 
 def test_apply_plan_repairs_empty_group_file_from_workflow_sidecar(tmp_path) -> None:

@@ -369,7 +369,7 @@
     }
     if (a.display_type === "video") {
       title.textContent = "视频覆盖对比";
-      subtitle.textContent = "两段视频已静音同步播放；拖动中央分割线检查分辨率差异。";
+      subtitle.textContent = "两段视频已静音同步播放，并缩放到同一显示尺寸；拖动中央分割线检查分辨率差异。";
     } else if (state.mode === "split") {
       title.textContent = "图片左右对比";
       subtitle.textContent = "在任一画面上拖动或滚动，A / 图1 与 B / 图2 会保持相同位置和缩放。";
@@ -411,7 +411,7 @@
     updateModeTabs();
     updateHeader();
     if (!a && !b) {
-      stage.innerHTML = '<div class="compare-stage-empty"><span class="compare-stage-empty-mark">A&nbsp;＋&nbsp;B</span><strong>把两份素材放进来</strong><span>图片支持同步平移和缩放；视频会以覆盖方式对齐播放。</span></div>';
+      stage.innerHTML = '<div class="compare-stage-empty"><span class="compare-stage-empty-mark">A&nbsp;＋&nbsp;B</span><strong>把两份素材放进来</strong><span>图片支持同步平移和缩放；视频会先缩放到同一显示尺寸，再以覆盖方式对齐播放。</span></div>';
       $("compareControls").hidden = true;
       applyTransform();
       return;
@@ -446,6 +446,47 @@
     stage.style.setProperty("--pan-y", state.panY + "px");
     stage.style.setProperty("--zoom", state.zoom.toFixed(3));
     stage.style.setProperty("--divider", state.divider.toFixed(2) + "%");
+  }
+  function compareFullscreenIsOpen() {
+    return document.documentElement.classList.contains("compare-fullscreen-open");
+  }
+  function updateCompareFullscreenControls() {
+    var open = compareFullscreenIsOpen();
+    var toggle = $("toggleCompareFullscreen");
+    var close = $("compareFullscreenClose");
+    if (toggle) {
+      toggle.textContent = open ? "退出全屏" : "全屏对比";
+      toggle.setAttribute("aria-pressed", open ? "true" : "false");
+      toggle.setAttribute("aria-label", open ? "退出全屏对比" : "全屏显示对比画布");
+    }
+    if (close) close.hidden = !open;
+  }
+  function openCompareFullscreen() {
+    if (compareFullscreenIsOpen()) return;
+    var stage = $("compareStage");
+    if (!stage) return;
+    document.documentElement.classList.add("compare-fullscreen-open");
+    stage.classList.add("is-fullscreen");
+    updateCompareFullscreenControls();
+    window.requestAnimationFrame(syncVideoDisplaySize);
+    var close = $("compareFullscreenClose");
+    if (close) close.focus();
+  }
+  function closeCompareFullscreen(restoreFocus) {
+    if (!compareFullscreenIsOpen()) return;
+    var stage = $("compareStage");
+    if (stage) stage.classList.remove("is-fullscreen");
+    document.documentElement.classList.remove("compare-fullscreen-open");
+    updateCompareFullscreenControls();
+    window.requestAnimationFrame(syncVideoDisplaySize);
+    if (restoreFocus) {
+      var toggle = $("toggleCompareFullscreen");
+      if (toggle) toggle.focus();
+    }
+  }
+  function toggleCompareFullscreen() {
+    if (compareFullscreenIsOpen()) closeCompareFullscreen(true);
+    else openCompareFullscreen();
   }
   function resetTransform() {
     state.panX = 0;
@@ -626,12 +667,39 @@
   function bindVideoElements() {
     getVideos().forEach(function (video) {
       video.addEventListener("loadedmetadata", updateVideoDuration);
+      video.addEventListener("loadedmetadata", syncVideoDisplaySize);
       video.addEventListener("timeupdate", updateVideoControls);
       video.addEventListener("ended", function () {
         pauseVideos();
         updateVideoControls();
       });
     });
+    syncVideoDisplaySize();
+  }
+  function videoDimensions(video) {
+    var width = Number(video && video.videoWidth);
+    var height = Number(video && video.videoHeight);
+    return isFinite(width) && width > 0 && isFinite(height) && height > 0 ? { width: width, height: height } : null;
+  }
+  function syncVideoDisplaySize() {
+    var stage = $("compareStage");
+    var videos = getVideos();
+    if (!stage || !videos.length) return;
+    var dimensions = videos.map(videoDimensions).filter(Boolean);
+    if (!dimensions.length) return;
+    var sourceWidth = Math.max.apply(Math, dimensions.map(function (size) { return size.width; }));
+    var sourceHeight = Math.max.apply(Math, dimensions.map(function (size) { return size.height; }));
+    var stageRect = stage.getBoundingClientRect();
+    var stageWidth = Number(stageRect.width) || 0;
+    var stageHeight = Number(stageRect.height) || 0;
+    if (!stageWidth || !stageHeight) return;
+    var scale = Math.min(stageWidth / sourceWidth, stageHeight / sourceHeight);
+    if (!isFinite(scale) || scale <= 0) return;
+    var displayWidth = Math.max(1, Math.round(sourceWidth * scale));
+    var displayHeight = Math.max(1, Math.round(sourceHeight * scale));
+    stage.style.setProperty("--compare-video-display-width", displayWidth + "px");
+    stage.style.setProperty("--compare-video-display-height", displayHeight + "px");
+    videos.forEach(function (video) { video.classList.add("is-resolution-normalized"); });
   }
   function updateVideoDuration() {
     var durations = getVideos().map(function (video) { return Number(video.duration); }).filter(function (duration) { return isFinite(duration) && duration > 0; });
@@ -837,6 +905,8 @@
       saveCompareState();
     });
     $("resetCompareTransform").addEventListener("click", resetTransform);
+    $("toggleCompareFullscreen").addEventListener("click", toggleCompareFullscreen);
+    $("compareFullscreenClose").addEventListener("click", function () { closeCompareFullscreen(true); });
     $("clearCompare").addEventListener("click", function () {
       pauseVideos();
       state.slots.a = null;
@@ -874,6 +944,13 @@
       if (event.key === "0") resetTransform();
     });
     document.addEventListener("keydown", handleVideoShortcut);
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && compareFullscreenIsOpen()) {
+        event.preventDefault();
+        closeCompareFullscreen(true);
+      }
+    });
+    window.addEventListener("resize", syncVideoDisplaySize);
     window.addEventListener("pagehide", saveCompareState);
     window.addEventListener("beforeunload", function () {
       saveCompareState();

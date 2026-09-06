@@ -85,7 +85,7 @@
           <div>
             <div class="eyebrow">WORKFLOW LIBRARY / LOCAL JSON</div>
             <h1>把工作流，<br /><em>整理成自己的库。</em></h1>
-            <p>按账号保存 API 工作流和提示词组。点击卡片会同时恢复任务提交页与提示词工坊的工作台；API Key 始终留在本机 API Key 管理中。</p>
+            <p>工作流库保存可复用的完整工作流包；导入和加载都先进入临时快照，任务提交后还会生成独立的不可变任务快照。</p>
           </div>
           <div class="workflows-hero-stats">
             <div class="workflow-hero-stat"><span>工作流</span><strong id="workflowTotal">0</strong></div>
@@ -106,7 +106,7 @@
             <label id="workflowImportDropzone" class="workflow-import-dropzone" for="workflowImportFile">
               <input id="workflowImportFile" type="file" accept=".json,application/json" />
               <span class="workflow-import-mark" aria-hidden="true">＋</span>
-              <span><strong>拖入 API JSON 到这里</strong><small>导入后可指定所属账号、workflowId 和提示词组；不会保存 API Key。</small></span>
+              <span><strong>拖入 API JSON 到这里</strong><small>导入后进入临时快照，点击“保存到工作流库”才会写入工作流库。</small></span>
             </label>
             <button id="importWorkflowButton" class="primary-button workflow-import-button" type="button"><span class="button-glyph">+</span><span>导入工作流</span></button>
           </div>
@@ -115,20 +115,11 @@
         <section id="workflowGroups" class="workflow-groups" aria-live="polite">
           <div class="page-loading-state" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取工作流库</strong><span>正在扫描本地工作流和文件夹…</span></div>
         </section>
+        <!-- Prompt-group sidecars are internal workflow-package data. These
+             inert hooks remain only for compatibility with older extensions;
+             no prompt-group library is rendered on this page. -->
+        <div id="promptGroupGroups" hidden aria-hidden="true"></div>
 
-        <section class="prompt-group-library" aria-labelledby="promptGroupLibraryTitle">
-          <div class="prompt-group-library-heading">
-            <div>
-              <div class="section-kicker">PROMPT GROUP LIBRARY</div>
-              <h2 id="promptGroupLibraryTitle">组状态库 <span id="promptGroupCount" class="workflows-count">0</span></h2>
-              <p>把提示词工作台的积木顺序按项目归档；点击卡片会在提示词工作台本地恢复，右键可删除。</p>
-            </div>
-            <span class="output-format">LOCAL</span>
-          </div>
-          <div id="promptGroupGroups" class="workflow-groups" aria-live="polite">
-            <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在读取组状态库</strong></div>
-          </div>
-        </section>
       </main>
     </div>
 
@@ -145,20 +136,15 @@
       <button type="button" role="menuitem" data-workflow-menu-action="export-workflow">导出</button>
       <button type="button" role="menuitem" data-workflow-menu-action="delete-workflow">删除</button>
     </div>
-    <div id="promptGroupFolderContextMenu" class="workflow-folder-context-menu prompt-group-folder-context-menu" role="menu" aria-label="提示词组文件夹操作" hidden>
-      <button type="button" role="menuitem" data-prompt-group-folder-menu-action="rename">重命名</button>
-      <button type="button" role="menuitem" data-prompt-group-folder-menu-action="delete">删除</button>
-    </div>
-    <div id="promptGroupCardContextMenu" class="workflow-card-context-menu prompt-group-card-context-menu" role="menu" aria-label="提示词组操作" hidden>
-      <button type="button" role="menuitem" data-prompt-group-menu-action="delete">删除提示词组</button>
-    </div>
+    <div id="promptGroupFolderContextMenu" hidden aria-hidden="true"></div>
+    <div id="promptGroupCardContextMenu" hidden aria-hidden="true"><button type="button" data-prompt-group-menu-action="delete">删除提示词组</button></div>
 
     <div id="workflowEditorModal" class="modal-backdrop" hidden>
       <section class="workflow-modal-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowEditorTitle">
         <div class="modal-heading">
           <div>
             <div class="section-kicker">WORKFLOW RECORD</div>
-            <h2 id="workflowEditorTitle">保存工作流</h2>
+          <h2 id="workflowEditorTitle">编辑临时工作流快照</h2>
           </div>
           <button id="closeWorkflowEditor" class="close-button" type="button" aria-label="关闭">×</button>
         </div>
@@ -180,14 +166,9 @@
               <input id="workflowRecordRemoteId" type="text" inputmode="numeric" autocomplete="off" placeholder="可稍后补充" />
             </label>
           </div>
-          <label class="field-group">
-            <span class="field-label">关联提示词组</span>
-            <select id="workflowRecordPromptGroup">
-              <option value="">不关联提示词组</option>
-            </select>
-            <span class="field-hint">保存时会把当前提示词组一起写入工作流包；加载工作流后会恢复到提示词工坊。</span>
-          </label>
-          <div class="workflow-editor-note">工作流与账号绑定后，提交页可以明确识别归属；API Key 不会写入工作流文件。</div>
+          <select id="workflowRecordPromptGroup" hidden aria-hidden="true"><option value=""></option></select>
+          <div class="workflow-editor-note">这里编辑的是临时工作流快照。保存时会把当前提示词工坊状态一起写入新工作流包；API Key 不会写入工作流文件。</div>
+          <span class="sr-only" hidden>关联提示词组由工作流包内部保存，不单独展示。</span>
           <section class="workflow-editor-json" aria-labelledby="workflowEditorJsonLabel">
             <div class="workflow-editor-json-heading">
               <div>
@@ -196,14 +177,14 @@
               </div>
               <div class="workflow-editor-json-actions">
                 <button id="restoreWorkflowJson" class="secondary-button" type="button">复原</button>
-                <button id="saveWorkflowJson" class="primary-button" type="button">保存</button>
+                <button id="saveWorkflowJson" class="primary-button" type="button">应用到快照</button>
               </div>
             </div>
             <textarea id="workflowEditorJson" aria-label="工作流 API JSON" spellcheck="false" required></textarea>
           </section>
           <div class="dialog-actions">
             <button id="cancelWorkflowEditor" class="secondary-button" type="button">取消</button>
-            <button id="saveWorkflowRecord" class="primary-button" type="submit"><span class="button-glyph">✓</span><span>保存工作流</span></button>
+            <button id="saveWorkflowRecord" class="primary-button" type="submit"><span class="button-glyph">✓</span><span>保存到工作流库</span></button>
           </div>
         </form>
       </section>
@@ -239,7 +220,7 @@
         <div id="workflowConfigItems" class="workflow-config-items"></div>
         <div class="dialog-actions">
           <button id="cancelWorkflowConfig" class="secondary-button" type="button">取消</button>
-          <button id="saveWorkflowConfig" class="primary-button" type="button"><span class="button-glyph">✓</span><span>保存配置与默认值</span></button>
+          <button id="saveWorkflowConfig" class="primary-button" type="button"><span class="button-glyph">✓</span><span>应用到临时快照</span></button>
         </div>
       </section>
     </div>

@@ -2,17 +2,21 @@
   "use strict";
 
   var OUTPUT_PAGE_SIZE = 64;
+  var OUTPUT_WORKFLOW_FILTER_MAX_CHARS = 18;
   var UNCLASSIFIED_PROJECT_ID = "__unclassified__";
   var UNBOUND_ACCOUNT_ID = "__unbound__";
   var OUTPUT_TAG_FILTER_TAGS = ["案例", "H"];
   var OUTPUT_TAG_FILTER_MODES = ["off", "include", "exclude"];
-  var state = { outputs: [], projects: [], summary: {}, type: "all", rating: 0, tagFilters: { "案例": "off", "H": "off" }, search: "", sort: "newest", page: 1, projectId: "", telegramConfigured: false, contextRangeStart: 0, contextRangeEnd: 0, contextRangeDays: 0, contextAccountId: "", contextWorkflowName: "", contextArtifactId: "", contextProjectId: "", selectedArtifactId: "" };
+  var state = { outputs: [], projects: [], summary: {}, type: "all", rating: 0, tagFilters: { "案例": "off", "H": "off" }, workflowFilter: "", search: "", sort: "newest", page: 1, projectId: "", telegramConfigured: false, contextRangeStart: 0, contextRangeEnd: 0, contextRangeDays: 0, contextAccountId: "", contextWorkflowName: "", contextArtifactId: "", contextProjectId: "", selectedArtifactId: "" };
   var outputImport = { item: null, path: "" };
   var projectMove = { item: null, projectId: "" };
   var projectEditor = { mode: "", projectId: "" };
   var projectDelete = { projectId: "" };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
   var pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1";
+  var outputViewStateKey = "rh-workflow-desk-outputs-v1";
+  var outputStatePersistenceReady = false;
+  var outputStatePersistenceEnabled = true;
   var ratingBusy = {};
   var tagBusy = {};
   var telegramUploadBusy = {};
@@ -115,16 +119,117 @@
   function typeLabel(type) {
     return { image: "IMAGE", video: "VIDEO", audio: "AUDIO", text: "TEXT", other: "FILE" }[type] || "FILE";
   }
+  function outputStorage() {
+    try {
+      if (window.localStorage) return window.localStorage;
+    } catch (error) {}
+    return null;
+  }
+  function outputContextParams() {
+    return new URLSearchParams(window.location.search || "");
+  }
+  function outputContextParamsHaveValues(params) {
+    return Boolean(String(params.get("range_start") || "").trim() || String(params.get("range_end") || "").trim() || String(params.get("range_days") || "").trim() || String(params.get("account_id") || "").trim() || String(params.get("workflow_name") || "").trim());
+  }
+  function outputUrlHasContext() {
+    return outputContextParamsHaveValues(outputContextParams());
+  }
+  function defaultOutputTagFilters() {
+    return { "案例": "off", "H": "off" };
+  }
+  function restoredOutputTagFilters(value) {
+    var filters = defaultOutputTagFilters();
+    OUTPUT_TAG_FILTER_TAGS.forEach(function (tag) {
+      var mode = value && value[tag];
+      if (OUTPUT_TAG_FILTER_MODES.indexOf(mode) !== -1) filters[tag] = mode;
+    });
+    return filters;
+  }
+  function restoredOutputType(value) {
+    var type = String(value == null ? "" : value);
+    return ["all", "image", "video", "audio", "text", "other"].indexOf(type) !== -1 ? type : "all";
+  }
+  function restoredOutputRating(value) {
+    if (value === "unrated") return value;
+    var rating = Number(value);
+    return rating >= 1 && rating <= 5 ? Math.floor(rating) : 0;
+  }
+  function restoredOutputSort(value) {
+    var sort = String(value == null ? "" : value);
+    return ["newest", "oldest", "name"].indexOf(sort) !== -1 ? sort : "newest";
+  }
+  function restoreOutputViewState() {
+    var storage = outputStorage();
+    var saved = null;
+    if (storage) {
+      try {
+        saved = JSON.parse(storage.getItem(outputViewStateKey) || "null");
+      } catch (error) {
+        saved = null;
+      }
+    }
+    if (!saved || saved.version !== 1) {
+      outputStatePersistenceReady = true;
+      return;
+    }
+    if (saved.projectId != null) state.projectId = String(saved.projectId);
+    if (saved.type != null) state.type = restoredOutputType(saved.type);
+    if (saved.rating != null) state.rating = restoredOutputRating(saved.rating);
+    if (saved.tagFilters && typeof saved.tagFilters === "object") state.tagFilters = restoredOutputTagFilters(saved.tagFilters);
+    if (saved.workflowFilter != null) state.workflowFilter = String(saved.workflowFilter);
+    if (saved.search != null) state.search = String(saved.search);
+    if (saved.sort != null) state.sort = restoredOutputSort(saved.sort);
+    if (saved.page != null) state.page = Math.max(1, Math.floor(Number(saved.page) || 1));
+    if (saved.selectedArtifactId != null) state.selectedArtifactId = String(saved.selectedArtifactId);
+    var searchInput = $("outputSearch");
+    if (searchInput) searchInput.value = state.search;
+    var sortInput = $("outputSort");
+    if (sortInput) sortInput.value = state.sort;
+    outputStatePersistenceReady = true;
+  }
+  function saveOutputViewState() {
+    if (!outputStatePersistenceReady || !outputStatePersistenceEnabled) return;
+    var storage = outputStorage();
+    if (!storage) return;
+    try {
+      storage.setItem(outputViewStateKey, JSON.stringify({
+        version: 1,
+        projectId: String(state.projectId || ""),
+        type: restoredOutputType(state.type),
+        rating: restoredOutputRating(state.rating),
+        tagFilters: restoredOutputTagFilters(state.tagFilters),
+        workflowFilter: String(state.workflowFilter || ""),
+        search: String(state.search || ""),
+        sort: restoredOutputSort(state.sort),
+        page: Math.max(1, Math.floor(Number(state.page) || 1)),
+        selectedArtifactId: String(state.selectedArtifactId || "")
+      }));
+    } catch (error) {}
+  }
+  function resetOutputViewForContext() {
+    state.projectId = "";
+    state.type = "all";
+    state.rating = 0;
+    state.tagFilters = defaultOutputTagFilters();
+    state.workflowFilter = "";
+    state.page = 1;
+    state.selectedArtifactId = "";
+  }
   function readOutputContext() {
-    var params = new URLSearchParams(window.location.search || "");
+    var params = outputContextParams();
+    var hasExplicitContext = outputContextParamsHaveValues(params);
+    outputStatePersistenceEnabled = !hasExplicitContext;
+    if (hasExplicitContext) resetOutputViewForContext();
     state.contextRangeStart = Number(params.get("range_start") || 0) || 0;
     state.contextRangeEnd = Number(params.get("range_end") || 0) || 0;
     state.contextRangeDays = Number(params.get("range_days") || 0) || 0;
     state.contextAccountId = String(params.get("account_id") || "").trim();
     state.contextWorkflowName = String(params.get("workflow_name") || "").trim();
-    state.search = state.contextWorkflowName;
+    if (hasExplicitContext) state.search = state.contextWorkflowName;
     var searchInput = $("outputSearch");
     if (searchInput) searchInput.value = state.search;
+    var sortInput = $("outputSort");
+    if (sortInput) sortInput.value = state.sort;
   }
   function hasOutputContext() {
     return Boolean(state.contextWorkflowName || state.contextRangeStart || state.contextRangeEnd || state.contextAccountId);
@@ -162,11 +267,83 @@
   function matchesOutputTagFilters(item) {
     return OUTPUT_TAG_FILTER_TAGS.every(function (tag) { return outputTagFilterMatches(item, tag); });
   }
+  function outputWorkflowName(item) {
+    return String(item && (item.task_name || item.workflow_name) || "").trim();
+  }
+  function outputWorkflowNames() {
+    if (!state.projectId) return [];
+    var names = {};
+    state.outputs.forEach(function (item) {
+      if (!contextOutputMatches(item) || !belongsToProject(item, state.projectId)) return;
+      var name = outputWorkflowName(item);
+      if (name) names[name] = true;
+    });
+    return Object.keys(names).sort(function (left, right) { return left.localeCompare(right, "zh-CN"); });
+  }
+  function outputWorkflowFilterLabel(name) {
+    var characters = Array.from(String(name || ""));
+    if (characters.length <= OUTPUT_WORKFLOW_FILTER_MAX_CHARS) return characters.join("");
+    return characters.slice(0, OUTPUT_WORKFLOW_FILTER_MAX_CHARS - 1).join("") + "…";
+  }
+  function outputWorkflowFilterMatches(item) {
+    return !state.workflowFilter || outputWorkflowName(item) === state.workflowFilter;
+  }
+  function renderWorkflowFilters() {
+    var container = $("outputWorkflowFilters");
+    if (!container) return;
+    var names = outputWorkflowNames();
+    if (!state.projectId || !names.length) {
+      state.workflowFilter = "";
+      container.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+    if (state.workflowFilter && names.indexOf(state.workflowFilter) === -1) state.workflowFilter = "";
+    var options = ['<button class="output-workflow-filter' + (!state.workflowFilter ? ' is-selected' : '') + '" type="button" data-output-workflow="" aria-pressed="' + (!state.workflowFilter ? 'true' : 'false') + '" title="显示当前文件夹中的全部工作流">全部</button>'];
+    names.forEach(function (name) {
+      var active = name === state.workflowFilter;
+      options.push('<button class="output-workflow-filter' + (active ? ' is-selected' : '') + '" type="button" data-output-workflow="' + esc(name) + '" aria-pressed="' + (active ? 'true' : 'false') + '" title="' + esc(name) + '">' + esc(outputWorkflowFilterLabel(name)) + '</button>');
+    });
+    container.hidden = false;
+    container.innerHTML = '<span class="output-workflow-filter-label">工作流</span><div class="output-workflow-filter-options" role="group" aria-label="工作流名称">' + options.join("") + '</div>';
+  }
   function isMediaOutput(item) {
     return item && item.kind === "file" && ["image", "video", "audio"].indexOf(item.display_type) !== -1;
   }
   function caseMediaOutputs() {
-    return state.outputs.filter(function (item) { return isMediaOutput(item) && hasOutputTag(item, "案例"); });
+    return filteredOutputs().filter(function (item) { return isMediaOutput(item) && hasOutputTag(item, "案例"); });
+  }
+  function oneStarOutputs() {
+    return filteredOutputs().filter(function (item) { return normalizedRating(item.rating) === 1; });
+  }
+  function outputActionQuery(projectId) {
+    var pairs = [];
+    function add(name, value) {
+      var clean = String(value == null ? "" : value).trim();
+      if (clean) pairs.push(encodeURIComponent(name) + "=" + encodeURIComponent(clean));
+    }
+    add("project_id", projectId == null ? state.projectId : projectId);
+    add("search", state.search);
+    if (state.type !== "all") add("type", state.type);
+    if (state.rating === "unrated") add("rating", "unrated");
+    else if (typeof state.rating === "number" && state.rating) add("rating", state.rating);
+    if (state.workflowFilter) add("workflow", state.workflowFilter);
+    add("tag_case", outputTagFilterMode("案例") === "off" ? "" : outputTagFilterMode("案例"));
+    add("tag_h", outputTagFilterMode("H") === "off" ? "" : outputTagFilterMode("H"));
+    if (state.contextRangeStart) add("range_start", state.contextRangeStart);
+    if (state.contextRangeEnd) add("range_end", state.contextRangeEnd);
+    add("account_id", state.contextAccountId);
+    return pairs.length ? "?" + pairs.join("&") : "";
+  }
+  function outputProjectQuery(projectId) {
+    return outputActionQuery(projectId);
+  }
+  function outputActionKey(item) {
+    if (item && item.task_id != null && item.output_index != null) return String(item.task_id) + ":" + String(item.output_index);
+    return String(item && item.id || "");
+  }
+  function outputActionScopeLabel() {
+    return state.projectId ? "当前文件夹内的" : "全部成片中的";
   }
   function outputProjectId(item) {
     return String(item && item.project_id || "").trim();
@@ -302,6 +479,7 @@
       if (state.rating === "unrated" && normalizedRating(item.rating) !== 0) return false;
       if (typeof state.rating === "number" && state.rating && normalizedRating(item.rating) !== state.rating) return false;
       if (!matchesOutputTagFilters(item)) return false;
+      if (!outputWorkflowFilterMatches(item)) return false;
       if (!query) return true;
       return String(item.name || "").toLowerCase().indexOf(query) !== -1 || String(item.task_name || "").toLowerCase().indexOf(query) !== -1 || String(item.project_name || "").toLowerCase().indexOf(query) !== -1;
     });
@@ -356,9 +534,9 @@
       '<button class="output-page-button" type="button" data-output-page="next"' + (currentPage === totalPages ? ' disabled' : '') + ' aria-label="下一页">下一页</button>';
   }
   function renderSummary() {
-    var summary = state.summary || {};
+    var summary = scopedOutputSummary();
     var ratingCounts = summary.rating_counts || {};
-    var oneStarCount = Number(ratingCounts["1"] || 0);
+    var oneStarCount = oneStarOutputs().length;
     $("heroTotal").textContent = String(summary.total || 0);
     $("outputCount").textContent = String(filteredOutputs().length);
     $("heroUpdated").textContent = summary.total ? "来自 " + String(summary.tasks || 0) + " 个本地任务" : "暂无可浏览产物";
@@ -393,16 +571,36 @@
     if (deleteOneStarButton) {
       deleteOneStarButton.disabled = !oneStarCount;
       $("oneStarOutputCount").textContent = String(oneStarCount);
-      deleteOneStarButton.title = oneStarCount ? "删除全部 " + oneStarCount + " 个一星成片" : "没有一星成片可删除";
+      deleteOneStarButton.title = oneStarCount ? "删除" + outputActionScopeLabel() + " " + oneStarCount + " 个一星成片" : "没有一星成片可删除";
     }
     var exportCaseButton = $("exportCaseOutputs");
     if (exportCaseButton) {
       var caseCount = caseMediaOutputs().length;
       exportCaseButton.disabled = !caseCount;
       $("caseOutputCount").textContent = String(caseCount);
-      exportCaseButton.title = caseCount ? "下载 " + caseCount + " 个案例媒体（ZIP）" : "没有带“案例”标签的媒体文件可导出";
+      exportCaseButton.title = caseCount ? "下载 " + outputActionScopeLabel() + " " + caseCount + " 个案例媒体（ZIP）" : "没有带“案例”标签的媒体文件可导出";
     }
     updateFilterSlider();
+  }
+  function scopedOutputSummary() {
+    var summary = { total: 0, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 }, tag_counts: { "案例": 0, "H": 0 } };
+    var taskIds = {};
+    state.outputs.forEach(function (item) {
+      if (!contextOutputMatches(item) || !belongsToProject(item, state.projectId)) return;
+      summary.total += 1;
+      var type = String(item.display_type || "other");
+      if (summary[type] == null) type = "other";
+      summary[type] += 1;
+      var rating = normalizedRating(item.rating);
+      summary.rating_counts[rating ? String(rating) : "unrated"] += 1;
+      normalizedOutputTags(item).forEach(function (tag) {
+        summary.tag_counts[tag] = (summary.tag_counts[tag] || 0) + 1;
+      });
+      var taskId = String(item.task_id || "").trim();
+      if (taskId) taskIds[taskId] = true;
+    });
+    summary.tasks = Object.keys(taskIds).length;
+    return summary;
   }
   function rebuildSummary() {
     var summary = { total: state.outputs.length, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 }, tag_counts: { "案例": 0, "H": 0 } };
@@ -507,9 +705,19 @@
     var resolution = itemResolution(item);
     return '<span class="artifact-resolution" title="媒体分辨率">' + esc(formatResolution(resolution) || "读取中…") + '</span>';
   }
+  function formatVideoDuration(value) {
+    var seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) return "";
+    return Math.round(seconds) + "s";
+  }
+  function artifactDurationMarkup(item) {
+    if (!item || item.display_type !== "video") return "";
+    return '<span class="artifact-duration" title="视频时长">读取中…</span>';
+  }
   function updateArtifactResolution(card, item, media) {
     var resolutionNode = card && card.querySelector(".artifact-resolution");
-    if (!resolutionNode) return;
+    var durationNode = card && card.querySelector(".artifact-duration");
+    if (!resolutionNode && !durationNode) return;
     var resolution = itemResolution(item);
     if (!resolution && media) {
       var width = media.tagName === "IMG" ? media.naturalWidth : media.videoWidth;
@@ -523,8 +731,16 @@
       }
     }
     var isLoading = media && (media.tagName === "IMG" ? !media.complete : media.readyState === 0);
-    resolutionNode.textContent = formatResolution(resolution) || (isLoading ? "读取中…" : "—");
-    resolutionNode.title = resolution ? "媒体分辨率 " + formatResolution(resolution) : "暂时无法读取媒体分辨率";
+    if (resolutionNode) {
+      resolutionNode.textContent = formatResolution(resolution) || (isLoading ? "读取中…" : "—");
+      resolutionNode.title = resolution ? "媒体分辨率 " + formatResolution(resolution) : "暂时无法读取媒体分辨率";
+    }
+    if (durationNode) {
+      var duration = media && media.tagName === "VIDEO" ? media.duration : Number(item && (item.duration_seconds || item.video_seconds || item.duration));
+      var durationLabel = formatVideoDuration(duration);
+      durationNode.textContent = durationLabel || (isLoading ? "读取中…" : "—");
+      durationNode.title = durationLabel ? "视频时长 " + durationLabel : "暂时无法读取视频时长";
+    }
   }
   function bindArtifactResolutionMetadata(container) {
     if (!container) return;
@@ -549,8 +765,7 @@
     if (!card) return;
     var stillVisible = filteredOutputs().some(function (output) { return String(output.id) === String(item.id); });
     if (!stillVisible) {
-      card.remove();
-      render();
+      refreshFilteredArtifacts();
       return;
     }
     var ratingNode = card.querySelector(".artifact-rating");
@@ -561,8 +776,7 @@
     if (!card) return;
     var stillVisible = filteredOutputs().some(function (output) { return String(output.id) === String(item.id); });
     if (!stillVisible) {
-      card.remove();
-      render();
+      refreshFilteredArtifacts();
       return;
     }
     var head = card.querySelector(".artifact-card-head");
@@ -672,6 +886,7 @@
     if (!item) return;
     state.selectedArtifactId = String(item.id || "");
     syncArtifactSelection();
+    saveOutputViewState();
     var card = artifactCardById(state.selectedArtifactId);
     if (!card) return;
     if (focus) {
@@ -689,6 +904,17 @@
   function selectedArtifactCard() {
     return artifactCardById(state.selectedArtifactId);
   }
+  function focusSelectedArtifact(afterClick) {
+    if (document.querySelector(".modal-backdrop:not([hidden])")) return;
+    if (!afterClick && !outputKeyboardNavigationAllowed({ target: document.activeElement })) return;
+    var card = selectedArtifactCard();
+    if (card && document.activeElement !== card) card.focus({ preventScroll: true });
+  }
+  function restoreArtifactFocusAfterClick(event) {
+    if (!outputKeyboardNavigationAllowed(event)) return;
+    // Run after the clicked control, including controls that stop propagation.
+    Promise.resolve().then(function () { focusSelectedArtifact(true); });
+  }
   function gridColumnCount() {
     var grid = $("outputGrid");
     if (!grid) return 1;
@@ -699,9 +925,7 @@
   function outputKeyboardNavigationAllowed(event) {
     var target = event && event.target;
     if (!target || !target.closest) return true;
-    if (target.closest("input, select, textarea, [contenteditable=\"true\"], audio, video")) return false;
-    if (target.closest(".artifact-card")) return true;
-    return !target.closest("button, a");
+    return !target.closest("input, select, textarea, [contenteditable=\"true\"]");
   }
   function navigateSelectedArtifact(direction) {
     var cards = Array.prototype.slice.call(document.querySelectorAll("#outputGrid .artifact-card"));
@@ -744,7 +968,10 @@
       selectArtifactCard(pageTarget, true);
       return true;
     }
-    if (targetIndex === currentIndex) return true;
+    if (targetIndex === currentIndex) {
+      focusSelectedArtifact();
+      return true;
+    }
     var targetItem = artifactById(cards[targetIndex].dataset.artifactId);
     if (!targetItem) return false;
     closeArtifactContextMenu();
@@ -1222,7 +1449,10 @@
         item.project_name = "";
         item.project_path = "";
       });
-      if (state.projectId === projectId) state.projectId = "";
+      if (state.projectId === projectId) {
+        state.projectId = "";
+        state.workflowFilter = "";
+      }
       closeOutputProjectDelete();
       resetOutputPage();
       render();
@@ -1292,13 +1522,28 @@
       return null;
     }
   }
-  function updateOutputTaskProjectState(taskId, updated) {
+  function updateOutputProjectTaskCount(projectId, delta) {
+    var normalizedProjectId = String(projectId || "").trim();
+    if (!normalizedProjectId || normalizedProjectId === UNCLASSIFIED_PROJECT_ID) return;
+    state.projects.forEach(function (project) {
+      if (String(project && project.id || "").trim() !== normalizedProjectId) return;
+      var count = Number(project.task_count || 0);
+      project.task_count = Math.max(0, (Number.isFinite(count) ? count : 0) + delta);
+    });
+  }
+  function updateOutputTaskProjectState(taskId, updated, previousProjectId) {
+    var nextProjectId = String(updated && updated.project_id || "").trim();
     state.outputs.forEach(function (output) {
       if (String(output.task_id || "") !== String(taskId || "")) return;
-      output.project_id = String(updated.project_id || "");
+      output.project_id = nextProjectId;
       output.project_name = String(updated.project_name || "");
       output.project_path = String(updated.project_path || "");
     });
+    var oldProjectId = String(previousProjectId || "").trim();
+    if (oldProjectId !== nextProjectId) {
+      updateOutputProjectTaskCount(oldProjectId, -1);
+      updateOutputProjectTaskCount(nextProjectId, 1);
+    }
   }
   function requestOutputTaskProject(item, targetId) {
     var normalizedTargetId = String(targetId || "").trim();
@@ -1313,7 +1558,7 @@
       body: JSON.stringify({ project: project })
     }).then(function (data) {
       var updated = data.task || {};
-      updateOutputTaskProjectState(item.task_id, updated);
+      updateOutputTaskProjectState(item.task_id, updated, currentId);
       return { same: false, project: target, updated: updated };
     });
   }
@@ -1409,23 +1654,11 @@
     var button = $("confirmOutputProjectMove");
     button.disabled = true;
     button.textContent = "保存中…";
-    var project = target ? { project_id: target.id, project_name: target.name, project_path: target.path } : {};
-    request("/api/tasks/" + encodeURIComponent(item.task_id) + "/project", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project: project })
-    }).then(function (data) {
-      var updated = data.task || {};
-      state.outputs.forEach(function (output) {
-        if (String(output.task_id || "") !== String(item.task_id || "")) return;
-        output.project_id = String(updated.project_id || "");
-        output.project_name = String(updated.project_name || "");
-        output.project_path = String(updated.project_path || "");
-      });
+    return requestOutputTaskProject(item, targetId).then(function (result) {
       closeOutputProjectMove();
       rebuildSummary();
-      render();
-      showToast(target ? "任务已移动到「" + target.name + "」" : "任务已移出项目文件夹");
+      refreshOutputCollection();
+      showToast(result.project ? "任务已移动到「" + result.project.name + "」" : "任务已移出项目文件夹");
     }).catch(function (error) {
       showToast("保存项目归类失败：" + error.message, true);
     }).finally(function () {
@@ -1469,28 +1702,11 @@
     var taskId = String(item && item.task_id || "").trim();
     if (!taskId || (button && button.disabled)) return;
     if (!window.confirm("删除这条本地任务记录及其 output 文件夹中的全部产物吗？此操作不可恢复。")) return;
-    var visibleBefore = filteredOutputs();
-    var selectedIndex = visibleBefore.findIndex(function (output) { return String(output.id) === String(state.selectedArtifactId); });
-    var deletingSelected = String(state.selectedArtifactId) === String(item.id);
     if (button) button.disabled = true;
-    request("/api/tasks/" + encodeURIComponent(taskId), { method: "DELETE" }).then(function () {
+    return request("/api/tasks/" + encodeURIComponent(taskId), { method: "DELETE" }).then(function () {
       state.outputs = state.outputs.filter(function (output) { return String(output.task_id || "") !== taskId; });
       rebuildSummary();
-      var visibleAfter = filteredOutputs();
-      if (!visibleAfter.length) {
-        state.page = 1;
-        state.selectedArtifactId = "";
-        render();
-      } else {
-        render();
-        if (deletingSelected) {
-          var pageItems = outputPageItems(visibleAfter);
-          var pageStart = (state.page - 1) * OUTPUT_PAGE_SIZE;
-          var replacementIndex = Math.min(Math.max(selectedIndex - pageStart, 0), pageItems.length - 1);
-          var replacement = pageItems[replacementIndex] || pageItems[0];
-          if (replacement) selectArtifactCard(replacement, true);
-        }
-      }
+      refreshOutputCollection();
       if (outputPreviewIsOpen()) closeOutputPreview();
       showToast("任务记录已删除");
     }).catch(function (error) {
@@ -1553,12 +1769,6 @@
       return;
     }
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
-      var hasModal = Boolean(document.querySelector(".modal-backdrop.is-open:not([hidden])"));
-      if (hasModal || !outputKeyboardNavigationAllowed(event)) return;
-      if (navigateSelectedArtifact(event.key.slice(5).toLowerCase())) event.preventDefault();
-      return;
-    }
     if (event.target.closest && event.target.closest("button, a, input, select, textarea, [contenteditable=\"true\"]")) return;
     var hasModal = Boolean(document.querySelector(".modal-backdrop.is-open:not([hidden])"));
     if (hasModal) return;
@@ -1595,33 +1805,102 @@
     event.preventDefault();
     setOutputRating(ratingItem, event.key);
   }
+  function handleOutputArrowNavigation(event) {
+    if (event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (!(event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown")) return;
+    if (document.querySelector(".modal-backdrop:not([hidden])") || !outputKeyboardNavigationAllowed(event)) return;
+    if (!navigateSelectedArtifact(event.key.slice(5).toLowerCase())) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  function artifactCardMarkup(item, index) {
+    var cost = costLabel(item);
+    var canCompare = item.display_type === "image" || item.display_type === "video";
+    var canProject = Boolean(String(item.task_id || "").trim());
+    var canDrag = canCompare || canProject;
+    var dragDescription = canCompare && canProject ? "可拖拽到项目文件夹或内容对比" : (canProject ? "可拖拽到项目文件夹" : (canCompare ? "可拖拽到内容对比" : "产物卡片"));
+    return '<article class="artifact-card' + (canCompare ? ' is-compare-draggable' : '') + (canProject ? ' is-project-draggable' : '') + '" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" data-compare-draggable="' + (canCompare ? 'true' : 'false') + '" data-project-draggable="' + (canProject ? 'true' : 'false') + '" draggable="' + (canDrag ? 'true' : 'false') + '" tabindex="0" role="button" aria-roledescription="' + dragDescription + '" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
+      artifactCardHeadMarkup(item) +
+      mediaMarkup(item) +
+      '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页"><span class="artifact-task-prefix">任务 ·</span>' + taskWorkflowLabel(item) + taskIdLabel(item) + '</div><div class="artifact-foot"><div class="artifact-foot-info"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span>' + artifactResolutionMarkup(item) + artifactDurationMarkup(item) + '</div>' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + '</div></div>' +
+      '</article>';
+  }
+  function outputsEmptyMarkup() {
+    return '<div class="outputs-empty"><strong>' + (state.outputs.length ? "没有符合筛选条件的产物" : "还没有可浏览的产物") + '</strong><span>' + (state.outputs.length ? "换一个类型或关键词试试。" : "完成任务并保存产物后，它们会自动出现在这里。") + "</span></div>";
+  }
+  function refreshFilteredArtifacts() {
+    var grid = $("outputGrid");
+    var items = filteredOutputs();
+    var visibleItems = outputPageItems(items);
+    var cards = Array.prototype.slice.call(grid.querySelectorAll(".artifact-card"));
+    var selectedIndex = cards.findIndex(function (card) { return String(card.dataset.artifactId) === String(state.selectedArtifactId); });
+    var selectedCard = cards[selectedIndex];
+    var restoreFocus = selectedCard && selectedCard.contains(document.activeElement);
+    var visibleIds = new Set(visibleItems.map(function (item) { return String(item.id); }));
+    var retained = new Map();
+    cards.forEach(function (card) {
+      var id = String(card.dataset.artifactId);
+      if (visibleIds.has(id)) retained.set(id, card);
+      else card.remove();
+    });
+    if (!visibleItems.length) {
+      grid.innerHTML = outputsEmptyMarkup();
+    } else {
+      var empty = grid.querySelector(".outputs-empty");
+      if (empty) empty.remove();
+      visibleItems.forEach(function (item, index) {
+        var card = retained.get(String(item.id));
+        if (!card) {
+          var template = document.createElement("template");
+          template.innerHTML = artifactCardMarkup(item, 0);
+          window.RHMotion.bindVideoLoopControls(template.content);
+          bindArtifactResolutionMetadata(template.content);
+          card = template.content.firstElementChild;
+        }
+        // Keep existing media nodes mounted; only insert cards filling a vacant slot.
+        if (grid.children[index] !== card) grid.insertBefore(card, grid.children[index] || null);
+      });
+    }
+    if (!visibleIds.has(String(state.selectedArtifactId))) {
+      var replacement = visibleItems[Math.min(Math.max(selectedIndex, 0), visibleItems.length - 1)];
+      state.selectedArtifactId = replacement ? String(replacement.id) : "";
+    }
+    syncArtifactSelection(visibleItems);
+    if (restoreFocus) {
+      var focusedCard = selectedArtifactCard();
+      if (focusedCard) focusedCard.focus({ preventScroll: true });
+    }
+    focusSelectedArtifact();
+    renderPagination(items.length);
+    saveOutputViewState();
+  }
   function render() {
+    renderWorkflowFilters();
     renderSummary();
     renderProjectBrowser();
     var items = filteredOutputs();
     if (!items.length) {
       state.selectedArtifactId = "";
-      $("outputGrid").innerHTML = '<div class="outputs-empty"><strong>' + (state.outputs.length ? "没有符合筛选条件的产物" : "还没有可浏览的产物") + '</strong><span>' + (state.outputs.length ? "换一个类型或关键词试试。" : "完成任务并保存产物后，它们会自动出现在这里。") + "</span></div>";
+      $("outputGrid").innerHTML = outputsEmptyMarkup();
       renderPagination(0);
+      saveOutputViewState();
       return;
     }
     var visibleItems = outputPageItems(items);
-    $("outputGrid").innerHTML = visibleItems.map(function (item, index) {
-      var cost = costLabel(item);
-      var canCompare = item.display_type === "image" || item.display_type === "video";
-      var canProject = Boolean(String(item.task_id || "").trim());
-      var canDrag = canCompare || canProject;
-      var dragDescription = canCompare && canProject ? "可拖拽到项目文件夹或内容对比" : (canProject ? "可拖拽到项目文件夹" : (canCompare ? "可拖拽到内容对比" : "产物卡片"));
-      return '<article class="artifact-card' + (canCompare ? ' is-compare-draggable' : '') + (canProject ? ' is-project-draggable' : '') + '" data-task-id="' + esc(item.task_id) + '" data-artifact-id="' + esc(item.id) + '" data-compare-draggable="' + (canCompare ? 'true' : 'false') + '" data-project-draggable="' + (canProject ? 'true' : 'false') + '" draggable="' + (canDrag ? 'true' : 'false') + '" tabindex="0" role="button" aria-roledescription="' + dragDescription + '" aria-label="放大查看 ' + esc(item.name) + '" style="animation-delay:' + Math.min(index * 35, 350) + 'ms">' +
-        artifactCardHeadMarkup(item) +
-        mediaMarkup(item) +
-        '<div class="artifact-body"><div class="artifact-name-row"><div class="artifact-name" title="' + esc(item.name) + '">' + esc(item.name) + '</div>' + ratingStarsMarkup(item) + '</div><div class="artifact-task" title="点击工作流名称加载到任务提交页"><span class="artifact-task-prefix">任务 ·</span>' + taskWorkflowLabel(item) + taskIdLabel(item) + '</div><div class="artifact-foot"><div class="artifact-foot-info"><span>' + formatTime(item.modified_at || item.task_completed_at || item.task_created_at) + '</span>' + artifactResolutionMarkup(item) + '</div>' + (cost ? '<span class="artifact-cost">' + esc(cost) + '</span>' : '') + '</div></div>' +
-        '</article>';
-    }).join("");
+    $("outputGrid").innerHTML = visibleItems.map(artifactCardMarkup).join("");
     syncArtifactSelection(visibleItems);
     window.RHMotion.bindVideoLoopControls($("outputGrid"));
     bindArtifactResolutionMetadata($("outputGrid"));
     renderPagination(items.length);
+    focusSelectedArtifact();
+    saveOutputViewState();
+  }
+  function refreshOutputCollection() {
+    renderProjectBrowser();
+    renderWorkflowFilters();
+    renderSummary();
+    refreshFilteredArtifacts();
+    saveOutputViewState();
   }
   function loadOutputs(showMessage) {
     $("refreshOutputs").disabled = true;
@@ -1640,20 +1919,23 @@
     }).finally(function () { $("refreshOutputs").disabled = false; });
   }
   function deleteOneStarOutputs() {
-    var ratingCounts = (state.summary && state.summary.rating_counts) || {};
-    var count = Number(ratingCounts["1"] || 0);
+    var projectId = state.projectId;
+    var targets = oneStarOutputs().slice();
+    var count = targets.length;
     if (!count) return;
-    if (!window.confirm("将删除全部 " + count + " 个一星成片，仅删除成片文件和产物记录，不删除任务记录。此操作不可恢复。")) return;
+    if (!window.confirm("将删除" + outputActionScopeLabel() + " " + count + " 个一星成片，仅删除成片文件和产物记录，不删除任务记录。此操作不可恢复。")) return;
     var button = $("deleteOneStarOutputs");
     button.disabled = true;
     button.classList.add("is-busy");
     var originalLabel = button.innerHTML;
     button.textContent = "删除中…";
-    request("/api/outputs/rating/1", { method: "DELETE" }).then(function (data) {
+    var targetKeys = {};
+    targets.forEach(function (item) { targetKeys[outputActionKey(item)] = true; });
+    return request("/api/outputs/rating/1" + outputActionQuery(projectId), { method: "DELETE" }).then(function (data) {
       var deleted = Number(data.deleted || 0);
-      state.outputs = state.outputs.filter(function (item) { return normalizedRating(item.rating) !== 1; });
+      state.outputs = state.outputs.filter(function (item) { return !targetKeys[outputActionKey(item)]; });
       rebuildSummary();
-      render();
+      refreshOutputCollection();
       showToast("已删除 " + deleted + " 个一星成片");
     }).catch(function (error) {
       showToast("删除一星成片失败：" + error.message, true);
@@ -1671,7 +1953,7 @@
     button.classList.add("is-busy");
     button.setAttribute("aria-busy", "true");
     showToast("正在准备 " + count + " 个案例媒体的 ZIP…");
-    window.location.href = "/api/outputs/export/case";
+    window.location.href = "/api/outputs/export/case" + outputActionQuery();
     window.setTimeout(function () {
       button.classList.remove("is-busy");
       button.removeAttribute("aria-busy");
@@ -1696,6 +1978,7 @@
       if (!button) return;
       event.preventDefault();
       state.projectId = button.dataset.outputProject || "";
+      state.workflowFilter = "";
       resetOutputPage();
       closeArtifactContextMenu();
       closeOutputProjectContextMenu();
@@ -1711,6 +1994,7 @@
     $("createOutputProject").addEventListener("click", function () { openOutputProjectEditor("create"); });
     $("showAllOutputProjects").addEventListener("click", function () {
       state.projectId = "";
+      state.workflowFilter = "";
       resetOutputPage();
       closeOutputProjectContextMenu();
       render();
@@ -1835,6 +2119,13 @@
       resetOutputPage();
       render();
     });
+    $("outputWorkflowFilters").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-output-workflow]");
+      if (!button) return;
+      state.workflowFilter = button.dataset.outputWorkflow || "";
+      resetOutputPage();
+      render();
+    });
     $("outputPagination").addEventListener("click", function (event) {
       var button = event.target.closest("[data-output-page]");
       if (!button || button.disabled) return;
@@ -1884,14 +2175,19 @@
     $("cancelOutputProjectDelete").addEventListener("click", closeOutputProjectDelete);
     $("confirmOutputProjectDelete").addEventListener("click", confirmOutputProjectDelete);
     $("outputProjectDeleteModal").addEventListener("click", function (event) { if (event.target === $("outputProjectDeleteModal")) closeOutputProjectDelete(); });
+    document.addEventListener("keydown", handleOutputArrowNavigation, true);
     document.addEventListener("keydown", handleOutputKeyboardShortcut);
+    document.addEventListener("click", restoreArtifactFocusAfterClick, true);
     document.addEventListener("click", function (event) {
       if (!event.target.closest("#artifactContextMenu")) closeArtifactContextMenu();
       if (!event.target.closest("#outputProjectContextMenu")) closeOutputProjectContextMenu();
     });
     window.addEventListener("resize", updateFilterSlider);
+    window.addEventListener("pagehide", saveOutputViewState);
   }
+  if (!outputUrlHasContext()) restoreOutputViewState();
   readOutputContext();
+  outputStatePersistenceReady = true;
   bindEvents();
   loadOutputs(false);
 }());

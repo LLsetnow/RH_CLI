@@ -115,6 +115,7 @@
 .workflow-editor-form input, .workflow-editor-form select { margin-top: 7px; }
 .workflow-editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .workflow-editor-note { padding: 10px 11px; border: 1px solid var(--line-soft); border-radius: 9px; color: var(--subtle); background: var(--surface-deep); font-size: 9px; line-height: 1.55; }
+.workflow-editor-config { margin-top: 4px; padding-top: 18px; border-top: 1px solid var(--line-soft); }
 .workflow-editor-json { margin-top: 4px; padding-top: 18px; }
 .workflow-editor-json-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .workflow-editor-json-heading > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 5px; }

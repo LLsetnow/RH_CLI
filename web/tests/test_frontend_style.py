@@ -3,8 +3,8 @@ import re
 
 
 STATIC_ROOT = Path(__file__).parents[1] / "static"
-PAGE_STYLES = ("prompt.css", "outputs.css", "workflows.css", "compare.css", "dashboard.css", "settings.css", "focus.css")
-PAGE_MARKUP = ("index.html", "prompt.html", "outputs.html", "workflows.html", "compare.html", "dashboard.html", "settings.html")
+PAGE_STYLES = ("prompt.css", "toolbox.css", "outputs.css", "workflows.css", "compare.css", "dashboard.css", "settings.css", "focus.css")
+PAGE_MARKUP = ("index.html", "prompt.html", "toolbox.html", "outputs.html", "workflows.html", "compare.html", "dashboard.html", "settings.html")
 MODAL_MARKUP = ("index.html", "prompt.html", "outputs.html", "workflows.html", "settings.html")
 
 
@@ -18,6 +18,54 @@ def test_task_controls_share_one_font_size_and_line_height_token():
     assert "input, select { min-height:" in css
     assert "padding: 0 12px;" in css
     assert "line-height: var(--control-line-height);" in css
+
+
+def test_submit_page_exposes_random_submission_repeat_control():
+    markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+
+    assert 'id="submitRepeatCount"' in markup
+    assert 'min="1" max="20"' in markup
+    assert 'id="submitRepeatHint"' not in markup
+    assert "normalizedSubmitRepeatCount" in script
+    assert "hasRandomizedNoise" in script
+    assert "generateRandomNoiseSeed" in script
+    assert "requestBody.workflow = buildSubmissionWorkflow" in script
+    assert "requestBody.random_noise = submissionRandomNoise" in script
+    assert "已加入 \" + repeatCount + \" 个随机任务" in script
+    assert ".submit-repeat-control" in styles
+
+
+def test_submit_input_jump_tags_scroll_to_matching_cards():
+    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert 'data-action="jump-input"' in script
+    assert 'querySelectorAll(".input-card[data-input-id]")' in script
+    assert 'window.scrollTo({ top: nextScroll, behavior: "smooth" });' in script
+    assert 'querySelector(".submit-workspace-tabs-sticky")' in script
+    assert "String(item.dataset.inputId || \"\") === targetId" in script
+
+
+def test_submit_controls_are_ordered_in_one_row_without_inline_helper_copy():
+    markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+
+    assert markup.index('for="instanceType"') < markup.index('for="taskProject"') < markup.index('for="submitRepeatCount"')
+    assert 'for="taskProject">项目选择</label>' in markup
+    assert "Standard · 24GB</option>" in markup
+    assert "¥4.70572" not in markup
+    assert "通过 instanceType 指定" not in markup
+    assert "自动归类：按输出目录" not in markup
+    assert 'id="submitRepeatHint"' not in markup
+    assert "grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.25fr) minmax(112px, .62fr) max-content" in styles
+    assert ".submit-strip > .primary-button { align-self: flex-start; min-width: 142px;" in styles
+
+
+def test_frontend_guidance_rule_is_documented():
+    rules = (Path(__file__).parents[2] / "web" / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "不要在按钮或选项框附近用小字、hint 或 note 解释功能" in rules
 
 
 def test_workspace_collapses_from_its_available_width():
@@ -337,6 +385,71 @@ def test_public_navigation_has_one_order_and_structure():
         assert markup.count('class="top-nav"') == 1, filename
 
 
+def test_toolbox_media_input_matches_workflow_node_style_and_import_contract():
+    markup = (STATIC_ROOT / "toolbox.html").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "toolbox.css").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "toolbox.js").read_text(encoding="utf-8")
+
+    assert 'class="toolbox-media-input-card"' in markup
+    assert 'id="mediaPathLabel"' in markup
+    assert 'id="mediaChooseButton"' in markup
+    assert 'id="mediaOpenFolderButton"' in markup
+    assert 'id="codexImageResolution"' in markup
+    assert 'id="codexImageSize"' in markup
+    assert 'value="1k" selected' in markup
+    assert 'value="9:16" selected' in markup
+    assert 'class="toolbox-auto-command-note"' in markup
+    assert 'id="codexCommand"' not in markup
+    assert 'id="saveCodexCommand"' not in markup
+    assert '命令行模板' not in markup
+    assert ".visually-hidden" in styles
+    assert ".toolbox-reference-card { position: relative; min-width: 0; margin: 0;" in styles
+    assert ".toolbox-media-input-card" in styles
+    assert "file.path" in script
+    assert "inferFileDescriptor" in script
+    assert 'jsonRequest("/api/prompt/media"' in script
+    assert 'jsonRequest("/api/preview-file"' in script
+    assert 'jsonRequest("/api/pick-file", "POST")' in script
+    assert 'resolution: String($("codexImageResolution").value || "1k")' in script
+    assert 'size: String($("codexImageSize").value || "9:16")' in script
+    assert 'bindDropzone($("mediaDropzone"), $("mediaPicker"), setMediaFile, chooseMediaFile);' in script
+    assert "function chooseMediaFile" in script
+    assert 'body: { command:' not in script
+
+
+def test_task_submit_owns_the_three_switchable_workspaces_and_hides_cli_details():
+    markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+
+    assert re.findall(r'data-submit-section="([^"]+)"', markup) == ["submit", "codex", "media", "submit", "codex", "media"]
+    assert 'role="tablist" aria-label="任务提交功能区"' in markup
+    assert 'id="submitWorkspacePanelCodex"' in markup
+    assert 'id="submitWorkspacePanelMedia"' in markup
+    assert 'id="codexCommand"' not in markup
+    assert "function activateSubmitWorkspaceSection" in script
+    assert "submitWorkspaceStorageKey" in script
+    assert 'script.src = "/static/toolbox.js"' in script
+    assert 'self.send_header("Location", "/?workspace=codex")' in server
+    assert 'name="Codex 图像生成"' in server
+
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+    assert ".submit-workspace-tab:hover" not in styles
+    assert ".submit-workspace-tab.active" in styles
+    assert ".submit-workspace-tabs-sticky { position: sticky;" not in styles
+
+
+def test_task_detail_exposes_live_progress_and_refreshes_open_task():
+    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+
+    assert "syncOpenTaskDetail(tasks);" in script
+    assert "function taskDetailRevision(task)" in script
+    assert 'role="status"' in script
+    assert "实时进度" in script
+    assert ".stage-log-live.is-active" in styles
+
+
 def test_global_page_navigation_shortcuts_are_wired_across_electron_and_pages():
     main = (STATIC_ROOT.parent / "electron" / "main.cjs").read_text(encoding="utf-8")
     preload = (STATIC_ROOT.parent / "electron" / "preload.cjs").read_text(encoding="utf-8")
@@ -375,7 +488,7 @@ def test_focus_mode_tiles_six_pages_and_converts_shift_wheel_to_horizontal_scrol
     assert page.count('class="focus-page-slot"') == 6
     assert "<iframe" not in page
     assert 'href="/focus"' not in page
-    for filename in ("app.css", "prompt.css", "outputs.css", "dashboard.css", "workflows.css", "settings.css"):
+    for filename in ("app.css", "prompt.css", "toolbox.css", "outputs.css", "dashboard.css", "workflows.css", "settings.css"):
         assert '/static/' + filename in page
     assert 'id="focusNavigation"' in page
     assert 'class="top-nav-link focus-nav-link active"' in page
@@ -584,20 +697,29 @@ def test_queue_running_cards_are_highlighted_and_main_area_loads_task():
     assert ".task-card-main:hover" not in app_styles
 
 
-def test_submit_page_json_badge_opens_an_editor_with_apply_and_restore_actions():
+def test_submit_page_uses_one_workflow_snapshot_editor_with_restore_action():
     markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
 
-    assert 'id="openWorkflowJsonButton"' in markup
-    assert 'id="workflowJsonModal"' in markup
-    assert 'id="workflowJsonEditor"' in markup
-    assert 'id="applyWorkflowJson"' in markup
-    assert 'id="restoreWorkflowJsonButton"' in markup
-    assert '$("openWorkflowJsonButton").addEventListener("click", openWorkflowJson);' in script
+    assert 'id="editWorkflowSnapshotButton"' in markup
+    assert 'id="workflowEditorModal"' in markup
+    assert 'id="workflowRecordName"' in markup
+    assert 'id="workflowRecordAccount"' in markup
+    assert 'id="workflowRecordRemoteId"' in markup
+    assert 'id="workflowEditorConfigLabel"' in markup
+    assert 'id="workflowEditorJson"' in markup
+    assert 'id="restoreWorkflowJson"' in markup
+    assert 'id="saveWorkflowJson"' not in markup
+    assert 'id="openWorkflowJsonButton"' not in markup
+    assert 'id="workflowJsonModal"' not in markup
+    assert 'id="configureWorkflowLibraryButton"' not in markup
+    assert 'id="renameWorkflowLibraryButton"' not in markup
+    assert '$("editWorkflowSnapshotButton").addEventListener("click", openWorkflowEditor);' in script
+    assert "function openWorkflowEditor()" in script
+    assert "function saveWorkflowRecord(event)" in script
+    assert "function applyWorkflowEditorJson(parsed)" in script
+    assert "function saveWorkflowJson()" not in script
     assert 'jsonRequest("/api/workflows/analyze", "POST"' in script
-    assert ".workflow-json-button:hover" in styles
-    assert ".workflow-json-editor:focus" in styles
 
 
 def test_workflow_json_actions_are_horizontal_and_equal_width():
@@ -708,16 +830,17 @@ def test_task_submit_exposes_the_workflow_input_configuration_editor():
     app_source = (STATIC_ROOT.parent / "app.py").read_text(encoding="utf-8")
 
     assert '<link rel="stylesheet" href="/static/workflows.css" />' in markup
-    assert 'id="configureWorkflowLibraryButton"' in markup
-    assert "configureWorkflowLibraryButton" in script
-    assert markup.index('id="configureWorkflowLibraryButton"') < markup.index('id="renameWorkflowLibraryButton"')
+    assert 'id="editWorkflowSnapshotButton"' in markup
+    assert 'id="workflowConfigModal"' not in markup
+    assert 'id="workflowRenameModal"' not in markup
     assert "summary.innerHTML = '<div class=\"summary-item\">" in script
-    assert 'id="workflowConfigModal"' in markup
     assert 'id="workflowConfigMode"' in markup
-    assert 'id="saveWorkflowConfig"' in markup
-    assert "function openWorkflowConfig()" in script
+    assert 'id="workflowEditorConfigLabel"' in markup
+    assert 'id="addWorkflowConfigItem"' in markup
     assert "function renderWorkflowConfigBuilder()" in script
-    assert 'jsonRequest("/api/workflows/" + encodeURIComponent(appState.workflowId), "PATCH"' in script
+    assert "function prepareWorkflowConfigEditor()" in script
+    assert "function workflowEditorConfigValue()" in script
+    assert "appState.workflowInputConfig = config;" in script
     assert 'analysis["input_catalog"] = workflow_input_catalog(saved_workflow, analysis)' in server
     assert '"input_catalog": workflow_input_catalog(workflow)' in app_source
 
@@ -920,6 +1043,10 @@ def test_prompt_reference_preview_is_contained_and_translation_skips_media_segme
     assert 'selectedCandidate.sourceType === "block"' in script
     assert 'preview.classList.toggle("is-block", selectedCandidate.sourceType === "block");' in script
     assert "function translateTextSegments" in script
+    assert "function chineseTextSegments(text)" in script
+    assert "function translateChineseText(source)" in script
+    assert 'jsonRequest("/api/prompt/translate", "POST", { text: segment.text })' in script
+    assert "if (!segments.length) return Promise.resolve(source);" in script
     assert 'if (segment.type === "reference") return Promise.resolve(null);' in script
     assert "object-fit: contain" in styles
     assert ".prompt-reference-suggest-preview.is-block { align-content: start;" in styles

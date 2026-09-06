@@ -46,7 +46,11 @@ from .video_downloader import extract_social_video_url, social_video_platform, d
 WEB_ROOT = Path(__file__).resolve().parent
 _DATA_ROOT_OVERRIDE = os.environ.get("RH_WORKFLOW_DESK_DATA_ROOT", "").strip()
 DATA_ROOT = Path(_DATA_ROOT_OVERRIDE).expanduser().resolve() if _DATA_ROOT_OVERRIDE else WEB_ROOT / "data"
-WORKFLOW_ROOT = DATA_ROOT / "workflows"
+# A library workflow is a directory package.  Keep the singular directory
+# name separate from the historical ``workflows/<id>.json`` layout so the
+# store can migrate existing installations without making task snapshots
+# depend on the library files.
+WORKFLOW_ROOT = DATA_ROOT / "workflow"
 OUTPUT_ROOT = DATA_ROOT / "outputs"
 KEYS_PATH = DATA_ROOT / "keys.json"
 ACCOUNTS_PATH = DATA_ROOT / "accounts.json"
@@ -96,6 +100,8 @@ WORKFLOW_META_KEY = "__rh_meta__"
 PROMPT_GROUP_SNAPSHOT_FILENAME = "prompt_group.json"
 TASK_MANIFEST_FILENAME = "manifest.json"
 WORKFLOW_PROMPT_GROUP_SUFFIX = ".prompt_group.json"
+WORKFLOW_API_FILENAME = "workflow_api.json"
+WORKFLOW_PACKAGE_MANIFEST_FILENAME = "manifest.json"
 GENERAL_ACCOUNT_ID = "__general__"
 UNBOUND_ACCOUNT_ID = "__unbound__"
 TELEGRAM_PROJECT_NAME = "Telegrame"
@@ -319,6 +325,18 @@ def canonical_workflow_name(value: str, fallback: str = "workflow.json") -> str:
         stem = fallback_path.stem or "workflow"
         suffix = fallback_path.suffix
     return safe_name(f"{stem}{suffix}", fallback)
+
+
+def public_workflow_name(value: object) -> str:
+    """Keep legacy local-tool task labels readable after the toolbox merge."""
+    name = str(value or "").strip()
+    for prefix in ("工具箱 · ", "工具箱 _ ", "工具箱_", "工具箱 "):
+        if name.startswith(prefix):
+            name = name[len(prefix):].strip()
+            break
+    if name == "本地 Codex 图像生成":
+        return "Codex 图像生成"
+    return name
 
 
 def workflow_name_from_path(path: Path, workflow_id: str) -> str:
@@ -695,6 +713,41 @@ def normalize_workflow_input_config(
             "order": position,
         })
     return {"mode": "manual", "items": items}
+
+
+def prune_workflow_input_config_for_workflow(
+    workflow: dict[str, Any], config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Drop manual input entries for nodes intentionally removed from a draft.
+
+    The task page removes a bypassed node from the JSON before saving a
+    library copy, while its old manual input catalog entry can still be in
+    ``input_config``.  That stale entry must not make the save fail with a
+    misleading missing-node error.
+    """
+    if config is None or not isinstance(config, dict):
+        return config
+    if str(config.get("mode") or "auto").strip().lower() != "manual":
+        return config
+    raw_items = config.get("items")
+    if not isinstance(raw_items, list):
+        return config
+    nodes = workflow_nodes(workflow)
+    kept: list[Any] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            kept.append(item)
+            continue
+        node_id = str(item.get("node_id") or "").strip()
+        if not node_id:
+            input_id = str(item.get("id") or "").strip()
+            node_id = input_id.split(":", 1)[0] if ":" in input_id else ""
+        if node_id and node_id not in nodes:
+            continue
+        kept.append(item)
+    if len(kept) == len(raw_items):
+        return config
+    return {**config, "items": kept}
 
 
 def apply_workflow_input_defaults(workflow: dict[str, Any], defaults: Any) -> None:
@@ -1138,9 +1191,11 @@ class LocalStore:
               dispatch_key_site TEXT NOT NULL DEFAULT '',
               dispatch_key_api_type TEXT NOT NULL DEFAULT '',
               submission_source TEXT NOT NULL DEFAULT 'local',
+              task_type TEXT NOT NULL DEFAULT 'workflow',
               remote_task_id TEXT,
               remote_workflow_id TEXT NOT NULL DEFAULT '',
               registered_workflow_id TEXT NOT NULL DEFAULT '',
+              local_workflow_id TEXT NOT NULL DEFAULT '',
               input_json TEXT NOT NULL,
               prompt_json TEXT NOT NULL,
               custom_json TEXT NOT NULL DEFAULT '{}',
@@ -1240,6 +1295,8 @@ class LocalStore:
         self._backfill_project_registry()
         self._backfill_telegram_projects()
         self._backfill_task_replay_snapshots()
+        self._migrate_legacy_workflow_files()
+        self._backfill_registered_workflow_source_paths()
         self._backfill_usage_records()
 
     def _migrate_schema(self) -> None:
@@ -1249,6 +1306,8 @@ class LocalStore:
             self._db.execute("ALTER TABLE tasks ADD COLUMN remote_workflow_id TEXT NOT NULL DEFAULT ''")
         if "registered_workflow_id" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN registered_workflow_id TEXT NOT NULL DEFAULT ''")
+        if "local_workflow_id" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN local_workflow_id TEXT NOT NULL DEFAULT ''")
         if "error_detail" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN error_detail TEXT NOT NULL DEFAULT '{}'")
         if "stage_logs_json" not in columns:
@@ -1259,6 +1318,12 @@ class LocalStore:
                 "UPDATE tasks SET submission_source='telegram' "
                 "WHERE stage_logs_json LIKE '%已从 Telegram 接收图片并提交工作流%'"
             )
+        if "task_type" not in columns:
+            self._db.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'workflow'")
+            # Historical tasks were all created before toolbox jobs had a
+            # distinct type. Keep their legacy meaning explicit and let new
+            # toolbox submissions opt into the separate value below.
+            self._db.execute("UPDATE tasks SET task_type='workflow'")
         if "random_noise_json" not in columns:
             self._db.execute("ALTER TABLE tasks ADD COLUMN random_noise_json TEXT NOT NULL DEFAULT '{}'")
         if "resolution_json" not in columns:
@@ -2051,16 +2116,344 @@ class LocalStore:
         return self.telegram_settings()
 
     def _workflow_registry_path(self) -> Path:
-        return WORKFLOW_ROOT.parent / "workflow-registry.json"
+        return DATA_ROOT / "workflow-registry.json"
 
-    def _workflow_registry_entries_root(self) -> Path:
-        return self._workflow_registry_path().parent / "workflow-registry"
-
-    def _workflow_registry_entry_path(self, workflow_id: str) -> Path:
+    @staticmethod
+    def _workflow_id(workflow_id: str) -> str:
         clean_id = str(workflow_id or "").strip()
         if not clean_id or Path(clean_id).name != clean_id:
             raise RhCliError("WORKFLOW_NOT_FOUND", f"工作流 ID 无效：{workflow_id}")
-        return self._workflow_registry_entries_root() / f"{clean_id}.json"
+        return clean_id
+
+    @staticmethod
+    def _legacy_workflow_root() -> Path:
+        return DATA_ROOT / "workflows"
+
+    @staticmethod
+    def _package_layout_enabled() -> bool:
+        """Return whether the active root uses the new directory package layout.
+
+        Tests and older callers may still inject a ``workflows`` root.  That
+        root remains readable in its legacy flat layout while normal runtime
+        data uses the singular ``workflow`` package root.
+        """
+        return WORKFLOW_ROOT.name == "workflow"
+
+    def _workflow_package_dir(self, workflow_id: str) -> Path:
+        clean_id = self._workflow_id(workflow_id)
+        if self._package_layout_enabled():
+            return WORKFLOW_ROOT / clean_id
+        return WORKFLOW_ROOT
+
+    def _legacy_registry_entry_path(self, workflow_id: str) -> Path:
+        clean_id = self._workflow_id(workflow_id)
+        return DATA_ROOT / "workflow-registry" / f"{clean_id}.json"
+
+    def _workflow_registry_entries_root(self) -> Path:
+        return DATA_ROOT / "workflow-registry"
+
+    def _workflow_registry_entry_path(self, workflow_id: str) -> Path:
+        clean_id = self._workflow_id(workflow_id)
+        if self._package_layout_enabled():
+            return self._workflow_package_dir(clean_id) / WORKFLOW_PACKAGE_MANIFEST_FILENAME
+        return self._legacy_registry_entry_path(clean_id)
+
+    def _workflow_relative_file(self, workflow_id: str) -> str:
+        clean_id = self._workflow_id(workflow_id)
+        if self._package_layout_enabled():
+            return f"workflow/{clean_id}/{WORKFLOW_API_FILENAME}"
+        return f"workflows/{clean_id}.json"
+
+    def _workflow_relative_prompt_group_file(self, workflow_id: str) -> str:
+        clean_id = self._workflow_id(workflow_id)
+        if self._package_layout_enabled():
+            return f"workflow/{clean_id}/{PROMPT_GROUP_SNAPSHOT_FILENAME}"
+        return f"workflows/{clean_id}{WORKFLOW_PROMPT_GROUP_SUFFIX}"
+
+    def _workflow_file_path(self, workflow_id: str) -> Path:
+        clean_id = self._workflow_id(workflow_id)
+        if self._package_layout_enabled():
+            return WORKFLOW_ROOT / clean_id / WORKFLOW_API_FILENAME
+        return WORKFLOW_ROOT / f"{clean_id}.json"
+
+    def _migrate_legacy_workflow_files(self) -> None:
+        """Migrate the historical flat library into directory packages."""
+        if self._package_layout_enabled():
+            self._migrate_workflow_library_packages()
+            return
+
+        # Compatibility path for callers that explicitly inject the old
+        # ``data/workflows`` root (including older integrations and tests).
+        grouped: dict[str, list[Path]] = {}
+        for path in WORKFLOW_ROOT.glob("wf_*_*.json"):
+            if not path.is_file():
+                continue
+            match = re.match(r"^(wf_[A-Za-z0-9]+)_.+\.json$", path.name)
+            if not match:
+                continue
+            grouped.setdefault(match.group(1), []).append(path.resolve())
+
+        changed = False
+        moved_ids: set[str] = set()
+        for workflow_id, candidates in grouped.items():
+            stable = self._workflow_file_path(workflow_id).resolve()
+            if stable.exists() or len(candidates) != 1:
+                # Do not guess when a manually assembled directory contains
+                # conflicting files, and never overwrite an existing stable
+                # file.
+                continue
+            source = candidates[0]
+            try:
+                source.rename(stable)
+            except OSError:
+                continue
+            self._db.execute(
+                "UPDATE tasks SET workflow_path=? WHERE workflow_path IN (?, ?)",
+                (str(stable), str(source), str(source.resolve())),
+            )
+            changed = True
+            moved_ids.add(workflow_id)
+        if changed:
+            self._db.commit()
+            records = self._read_workflow_registry()
+            if records:
+                for record in records:
+                    if str(record.get("id") or "").strip() in moved_ids:
+                        record["workflow_file"] = self._workflow_relative_file(str(record.get("id") or ""))
+                self._write_workflow_registry(records)
+
+    def _migrate_workflow_library_packages(self) -> None:
+        """Move registered flat workflow files into three-file packages.
+
+        The migration is deliberately conservative: it only handles IDs in
+        the registry, copies each source before validating the destination,
+        updates task metadata, and removes the old files only after all three
+        package members are present.  A caller can keep a filesystem archive
+        of ``data/workflows`` before opening the store for an additional
+        recovery point.
+        """
+        legacy_root = self._legacy_workflow_root()
+        if legacy_root.resolve() == WORKFLOW_ROOT.resolve() or not legacy_root.is_dir():
+            return
+        records = self._read_workflow_registry()
+        if not records:
+            return
+        migrated = False
+        for record in records:
+            workflow_id = str(record.get("id") or "").strip()
+            if not workflow_id:
+                continue
+            package_dir = self._workflow_package_dir(workflow_id)
+            workflow_path = package_dir / WORKFLOW_API_FILENAME
+            prompt_path = package_dir / PROMPT_GROUP_SNAPSHOT_FILENAME
+            manifest_path = package_dir / WORKFLOW_PACKAGE_MANIFEST_FILENAME
+            source = self._legacy_registry_workflow_source(workflow_id, record, legacy_root)
+            legacy_prompt = legacy_root / f"{workflow_id}{WORKFLOW_PROMPT_GROUP_SUFFIX}"
+            if not workflow_path.is_file() and source is not None:
+                package_dir.mkdir(parents=True, exist_ok=True)
+                temporary = workflow_path.with_suffix(".json.tmp")
+                shutil.copy2(source, temporary)
+                temporary.replace(workflow_path)
+                self._db.execute(
+                    "UPDATE tasks SET workflow_path=? WHERE workflow_path IN (?, ?)",
+                    (str(workflow_path.resolve()), str(source), str(source.resolve())),
+                )
+                migrated = True
+            if workflow_path.is_file() and not prompt_path.is_file():
+                package_dir.mkdir(parents=True, exist_ok=True)
+                if legacy_prompt.is_file():
+                    temporary = prompt_path.with_suffix(".json.tmp")
+                    shutil.copy2(legacy_prompt, temporary)
+                    temporary.replace(prompt_path)
+                else:
+                    self._write_workflow_prompt_group(workflow_id, None, keep_empty=True)
+                migrated = True
+            if workflow_path.is_file() and prompt_path.is_file() and not manifest_path.is_file():
+                migrated = True
+
+            if workflow_path.is_file() and prompt_path.is_file():
+                # The package manifest is written by _write_workflow_registry
+                # below, after all source paths have been normalized.
+                old_workflow = legacy_root / f"{workflow_id}.json"
+                old_prompt = legacy_prompt
+                if old_workflow.is_file() and old_workflow.resolve() != workflow_path.resolve():
+                    try:
+                        old_workflow.unlink()
+                    except OSError:
+                        pass
+                if old_prompt.is_file() and old_prompt.resolve() != prompt_path.resolve():
+                    try:
+                        old_prompt.unlink()
+                    except OSError:
+                        pass
+
+        if migrated:
+            self._db.commit()
+            normalized_records = [dict(record) for record in records if str(record.get("id") or "").strip()]
+            self._write_workflow_registry(normalized_records)
+            # Registered task rows retain their immutable output snapshot, but
+            # their source metadata should point at the new library package.
+            for record in normalized_records:
+                workflow_id = str(record.get("id") or "").strip()
+                package_path = self._workflow_file_path(workflow_id).resolve()
+                self._db.execute(
+                    "UPDATE tasks SET workflow_path=? WHERE registered_workflow_id=?",
+                    (str(package_path), workflow_id),
+                )
+            self._db.commit()
+            # Legacy detailed registry files are no longer the package
+            # registration source.  Leave unrelated hand-written files alone.
+            entries_root = self._workflow_registry_entries_root()
+            for record in normalized_records:
+                entry = entries_root / f"{str(record.get('id') or '').strip()}.json"
+                try:
+                    entry.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+
+    def _legacy_registry_workflow_source(
+        self,
+        workflow_id: str,
+        record: dict[str, Any],
+        legacy_root: Path,
+    ) -> Path | None:
+        """Resolve a pre-package API file without following registry traversal."""
+        candidates: list[Path] = []
+        reference = str(record.get("workflow_file") or "").strip()
+        if reference:
+            candidate = Path(reference).expanduser()
+            if not candidate.is_absolute():
+                candidate = DATA_ROOT / candidate
+            try:
+                resolved = candidate.resolve()
+                resolved.relative_to(legacy_root.resolve())
+            except (OSError, ValueError):
+                resolved = None
+            if resolved is not None and resolved.is_file():
+                candidates.append(resolved)
+        candidates.extend(
+            path.resolve()
+            for path in (
+                legacy_root / f"{workflow_id}.json",
+                *legacy_root.glob(f"{workflow_id}_*.json"),
+            )
+            if path.is_file()
+        )
+        unique = {str(path): path for path in candidates}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
+        if len(unique) > 1:
+            raw_name = str(record.get("name") or "").strip()
+            preferred = legacy_root / f"{workflow_id}_{canonical_workflow_name(raw_name)}" if raw_name else None
+            if preferred and preferred.is_file():
+                return preferred.resolve()
+        return None
+
+    def _backfill_registered_workflow_source_paths(self) -> None:
+        """Point registered task source metadata at the current library package."""
+        if not self._package_layout_enabled():
+            return
+        records = self._read_workflow_registry()
+        changed = False
+        for record in records:
+            workflow_id = str(record.get("id") or "").strip()
+            if not workflow_id or not self._workflow_file_path(workflow_id).is_file():
+                continue
+            cursor = self._db.execute(
+                "UPDATE tasks SET workflow_path=? WHERE registered_workflow_id=? AND workflow_path!=?",
+                (str(self._workflow_file_path(workflow_id).resolve()), workflow_id, str(self._workflow_file_path(workflow_id).resolve())),
+            )
+            changed = changed or cursor.rowcount > 0
+        if changed:
+            self._db.commit()
+
+    def _registry_workflow_file_path(self, workflow_id: str, record: dict[str, Any] | None = None) -> Path:
+        """Resolve an indexed workflow path without allowing registry traversal."""
+        fallback = self._workflow_file_path(workflow_id)
+        reference = str((record or {}).get("workflow_file") or "").strip()
+        if not reference:
+            return fallback
+        candidate = Path(reference).expanduser()
+        if not candidate.is_absolute():
+            candidate = DATA_ROOT / candidate
+        try:
+            resolved = candidate.resolve()
+            allowed_root = WORKFLOW_ROOT.resolve() if self._package_layout_enabled() else self._legacy_workflow_root().resolve()
+            resolved.relative_to(allowed_root)
+        except (OSError, ValueError):
+            return fallback
+        return resolved if resolved.suffix.lower() == ".json" else fallback
+
+    def _legacy_workflow_candidates(self, workflow_id: str, record: dict[str, Any] | None = None) -> list[Path]:
+        stable = self._workflow_file_path(workflow_id).resolve()
+        candidates: list[Path] = []
+        indexed = self._registry_workflow_file_path(workflow_id, record)
+        if indexed != stable and indexed.is_file():
+            candidates.append(indexed)
+        candidates.extend(
+            path.resolve()
+            for path in (WORKFLOW_ROOT if not self._package_layout_enabled() else self._legacy_workflow_root()).glob(f"{workflow_id}_*.json")
+            if path.is_file()
+        )
+        unique: dict[str, Path] = {str(path): path for path in candidates}
+        return sorted(unique.values(), key=lambda path: str(path))
+
+    def _migrate_legacy_workflow_file(self, workflow_id: str, record: dict[str, Any] | None = None) -> Path:
+        """Move one legacy ``<id>_<name>.json`` file to the stable ID path."""
+        stable = self._workflow_file_path(workflow_id).resolve()
+        if stable.is_file():
+            return stable
+        if self._package_layout_enabled():
+            source = self._legacy_registry_workflow_source(workflow_id, record or {}, self._legacy_workflow_root())
+            if source is None:
+                return stable
+            stable.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(source, stable)
+            except OSError as exc:
+                raise RhCliError("WORKFLOW_MIGRATION_FAILED", f"工作流文件迁移失败：{source.name}") from exc
+            self._db.execute(
+                "UPDATE tasks SET workflow_path=? WHERE workflow_path IN (?, ?)",
+                (str(stable), str(source), str(source.resolve())),
+            )
+            self._db.commit()
+            if record is not None:
+                migrated = dict(record)
+                migrated["workflow_file"] = self._workflow_relative_file(workflow_id)
+                self._upsert_workflow_registry(migrated)
+            return stable
+        candidates = self._legacy_workflow_candidates(workflow_id, record)
+        if len(candidates) > 1:
+            raw_name = str((record or {}).get("name") or "").strip()
+            expected = stable.parent / f"{workflow_id}_{canonical_workflow_name(raw_name)}" if raw_name else None
+            preferred = expected.resolve() if expected else None
+            if preferred and preferred in candidates:
+                candidates = [preferred]
+            else:
+                raise RhCliError("WORKFLOW_FILE_AMBIGUOUS", f"工作流 {workflow_id} 存在多个旧版文件，无法自动迁移。")
+        if not candidates:
+            return stable
+        source = candidates[0]
+        try:
+            source.rename(stable)
+        except FileExistsError:
+            return stable if stable.is_file() else source
+        except OSError as exc:
+            raise RhCliError("WORKFLOW_MIGRATION_FAILED", f"工作流文件迁移失败：{source.name}") from exc
+        # Existing task history may still point to the old physical filename.
+        # Keep those records replayable when the file is moved in place.
+        self._db.execute(
+            "UPDATE tasks SET workflow_path=? WHERE workflow_path IN (?, ?)",
+            (str(stable), str(source), str(source.resolve())),
+        )
+        self._db.commit()
+        if record is not None:
+            migrated = dict(record)
+            migrated["workflow_file"] = self._workflow_relative_file(workflow_id)
+            self._upsert_workflow_registry(migrated)
+        return stable
 
     @staticmethod
     def _read_workflow_registry_entry(path: Path, workflow_id: str) -> dict[str, Any] | None:
@@ -2075,16 +2468,27 @@ class LocalStore:
 
     def _read_workflow_registry(self) -> list[dict[str, Any]]:
         path = self._workflow_registry_path()
-        if not path.exists():
-            return []
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
-            return []
+        data: Any = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, UnicodeDecodeError):
+                data = {}
         records = data.get("workflows", []) if isinstance(data, dict) else []
         if not isinstance(records, list):
-            return []
+            records = []
 
+        # A package manifest is the authoritative registration file in the
+        # new layout.  The old detailed sidecars remain a read-only fallback
+        # while an installation is being migrated.
+        if self._package_layout_enabled() and not records:
+            for manifest in sorted(WORKFLOW_ROOT.glob(f"*/{WORKFLOW_PACKAGE_MANIFEST_FILENAME}")):
+                workflow_id = manifest.parent.name
+                entry = self._read_workflow_registry_entry(manifest, workflow_id)
+                if entry is not None:
+                    records.append({"id": workflow_id, "file": str(manifest.relative_to(DATA_ROOT))})
+
+        data_root = path.parent.resolve()
         entries_root = self._workflow_registry_entries_root().resolve()
         result: list[dict[str, Any]] = []
         for item in records:
@@ -2104,7 +2508,15 @@ class LocalStore:
                         (entries_root / reference_path).resolve(),
                     ]
                 entry_path = next(
-                    (candidate for candidate in candidate_paths if candidate.is_relative_to(entries_root)),
+                    (
+                        candidate
+                        for candidate in candidate_paths
+                        if candidate.is_file()
+                        and (
+                            candidate.is_relative_to(data_root)
+                            or candidate.is_relative_to(entries_root)
+                        )
+                    ),
                     None,
                 )
                 if entry_path is not None:
@@ -2130,7 +2542,8 @@ class LocalStore:
         path = self._workflow_registry_path()
         entries_root = self._workflow_registry_entries_root()
         path.parent.mkdir(parents=True, exist_ok=True)
-        entries_root.mkdir(parents=True, exist_ok=True)
+        if not self._package_layout_enabled():
+            entries_root.mkdir(parents=True, exist_ok=True)
         index_records: list[dict[str, str]] = []
         for record in records:
             if not isinstance(record, dict):
@@ -2138,9 +2551,20 @@ class LocalStore:
             workflow_id = str(record.get("id") or "").strip()
             if not workflow_id:
                 continue
+            saved_record = dict(record)
+            saved_record["workflow_file"] = self._workflow_relative_file(workflow_id)
+            if self._package_layout_enabled():
+                saved_record["prompt_group_file"] = self._workflow_relative_prompt_group_file(workflow_id)
+                saved_record["manifest_file"] = f"workflow/{workflow_id}/{WORKFLOW_PACKAGE_MANIFEST_FILENAME}"
+                saved_record["package_dir"] = f"workflow/{workflow_id}"
+            elif str(saved_record.get("prompt_group_id") or "").strip() or str(saved_record.get("prompt_group_file") or "").strip():
+                saved_record["prompt_group_file"] = self._workflow_relative_prompt_group_file(workflow_id)
+            else:
+                saved_record.pop("prompt_group_file", None)
             entry_path = self._workflow_registry_entry_path(workflow_id)
+            entry_path.parent.mkdir(parents=True, exist_ok=True)
             entry_temporary = entry_path.with_suffix(entry_path.suffix + ".tmp")
-            entry_temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            entry_temporary.write_text(json.dumps(saved_record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             os.chmod(entry_temporary, 0o600)
             entry_temporary.replace(entry_path)
             index_records.append(
@@ -2306,6 +2730,7 @@ class LocalStore:
         saved = {
             "id": str(record.get("id") or ""),
             "name": str(record.get("name") or "workflow.json"),
+            "workflow_file": self._workflow_relative_file(str(record.get("id") or "")),
             "account_id": str(record.get("account_id") or ""),
             "site": str(record.get("site") or ""),
             "remote_workflow_id": str(record.get("remote_workflow_id") or ""),
@@ -2320,8 +2745,9 @@ class LocalStore:
             saved["input_config"] = record["input_config"]
         prompt_group_id = str(record.get("prompt_group_id") or "").strip()
         prompt_group_name = str(record.get("prompt_group_name") or "").strip()
-        if prompt_group_id:
+        if prompt_group_id or bool(record.get("_package_prompt_group")):
             saved["prompt_group_id"] = prompt_group_id
+            saved["prompt_group_file"] = self._workflow_relative_prompt_group_file(str(record.get("id") or ""))
             if prompt_group_name:
                 saved["prompt_group_name"] = prompt_group_name
         records.append(saved)
@@ -2336,7 +2762,14 @@ class LocalStore:
         group_id = str(value.get("id") or "").strip()
         name = str(value.get("name") or "").strip()
         items = value.get("items")
-        if not group_id or not name or not isinstance(items, list):
+        if not isinstance(items, list):
+            raise RhCliError("INVALID_PROMPT_GROUP", "关联提示词组必须包含 ID、名称和积木列表。")
+        # Every library package owns a prompt-group sidecar.  An empty sidecar
+        # is an internal package component and is deliberately not exposed as
+        # a user-facing prompt group.
+        if not group_id and not name:
+            return {"id": "", "name": "", "updated_at": int(value.get("updated_at") or now_ms()), "items": []}
+        if not group_id or not name:
             raise RhCliError("INVALID_PROMPT_GROUP", "关联提示词组必须包含 ID、名称和积木列表。")
         return {
             "id": group_id,
@@ -2350,6 +2783,8 @@ class LocalStore:
         clean_id = str(workflow_id or "").strip()
         if not clean_id or Path(clean_id).name != clean_id:
             raise RhCliError("WORKFLOW_NOT_FOUND", f"工作流 ID 无效：{workflow_id}")
+        if WORKFLOW_ROOT.name == "workflow":
+            return WORKFLOW_ROOT / clean_id / PROMPT_GROUP_SNAPSHOT_FILENAME
         return WORKFLOW_ROOT / f"{clean_id}{WORKFLOW_PROMPT_GROUP_SUFFIX}"
 
     def _read_workflow_prompt_group(self, workflow_id: str) -> dict[str, Any] | None:
@@ -2360,62 +2795,28 @@ class LocalStore:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise RhCliError("INVALID_PROMPT_GROUP", f"无法读取工作流关联的提示词组：{path.name}") from exc
-        return self._normalise_workflow_prompt_group(value)
+        group = self._normalise_workflow_prompt_group(value)
+        return group if group and (group.get("id") or group.get("name")) else None
 
-    def _write_workflow_prompt_group(self, workflow_id: str, value: Any) -> None:
+    def _write_workflow_prompt_group(self, workflow_id: str, value: Any, *, keep_empty: bool = False) -> None:
         path = self.workflow_prompt_group_path(workflow_id)
         group = self._normalise_workflow_prompt_group(value)
         if group is None:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                raise RhCliError("PROMPT_GROUP_DELETE_FAILED", f"删除工作流提示词组失败：{path.name}") from exc
-            return
+            if keep_empty:
+                group = {"id": "", "name": "", "updated_at": now_ms(), "items": []}
+            else:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise RhCliError("PROMPT_GROUP_DELETE_FAILED", f"删除工作流提示词组失败：{path.name}") from exc
+                return
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps(group, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)
         temporary.replace(path)
-
-    def _synchronise_workflow_filename(
-        self,
-        workflow_id: str,
-        record: dict[str, Any],
-        matches: list[Path] | None = None,
-    ) -> Path:
-        """Keep a library workflow's storage filename aligned with its name.
-
-        The registry name is the user-facing filename. Older builds could
-        change that value without renaming the JSON on disk, which made
-        Telegram display one workflow while submission loaded another-looking
-        filename. Repair that legacy state whenever a workflow is resolved.
-        """
-        candidates = matches if matches is not None else [
-            path for path in WORKFLOW_ROOT.glob(f"{workflow_id}_*") if path.is_file()
-        ]
-        raw_name = str(record.get("name") or "").strip()
-        if not raw_name:
-            return candidates[0] if candidates else WORKFLOW_ROOT / f"{workflow_id}_workflow.json"
-        clean_name = canonical_workflow_name(raw_name)
-        expected = (WORKFLOW_ROOT / f"{workflow_id}_{clean_name}").resolve()
-        if expected.is_file():
-            return expected
-        if len(candidates) != 1:
-            return candidates[0].resolve() if candidates else expected
-        source = candidates[0].resolve()
-        if source == expected:
-            return source
-        try:
-            source.rename(expected)
-        except FileExistsError:
-            if expected.is_file():
-                return expected
-            raise RhCliError("WORKFLOW_RENAME_FAILED", f"工作流文件名同步失败：{clean_name}")
-        except OSError as exc:
-            raise RhCliError("WORKFLOW_RENAME_FAILED", f"工作流文件名同步失败：{clean_name}") from exc
-        return expected
 
     def save_workflow(
         self,
@@ -2426,6 +2827,7 @@ class LocalStore:
         remote_workflow_id: str = "",
         source_dir: str = "",
         input_config: dict[str, Any] | None = None,
+        input_defaults: list[dict[str, Any]] | None = None,
         prompt_group: dict[str, Any] | None = None,
         register: bool = True,
     ) -> tuple[str, Path, dict[str, Any]]:
@@ -2461,16 +2863,24 @@ class LocalStore:
         account = self.get_account(account_id) if account_id else None
         if account_id and not account:
             raise RhCliError("ACCOUNT_NOT_FOUND", "找不到该工作流所属账号。")
+        input_config = prune_workflow_input_config_for_workflow(workflow, input_config)
         normalized_input_config = normalize_workflow_input_config(workflow, input_config)
+        if input_defaults:
+            apply_workflow_input_defaults(workflow, input_defaults)
+            analysis = inspect_workflow(workflow)
         normalized_prompt_group = self._normalise_workflow_prompt_group(prompt_group)
         if account_id:
             metadata["accountId"] = account_id
             workflow[WORKFLOW_META_KEY] = metadata
         workflow_id = f"wf_{uuid.uuid4().hex[:12]}"
         clean_name = canonical_workflow_name(filename)
-        path = WORKFLOW_ROOT / f"{workflow_id}_{clean_name}"
-        path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
+        path = self._workflow_file_path(workflow_id)
         if register:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(workflow, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            temporary.replace(path)
             record = {
                 "id": workflow_id,
                 "name": clean_name,
@@ -2481,24 +2891,25 @@ class LocalStore:
                 "created_at": now_ms(),
                 "updated_at": now_ms(),
                 "input_config": normalized_input_config,
+                "_package_prompt_group": True,
             }
             if normalized_prompt_group:
                 record["prompt_group_id"] = normalized_prompt_group["id"]
                 record["prompt_group_name"] = normalized_prompt_group["name"]
             self._upsert_workflow_registry(record)
-            self._write_workflow_prompt_group(workflow_id, normalized_prompt_group)
+            self._write_workflow_prompt_group(workflow_id, normalized_prompt_group, keep_empty=True)
         return workflow_id, path, analysis
 
     def workflow_path(self, workflow_id: str) -> Path:
         workflow_id = str(workflow_id or "").strip()
-        matches = [path for path in WORKFLOW_ROOT.glob(f"{workflow_id}_*") if path.is_file()]
-        if not matches:
-            raise RhCliError("WORKFLOW_NOT_FOUND", f"找不到工作流：{workflow_id}")
         registered = next(
             (item for item in self._read_workflow_registry() if str(item.get("id") or "") == workflow_id),
             None,
         )
-        return self._synchronise_workflow_filename(workflow_id, registered, matches) if registered else matches[0]
+        path = self._migrate_legacy_workflow_file(workflow_id, registered)
+        if not path.is_file():
+            raise RhCliError("WORKFLOW_NOT_FOUND", f"找不到工作流：{workflow_id}")
+        return path.resolve()
 
     def workflows(self) -> list[dict[str, Any]]:
         """Return local workflow library records without exposing workflow JSON."""
@@ -2515,10 +2926,7 @@ class LocalStore:
         }
         result: list[dict[str, Any]] = []
         for local_id, registered in registry.items():
-            matches = [path for path in WORKFLOW_ROOT.glob(f"{local_id}_*") if path.is_file()]
-            if not matches:
-                continue
-            path = self._synchronise_workflow_filename(local_id, registered, matches)
+            path = self._migrate_legacy_workflow_file(local_id, registered)
             if not path.is_file():
                 continue
             try:
@@ -2537,7 +2945,7 @@ class LocalStore:
             account = accounts.get(account_id)
             name = str(registered.get("name") or "").strip()
             if not name:
-                name = path.name[len(local_id) + 1 :] if path.name.startswith(local_id + "_") else path.name
+                name = path.name if path.name != f"{local_id}.json" else "workflow.json"
             site = account.get("site") if account else str(registered.get("site") or "").strip()
             remote_id = str(registered.get("remote_workflow_id") or "").strip() or str(analysis.get("remote_workflow_id") or "").strip()
             folder_id = str(registered.get("folder_id") or "").strip()
@@ -2559,7 +2967,7 @@ class LocalStore:
                     "folder_id": folder_id,
                     "source_dir": str(registered.get("source_dir") or ""),
                     "workflow_path": str(path.resolve()),
-                    "prompt_group_path": str(self.workflow_prompt_group_path(local_id).resolve()) if prompt_group_id else "",
+                    "prompt_group_path": str(self.workflow_prompt_group_path(local_id).resolve()) if self.workflow_prompt_group_path(local_id).is_file() else "",
                     "input_config": registered.get("input_config") if isinstance(registered.get("input_config"), dict) else None,
                     "prompt_group_id": prompt_group_id,
                     "prompt_group_name": prompt_group_name,
@@ -2644,7 +3052,7 @@ class LocalStore:
         }
 
     def rename_workflow(self, workflow_id: str, name: str) -> dict[str, Any]:
-        """Rename the local workflow JSON while keeping its stable local ID."""
+        """Rename the display name while keeping the stable ID-based JSON path."""
         workflow_id = str(workflow_id or "").strip()
         if not workflow_id:
             raise RhCliError("WORKFLOW_NOT_FOUND", "缺少工作流 ID。")
@@ -2652,21 +3060,13 @@ class LocalStore:
         if not clean_name.lower().endswith(".json"):
             clean_name += ".json"
         source_path = self.workflow_path(workflow_id)
-        target_path = source_path.with_name(f"{workflow_id}_{clean_name}")
-        if target_path != source_path:
-            if target_path.exists():
-                raise RhCliError("WORKFLOW_NAME_EXISTS", f"工作流文件已存在：{clean_name}")
-            try:
-                source_path.rename(target_path)
-            except OSError as exc:
-                raise RhCliError("WORKFLOW_RENAME_FAILED", f"重命名工作流失败：{clean_name}") from exc
 
         record = next(
             (item for item in self._read_workflow_registry() if str(item.get("id") or "") == workflow_id),
             None,
         )
         if record is None:
-            return {"id": workflow_id, "name": clean_name, "workflow_path": str(target_path.resolve())}
+            return {"id": workflow_id, "name": clean_name, "workflow_path": str(source_path.resolve())}
         record["name"] = clean_name
         record["updated_at"] = now_ms()
         self._upsert_workflow_registry(record)
@@ -2705,7 +3105,8 @@ class LocalStore:
         folder_id = self._validate_workflow_folder_id(changes.get("folder_id", current.get("folder_id") or ""))
         input_config = current.get("input_config") if isinstance(current.get("input_config"), dict) else None
         if "input_config" in changes:
-            input_config = normalize_workflow_input_config(workflow, changes.get("input_config"))
+            input_config = prune_workflow_input_config_for_workflow(workflow, changes.get("input_config"))
+            input_config = normalize_workflow_input_config(workflow, input_config)
         prompt_group = detail.get("prompt_group")
         if "prompt_group" in changes:
             prompt_group = self._normalise_workflow_prompt_group(changes.get("prompt_group"))
@@ -2741,32 +3142,139 @@ class LocalStore:
             workflow[WORKFLOW_META_KEY] = metadata
         else:
             workflow.pop(WORKFLOW_META_KEY, None)
-        source_path = Path(current["workflow_path"]).expanduser().resolve()
-        target_path = source_path.with_name(f"{workflow_id}_{name}")
-        if target_path != source_path and target_path.exists():
-            raise RhCliError("WORKFLOW_NAME_EXISTS", f"工作流文件已存在：{name}")
+        source_path = self.workflow_path(workflow_id)
         source_path.write_text(json.dumps(workflow, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        if target_path != source_path:
-            try:
-                source_path.rename(target_path)
-            except OSError as exc:
-                raise RhCliError("WORKFLOW_RENAME_FAILED", f"重命名工作流失败：{name}") from exc
-        record["workflow_path"] = str(target_path)
+        record["workflow_path"] = str(source_path)
         self._upsert_workflow_registry(record)
         if "prompt_group" in changes:
             self._write_workflow_prompt_group(workflow_id, prompt_group)
         return self.workflow_record(workflow_id)
 
-    def delete_workflow(self, workflow_id: str) -> None:
+    def workflow_references(self, workflow_id: str) -> list[dict[str, str]]:
+        """Return active configuration references to a library workflow.
+
+        Task rows are intentionally excluded: each submitted task owns an
+        immutable workflow snapshot and therefore does not depend on the
+        current library entry.
+        """
+        workflow_id = str(workflow_id or "").strip()
+        record = self.workflow_record(workflow_id)
+        references: list[dict[str, str]] = []
+        settings = self._read_json_file()
+        if str(settings.get("telegram_inbound_workflow_id") or "").strip() == workflow_id:
+            references.append({"kind": "telegram_inbound", "key": "telegram_inbound_workflow_id"})
+        if str(settings.get("telegram_video_inbound_workflow_id") or "").strip() == workflow_id:
+            references.append({"kind": "telegram_video_inbound", "key": "telegram_video_inbound_workflow_id"})
+        folder_id = str(record.get("folder_id") or "").strip()
+        if folder_id:
+            references.append({"kind": "workflow_folder", "key": folder_id})
+
+        def walk(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for child_key, child_value in value.items():
+                    child_name = str(child_key or "")
+                    lowered = child_name.lower()
+                    if (
+                        "workflow" in lowered
+                        and "remote" not in lowered
+                        and (lowered.endswith("_id") or lowered.endswith("_ids") or lowered == "workflowid")
+                    ):
+                        if isinstance(child_value, list) and workflow_id in {str(item or "").strip() for item in child_value}:
+                            references.append({"kind": "active_setting", "key": child_name})
+                        elif str(child_value or "").strip() == workflow_id:
+                            references.append({"kind": "active_setting", "key": child_name})
+                    walk(child_value, child_name)
+            elif isinstance(value, list):
+                for item in value:
+                    walk(item, key)
+
+        walk(settings)
+        unique: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in references:
+            marker = (item["kind"], item["key"])
+            if marker not in seen:
+                seen.add(marker)
+                unique.append(item)
+        return unique
+
+    def _migrate_workflow_references(self, old_id: str, new_id: str) -> list[dict[str, str]]:
+        """Move active settings from one library ID to another before deletion."""
+        old_id = str(old_id or "").strip()
+        new_id = str(new_id or "").strip()
+        if not old_id or not new_id or old_id == new_id:
+            raise RhCliError("INVALID_WORKFLOW_REPLACEMENT", "替换工作流 ID 无效。")
+        self.workflow_record(new_id)
+        data = self._read_json_file()
+        old_record = self.workflow_record(old_id)
+        new_record = self.workflow_record(new_id)
+        changed = False
+        if str(data.get("telegram_inbound_workflow_id") or "").strip() == old_id:
+            data["telegram_inbound_workflow_id"] = new_id
+            try:
+                data["telegram_inbound_file_input_id"] = str(
+                    telegram_inbound_file_input(self.workflow_detail(new_id), "image").get("id") or ""
+                )
+            except (RhCliError, OSError, ValueError):
+                data.pop("telegram_inbound_file_input_id", None)
+            changed = True
+        if str(data.get("telegram_video_inbound_workflow_id") or "").strip() == old_id:
+            data["telegram_video_inbound_workflow_id"] = new_id
+            try:
+                data["telegram_video_inbound_file_input_id"] = str(
+                    telegram_inbound_file_input(self.workflow_detail(new_id), "video").get("id") or ""
+                )
+            except (RhCliError, OSError, ValueError):
+                data.pop("telegram_video_inbound_file_input_id", None)
+            changed = True
+
+        def replace(value: Any, key: str = "") -> Any:
+            nonlocal changed
+            if isinstance(value, dict):
+                return {child_key: replace(child_value, str(child_key or "")) for child_key, child_value in value.items()}
+            if isinstance(value, list):
+                return [replace(item, key) for item in value]
+            lowered = key.lower()
+            if (
+                "workflow" in lowered
+                and "remote" not in lowered
+                and (lowered.endswith("_id") or lowered.endswith("_ids") or lowered == "workflowid")
+                and str(value or "").strip() == old_id
+            ):
+                changed = True
+                return new_id
+            return value
+
+        migrated = replace(data)
+        if migrated != data:
+            changed = True
+        if changed:
+            self._write_json_file(migrated)
+        # A replacement always keeps the old package's folder membership.
+        old_folder = str(old_record.get("folder_id") or "").strip()
+        new_folder = str(new_record.get("folder_id") or "").strip()
+        if old_folder and old_folder != new_folder:
+            self.set_workflow_folder(new_id, old_folder)
+        return self.workflow_references(old_id)
+
+    def _delete_workflow_files(self, workflow_id: str, *, clear_references: bool = True) -> None:
         record = self.workflow_record(workflow_id)
         path = Path(record["workflow_path"])
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            raise RhCliError("WORKFLOW_DELETE_FAILED", f"删除工作流失败：{path}") from exc
-        self._write_workflow_prompt_group(workflow_id, None)
+        if self._package_layout_enabled():
+            package_dir = self._workflow_package_dir(workflow_id)
+            try:
+                if package_dir.exists():
+                    shutil.rmtree(package_dir)
+            except OSError as exc:
+                raise RhCliError("WORKFLOW_DELETE_FAILED", f"删除工作流包失败：{package_dir}") from exc
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RhCliError("WORKFLOW_DELETE_FAILED", f"删除工作流失败：{path}") from exc
+            self._write_workflow_prompt_group(workflow_id, None)
         entry_path = self._workflow_registry_entry_path(workflow_id)
         try:
             entry_path.unlink()
@@ -2776,27 +3284,83 @@ class LocalStore:
             raise RhCliError("WORKFLOW_REGISTRY_DELETE_FAILED", f"删除工作流登记文件失败：{entry_path.name}") from exc
         records = [item for item in self._read_workflow_registry() if str(item.get("id") or "") != str(workflow_id)]
         self._write_workflow_registry(records)
+        if not clear_references:
+            return
         data = self._read_json_file()
         changed = False
-        if str(data.get("telegram_inbound_workflow_id") or "").strip() == str(workflow_id):
-            data.pop("telegram_inbound_workflow_id", None)
+        for key in (
+            "telegram_inbound_workflow_id",
+            "telegram_video_inbound_workflow_id",
+        ):
+            if str(data.get(key) or "").strip() == str(workflow_id):
+                data.pop(key, None)
+                changed = True
+        if str(data.get("telegram_inbound_workflow_id") or "").strip() == "":
             data.pop("telegram_inbound_file_input_id", None)
             if str(data.get("telegram_inbound_mode") or "fixed").strip().lower() != "folder_random":
                 data["telegram_inbound_enabled"] = False
-            changed = True
-        if str(data.get("telegram_video_inbound_workflow_id") or "").strip() == str(workflow_id):
-            data.pop("telegram_video_inbound_workflow_id", None)
+        if str(data.get("telegram_video_inbound_workflow_id") or "").strip() == "":
             data.pop("telegram_video_inbound_file_input_id", None)
             data["telegram_video_inbound_enabled"] = False
-            changed = True
         if changed:
             self._write_json_file(data)
 
+    def replace_workflow(
+        self,
+        old_workflow_id: str,
+        filename: str,
+        content: str,
+        *,
+        account_id: str = "",
+        remote_workflow_id: str = "",
+        source_dir: str = "",
+        input_config: dict[str, Any] | None = None,
+        input_defaults: list[dict[str, Any]] | None = None,
+        prompt_group: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Save a new package, migrate active references, then retire the old one."""
+        old_record = self.workflow_record(old_workflow_id)
+        effective_input_config = input_config if input_config is not None else (
+            old_record.get("input_config") if isinstance(old_record.get("input_config"), dict) else None
+        )
+        workflow_id, _, _ = self.save_workflow(
+            filename,
+            content,
+            account_id=account_id or str(old_record.get("account_id") or ""),
+            remote_workflow_id=remote_workflow_id or str(old_record.get("remote_workflow_id") or ""),
+            source_dir=source_dir or str(old_record.get("source_dir") or ""),
+            input_config=effective_input_config,
+            input_defaults=input_defaults,
+            prompt_group=prompt_group,
+        )
+        try:
+            package = self.workflow_detail(workflow_id)
+            package_path = Path(str(package["record"].get("workflow_path") or ""))
+            prompt_path = self.workflow_prompt_group_path(workflow_id)
+            registration_path = self._workflow_registry_entry_path(workflow_id)
+            if not package_path.is_file() or not prompt_path.is_file() or not registration_path.is_file():
+                raise RhCliError("WORKFLOW_PACKAGE_INCOMPLETE", "新工作流包的注册文件、工作流文件或提示词组文件不完整。")
+            remaining = self._migrate_workflow_references(old_workflow_id, workflow_id)
+            unresolved = [item for item in remaining if item.get("kind") != "workflow_folder"]
+            if unresolved:
+                labels = ", ".join(item.get("key", "") for item in unresolved)
+                raise RhCliError("WORKFLOW_REFERENCE_MIGRATION_FAILED", f"无法迁移旧工作流的活动引用：{labels}")
+            self._delete_workflow_files(old_workflow_id, clear_references=False)
+        except Exception:
+            # Keep both packages available for recovery if migration/deletion
+            # fails.  The old package remains the active one.
+            raise
+        return self.workflow_detail(workflow_id)
+
+    def delete_workflow(self, workflow_id: str) -> None:
+        references = self.workflow_references(workflow_id)
+        if references:
+            labels = ", ".join(item["key"] for item in references)
+            raise RhCliError("WORKFLOW_REFERENCED", f"工作流仍被活动配置引用：{labels}。请先迁移引用或关闭配置。")
+        self._delete_workflow_files(workflow_id, clear_references=False)
+
     @staticmethod
     def task_snapshot_path(task: dict[str, Any]) -> Path:
-        saved = str(task.get("workflow_snapshot_path") or "").strip()
-        if saved:
-            return Path(saved).expanduser().resolve()
         return (Path(str(task.get("output_dir") or "")).expanduser() / str(task.get("id") or "") / "workflow_api.json").resolve()
 
     @staticmethod
@@ -2850,6 +3414,45 @@ class LocalStore:
             )
         return saved
 
+    @staticmethod
+    def local_outputs_match_task_records(
+        task: dict[str, Any],
+        existing: list[dict[str, Any]],
+    ) -> bool:
+        """Return whether local files exactly match persisted output records.
+
+        File discovery alone cannot distinguish a complete task from one that
+        was interrupted after only the first remote file was downloaded.
+        Startup recovery therefore trusts only records already written to the
+        task row, and rejects extra files discovered on disk.
+        """
+        recorded = task.get("outputs")
+        if not isinstance(recorded, list) or not recorded or not existing:
+            return False
+
+        def signature(item: Any) -> tuple[str, str, str] | None:
+            if not isinstance(item, dict):
+                return None
+            kind = str(item.get("kind") or "file")
+            if kind == "file":
+                raw_path = str(item.get("path") or "").strip()
+                if not raw_path:
+                    return None
+                return ("file", str(Path(raw_path).expanduser().resolve()), "")
+            if kind == "text":
+                return (
+                    "text",
+                    str(item.get("node_id") or ""),
+                    str(item.get("text") or ""),
+                )
+            return (kind, str(item.get("node_id") or ""), str(item.get("name") or ""))
+
+        recorded_signatures = [signature(item) for item in recorded]
+        existing_signatures = [signature(item) for item in existing]
+        if any(item is None for item in recorded_signatures + existing_signatures):
+            return False
+        return sorted(recorded_signatures) == sorted(existing_signatures)
+
     def save_task_workflow_snapshot(self, task: dict[str, Any], workflow: dict[str, Any]) -> Path:
         snapshot_path = self.task_snapshot_path(task)
         if not snapshot_path.parent.name or not snapshot_path.parent.parent:
@@ -2861,15 +3464,9 @@ class LocalStore:
         return snapshot_path
 
     def task_prompt_group_snapshot_path(self, task: dict[str, Any]) -> Path:
-        saved = str(task.get("prompt_group_snapshot_path") or "").strip()
-        if saved:
-            return Path(saved).expanduser().resolve()
         return self.task_output_path(task) / PROMPT_GROUP_SNAPSHOT_FILENAME
 
     def task_manifest_path(self, task: dict[str, Any]) -> Path:
-        saved = str(task.get("manifest_path") or "").strip()
-        if saved:
-            return Path(saved).expanduser().resolve()
         return self.task_output_path(task) / TASK_MANIFEST_FILENAME
 
     def save_task_prompt_group_snapshot(self, task: dict[str, Any], group: dict[str, Any]) -> Path:
@@ -3056,7 +3653,8 @@ class LocalStore:
             self._db.execute(
                 "UPDATE tasks SET submission_source='telegram' "
                 "WHERE LOWER(TRIM(submission_source)) = 'telegram' "
-                "OR stage_logs_json LIKE '%已从 Telegram 接收%'"
+                "OR stage_logs_json LIKE '%已从 Telegram 接收%' "
+                "OR input_json LIKE '%telegram-inputs/%'"
             )
             self._db.commit()
             rows = self._db.execute(
@@ -3220,9 +3818,11 @@ class LocalStore:
             "task_id": str(task.get("id") or "").strip(),
             "created_at": int(task.get("created_at") or now_ms()),
             "submission_source": str(task.get("submission_source") or "local").strip() or "local",
+            "task_type": str(task.get("task_type") or "workflow").strip().lower() or "workflow",
             "workflow": {
                 "name": str(task.get("workflow_name") or "").strip(),
                 "registered_workflow_id": str(task.get("registered_workflow_id") or "").strip(),
+                "local_workflow_id": str(task.get("local_workflow_id") or "").strip(),
                 "remote_workflow_id": str(task.get("remote_workflow_id") or "").strip(),
                 "source_path": str(task.get("workflow_path") or "").strip(),
                 "snapshot_path": str(task.get("workflow_snapshot_path") or "").strip(),
@@ -3266,13 +3866,10 @@ class LocalStore:
         snapshot_path = self.task_snapshot_path(task)
         if snapshot_path.is_file():
             return snapshot_path
-        original_path = Path(str(task.get("workflow_path") or "")).expanduser().resolve()
-        if original_path.is_file():
-            return original_path
         raise RhCliError(
             "WORKFLOW_NOT_FOUND",
-            "任务对应的工作流快照和原始工作流都不存在，无法加载。",
-            detail={"snapshot_path": str(snapshot_path), "workflow_path": str(original_path)},
+            "任务输出目录中的工作流快照不存在，无法加载任务记录。",
+            detail={"snapshot_path": str(snapshot_path)},
         )
 
     def load_task_workflow(self, task_id: str) -> dict[str, Any]:
@@ -3288,14 +3885,15 @@ class LocalStore:
             raise RhCliError("INVALID_WORKFLOW", "任务对应的工作流不是 API 格式节点字典。")
         original_path = Path(str(task.get("workflow_path") or "")).expanduser().resolve()
         snapshot_path = self.task_snapshot_path(task)
-        if workflow_path != snapshot_path:
-            snapshot_path = self.save_task_workflow_snapshot(task, workflow)
+        if not str(task.get("workflow_snapshot_path") or "").strip():
             self.update_task(task_id, workflow_snapshot_path=str(snapshot_path))
             task = self.task(task_id) or task
-            workflow_path = snapshot_path
-        name_parts = original_path.name.split("_", 2)
-        derived_workflow_id = "_".join(name_parts[:2]) if len(name_parts) >= 2 else workflow_path.stem
-        saved_workflow_id = str(task.get("registered_workflow_id") or "").strip() or derived_workflow_id
+        derived_workflow_id = self._workflow_local_id_from_path(original_path)
+        saved_workflow_id = (
+            str(task.get("registered_workflow_id") or "").strip()
+            or str(task.get("local_workflow_id") or "").strip()
+            or derived_workflow_id
+        )
         prompt_group = self.load_task_prompt_group_snapshot(task)
         task_changes: dict[str, str] = {}
         prompt_group_snapshot_path = self.task_prompt_group_snapshot_path(task)
@@ -3340,8 +3938,8 @@ class LocalStore:
             "id": task["id"],
             "created_at": task["created_at"],
             "updated_at": task["created_at"],
-            "status": "queued",
-            "progress": "已加入本地等待队列，等待并发槽位…",
+            "status": str(task.get("initial_status") or "queued").strip().lower() if str(task.get("initial_status") or "queued").strip().lower() in {"queued", "running"} else "queued",
+            "progress": str(task.get("initial_progress") or "已加入本地等待队列，等待并发槽位…"),
             "workflow_path": task["workflow_path"],
             "workflow_name": task["workflow_name"],
             "key_id": task.get("key_id"),
@@ -3352,9 +3950,11 @@ class LocalStore:
             "dispatch_key_site": str(task.get("dispatch_key_site") or "").strip(),
             "dispatch_key_api_type": str(task.get("dispatch_key_api_type") or "").strip(),
             "submission_source": submission_source,
+            "task_type": "toolbox" if str(task.get("task_type") or "").strip().lower() == "toolbox" else "workflow",
             "remote_task_id": None,
             "remote_workflow_id": str(task.get("remote_workflow_id") or "").strip(),
             "registered_workflow_id": str(task.get("registered_workflow_id") or "").strip(),
+            "local_workflow_id": str(task.get("local_workflow_id") or "").strip(),
             "input_json": json.dumps(task["files"], ensure_ascii=False),
             "prompt_json": json.dumps(task["prompts"], ensure_ascii=False),
             "custom_json": json.dumps(task.get("custom_inputs") or {}, ensure_ascii=False),
@@ -3390,9 +3990,9 @@ class LocalStore:
         }
         with self._lock:
             self._db.execute(
-                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,project_id,project_name,project_path,project_inference_disabled,key_id,account_id,instance_type,output_prefix,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,submission_source,remote_task_id,remote_workflow_id,registered_workflow_id,"
+                "INSERT INTO tasks (id,created_at,updated_at,status,progress,workflow_path,workflow_name,project_id,project_name,project_path,project_inference_disabled,key_id,account_id,instance_type,output_prefix,dispatch_key_name,dispatch_key_site,dispatch_key_api_type,submission_source,task_type,remote_task_id,remote_workflow_id,registered_workflow_id,local_workflow_id,"
                 "input_json,prompt_json,custom_json,input_config_json,bypass_json,random_noise_json,resolution_json,workflow_snapshot_path,prompt_group_snapshot_path,manifest_path,output_dir,outputs_json,error,error_detail,stage_logs_json,cost_type,cost,duration) "
-                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:project_id,:project_name,:project_path,:project_inference_disabled,:key_id,:account_id,:instance_type,:output_prefix,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:submission_source,:remote_task_id,:remote_workflow_id,:registered_workflow_id,"
+                "VALUES (:id,:created_at,:updated_at,:status,:progress,:workflow_path,:workflow_name,:project_id,:project_name,:project_path,:project_inference_disabled,:key_id,:account_id,:instance_type,:output_prefix,:dispatch_key_name,:dispatch_key_site,:dispatch_key_api_type,:submission_source,:task_type,:remote_task_id,:remote_workflow_id,:registered_workflow_id,:local_workflow_id,"
                 ":input_json,:prompt_json,:custom_json,:input_config_json,:bypass_json,:random_noise_json,:resolution_json,:workflow_snapshot_path,:prompt_group_snapshot_path,:manifest_path,:output_dir,:outputs_json,:error,:error_detail,:stage_logs_json,:cost_type,:cost,:duration)",
                 fields,
             )
@@ -3711,8 +4311,14 @@ class LocalStore:
             )
             self._db.commit()
 
-    def delete_outputs_by_rating(self, rating: Any) -> dict[str, int]:
-        """Delete only rated output entries and their local files, preserving tasks."""
+    def delete_outputs_by_rating(
+        self,
+        rating: Any,
+        *,
+        project_id: str = "",
+        output_keys: set[tuple[str, int]] | None = None,
+    ) -> dict[str, int]:
+        """Delete rated outputs within the selected project, preserving tasks."""
         try:
             score = int(rating)
         except (TypeError, ValueError) as exc:
@@ -3724,7 +4330,12 @@ class LocalStore:
         updates: list[tuple[str, int, str]] = []
         deleted_count = 0
         with self._lock:
-            rows = self._db.execute("SELECT id, output_dir, outputs_json FROM tasks").fetchall()
+            query = "SELECT id, output_dir, outputs_json FROM tasks"
+            parameters: tuple[str, ...] = ()
+            if project_id:
+                query += " WHERE project_id=?"
+                parameters = ("" if project_id == "__unclassified__" else project_id,)
+            rows = self._db.execute(query, parameters).fetchall()
             for row in rows:
                 try:
                     outputs = json.loads(row["outputs_json"] or "[]")
@@ -3736,7 +4347,7 @@ class LocalStore:
                 removed_from_task = 0
                 task_id = str(row["id"] or "")
                 task_folder = (Path(str(row["output_dir"] or "")).expanduser() / task_id).resolve()
-                for output in outputs:
+                for output_index, output in enumerate(outputs):
                     if not isinstance(output, dict):
                         kept_outputs.append(output)
                         continue
@@ -3744,7 +4355,7 @@ class LocalStore:
                         output_rating = int(output.get("rating") or 0)
                     except (TypeError, ValueError):
                         output_rating = 0
-                    if output_rating != score:
+                    if output_rating != score or (output_keys is not None and (task_id, output_index) not in output_keys):
                         kept_outputs.append(output)
                         continue
                     if str(output.get("kind") or "file") == "file":
@@ -3864,7 +4475,9 @@ class LocalStore:
     @staticmethod
     def row_to_task(row: sqlite3.Row) -> dict[str, Any]:
         task = dict(row)
-        task["workflow_name"] = canonical_workflow_name(task.get("workflow_name") or "workflow.json")
+        task_type = str(task.get("task_type") or "").strip().lower()
+        task["task_type"] = task_type if task_type in {"workflow", "toolbox"} else "workflow"
+        task["workflow_name"] = public_workflow_name(canonical_workflow_name(task.get("workflow_name") or "workflow.json"))
         names = {
             "input_json": "files",
             "prompt_json": "prompts",
@@ -4794,7 +5407,7 @@ class TaskManager:
             if task.get("status") != "interrupted":
                 continue
             existing = self.store.existing_task_outputs(task)
-            if existing:
+            if self.store.local_outputs_match_task_records(task, existing):
                 self.store.update_task(
                     task["id"],
                     status="completed",
@@ -4811,15 +5424,40 @@ class TaskManager:
                 self.store.update_task(
                     task["id"],
                     status="recovering",
-                    progress="未发现本地产物，准备恢复远程轮询…",
+                    progress=(
+                        "发现的本地产物记录不完整，准备恢复远程轮询…"
+                        if existing
+                        else "未发现本地产物，准备恢复远程轮询…"
+                    ),
                 )
-                self._log_stage(task["id"], "recovery", f"未发现本地产物，准备恢复轮询 taskId：{remote_task_id}")
+                self._log_stage(
+                    task["id"],
+                    "recovery",
+                    (
+                        f"发现的本地产物记录不完整，准备恢复轮询 taskId：{remote_task_id}"
+                        if existing
+                        else f"未发现本地产物，准备恢复轮询 taskId：{remote_task_id}"
+                    ),
+                )
             else:
                 self.store.update_task(
                     task["id"],
-                    progress="应用重启，未发现本地产物且没有远程 taskId，无法恢复",
+                    progress=(
+                        "应用重启，发现的本地产物记录不完整且没有远程 taskId，无法确认任务完成"
+                        if existing
+                        else "应用重启，未发现本地产物且没有远程 taskId，无法恢复"
+                    ),
                 )
-                self._log_stage(task["id"], "recovery", "未发现本地产物，也没有远程 taskId，保留为已中断", level="warning")
+                self._log_stage(
+                    task["id"],
+                    "recovery",
+                    (
+                        "发现的本地产物记录不完整且没有远程 taskId，保留为已中断"
+                        if existing
+                        else "未发现本地产物，也没有远程 taskId，保留为已中断"
+                    ),
+                    level="warning",
+                )
 
     def _log_stage(
         self,
@@ -5092,10 +5730,21 @@ class TaskManager:
         project: dict[str, Any] | None = None,
         output_prefix: str | None = None,
     ) -> dict[str, Any]:
+        inline_workflow = workflow_data is not None
         if workflow_data is not None:
             if not isinstance(workflow_data, dict):
                 raise RhCliError("INVALID_WORKFLOW", "当前工作流必须是 API 格式节点字典。")
             workflow = workflow_data
+            requested_workflow_id = str(workflow_id or "").strip()
+            workflow_id = (
+                requested_workflow_id
+                if re.fullmatch(r"wf_[A-Za-z0-9]+", requested_workflow_id)
+                else f"wf_{uuid.uuid4().hex[:12]}"
+            )
+            # This is only a logical source path used while resolving legacy
+            # relative defaults. The task itself is persisted to its own
+            # output snapshot below; no file is created here.
+            workflow_path = self.store._workflow_file_path(workflow_id)
         else:
             workflow_path = self.store.workflow_path(workflow_id)
             workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
@@ -5158,13 +5807,6 @@ class TaskManager:
                 "updated_at": now_ms(),
                 "items": [],
             }
-        if workflow_data is not None:
-            source_name = str(workflow_name or "workflow_api.json").strip() or "workflow_api.json"
-            workflow_id, workflow_path, _ = self.store.save_workflow(
-                source_name,
-                json.dumps(workflow_data, ensure_ascii=False),
-                register=False,
-            )
         submission_source = str(submission_source or "local").strip().lower()
         if submission_source not in {"local", "telegram"}:
             submission_source = "local"
@@ -5188,14 +5830,30 @@ class TaskManager:
         task_id = f"task_{uuid.uuid4().hex[:12]}"
         root = Path(output_dir or self.store.output_dir()).expanduser().resolve()
         root.mkdir(parents=True, exist_ok=True)
-        normalized_project = normalize_project(project, output_dir=root, workflow_path=workflow_path)
+        normalized_project = normalize_project(
+            project, output_dir=root, workflow_path=workflow_path, infer_from_paths=project is None,
+        )
+        if normalized_project["id"] and not normalized_project["name"]:
+            stored_project = self.store.project_folder(normalized_project["id"])
+            if not stored_project:
+                raise RhCliError("PROJECT_FOLDER_NOT_FOUND", "找不到所选项目，请重新选择。")
+            normalized_project = {key: stored_project[key] for key in ("id", "name", "path")}
+        task_workflow_name = str(workflow_name or "").strip()
+        if not task_workflow_name and library_record:
+            task_workflow_name = str(library_record.get("name") or "").strip()
+        if not task_workflow_name and inline_workflow:
+            task_workflow_name = "workflow_api.json"
+        if not task_workflow_name:
+            task_workflow_name = workflow_name_from_path(workflow_path, workflow_id)
         task = {
             "id": task_id,
             "created_at": now_ms(),
             "workflow_path": str(workflow_path),
-            "workflow_name": workflow_name_from_path(workflow_path, workflow_id),
+            "workflow_name": canonical_workflow_name(task_workflow_name or "workflow_api.json"),
+            "task_type": "workflow",
             "remote_workflow_id": remote_id,
             "registered_workflow_id": registered_workflow_id,
+            "local_workflow_id": workflow_id if inline_workflow else "",
             "submission_source": submission_source,
             "files": files,
             "prompts": prompts,
@@ -5211,6 +5869,7 @@ class TaskManager:
             "project_id": normalized_project["id"],
             "project_name": normalized_project["name"],
             "project_path": normalized_project["path"],
+            "project_inference_disabled": project is not None and not normalized_project["id"],
             "output_dir": str(root),
         }
         snapshot_workflow = json.loads(json.dumps(workflow, ensure_ascii=False))
@@ -5237,6 +5896,8 @@ class TaskManager:
             snapshot_workflow[WORKFLOW_META_KEY] = metadata
         snapshot_path = self.store.save_task_workflow_snapshot(task, snapshot_workflow)
         task["workflow_snapshot_path"] = str(snapshot_path)
+        if inline_workflow:
+            task["workflow_path"] = str(snapshot_path)
         prompt_group_snapshot_path = self.store.save_task_prompt_group_snapshot(task, normalized_prompt_group)
         task["prompt_group_snapshot_path"] = str(prompt_group_snapshot_path)
         manifest_path = self.store.save_task_manifest_snapshot(task, normalized_prompt_group)
@@ -5834,7 +6495,7 @@ def public_state(
     task history and Telegram workflow candidates.
     """
     scope = str(scope or "full").strip().lower()
-    if scope not in {"full", "submit", "workflows", "prompt", "outputs", "settings"}:
+    if scope not in {"full", "submit", "workflows", "prompt", "toolbox", "outputs", "settings"}:
         scope = "full"
     current_account_id = store.current_account_id()
     current_account = store.get_account(current_account_id) if current_account_id else None
@@ -5861,6 +6522,7 @@ def public_state(
         result["keys"] = manager.public_keys(current_account_id)
     if scope in {"full", "submit"}:
         result["tasks"] = manager.public_tasks()
+        result["projects"] = store.project_folders()
     if scope in {"full", "settings"}:
         result["telegram_inbound_workflows"] = manager.telegram_inbound_workflows()
         result["telegram_video_inbound_workflows"] = manager.telegram_video_inbound_workflows()
@@ -6439,10 +7101,98 @@ def _output_tags(value: Any) -> list[str]:
     return tags
 
 
-def public_output_media(manager: TaskManager, tag: str = "案例") -> list[dict[str, Any]]:
-    """Return existing local image, video, and audio files carrying a tag."""
+def matches_public_output_filters(item: dict[str, Any], filters: dict[str, Any] | None = None) -> bool:
+    """Apply the output-library folder and filter state to one public artifact."""
+    filters = filters or {}
+    selected_project = str(filters.get("project_id") or "").strip()
+    item_project = str(item.get("project_id") or "").strip()
+    if selected_project:
+        if selected_project == "__unclassified__":
+            if item_project:
+                return False
+        elif item_project != selected_project:
+            return False
+
+    selected_type = str(filters.get("type") or "").strip()
+    if selected_type and selected_type != "all" and str(item.get("display_type") or "") != selected_type:
+        return False
+
+    selected_rating = str(filters.get("rating") or "").strip()
+    if selected_rating:
+        try:
+            item_rating = int(item.get("rating") or 0)
+        except (TypeError, ValueError):
+            item_rating = 0
+        if selected_rating == "unrated":
+            if item_rating != 0:
+                return False
+        else:
+            try:
+                if item_rating != int(selected_rating):
+                    return False
+            except ValueError:
+                pass
+
+    search = str(filters.get("search") or "").strip().lower()
+    if search:
+        searchable = " ".join(
+            str(item.get(field) or "").lower()
+            for field in ("name", "task_name", "project_name")
+        )
+        if search not in searchable:
+            return False
+
+    workflow = str(filters.get("workflow") or "").strip()
+    if workflow and str(item.get("task_name") or item.get("workflow_name") or "").strip() != workflow:
+        return False
+
+    tags = set(_output_tags(item))
+    for filter_key, tag in (("tag_case", "案例"), ("tag_h", "H")):
+        mode = str(filters.get(filter_key) or "off").strip()
+        if mode == "include" and tag not in tags:
+            return False
+        if mode == "exclude" and tag in tags:
+            return False
+
+    try:
+        created_at = int(item.get("task_created_at") or 0)
+    except (TypeError, ValueError):
+        created_at = 0
+    try:
+        range_start = int(filters.get("range_start") or 0)
+    except (TypeError, ValueError):
+        range_start = 0
+    try:
+        range_end = int(filters.get("range_end") or 0)
+    except (TypeError, ValueError):
+        range_end = 0
+    if range_start and created_at < range_start:
+        return False
+    if range_end and created_at >= range_end:
+        return False
+
+    selected_account = str(filters.get("account_id") or "").strip()
+    item_account = str(item.get("account_id") or "").strip()
+    if selected_account == "__unbound__" and item_account:
+        return False
+    if selected_account and selected_account != "__unbound__" and item_account != selected_account:
+        return False
+    return True
+
+
+def public_output_media(
+    manager: TaskManager,
+    tag: str = "案例",
+    *,
+    project_id: str = "",
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return tagged local media within the selected project (empty means all)."""
     media: list[dict[str, Any]] = []
     used_archive_names: set[str] = set()
+    output_filters = dict(filters or {})
+    if project_id and "project_id" not in output_filters:
+        output_filters["project_id"] = project_id
     for task in manager.public_tasks():
         task_id = str(task.get("id") or "").strip()
         if not task_id:
@@ -6450,9 +7200,12 @@ def public_output_media(manager: TaskManager, tag: str = "案例") -> list[dict[
         task_output_root = Path(str(task.get("output_dir") or "")).expanduser().resolve()
         task_name = safe_name(str(task.get("workflow_name") or "").strip(), task_id)
         task_folder = safe_name(task_id, "task")
-        for output in task.get("outputs") or []:
+        file_index = 0
+        for output_index, output in enumerate(task.get("outputs") or []):
             if not isinstance(output, dict) or str(output.get("kind") or "file") != "file":
                 continue
+            current_index = file_index
+            file_index += 1
             if tag not in _output_tags(output):
                 continue
             raw_path = str(output.get("path") or "").strip()
@@ -6466,6 +7219,36 @@ def public_output_media(manager: TaskManager, tag: str = "案例") -> list[dict[
                 if not mime.startswith(("image/", "video/", "audio/")):
                     continue
             except OSError:
+                continue
+            if mime.startswith("image/"):
+                display_type = "image"
+            elif mime.startswith("video/"):
+                display_type = "video"
+            else:
+                display_type = "audio"
+            try:
+                rating = int(output.get("rating") or 0)
+            except (TypeError, ValueError):
+                rating = 0
+            if rating not in range(1, 6):
+                rating = 0
+            output_item = {
+                "id": f"{task_id}:file:{current_index}",
+                "kind": "file",
+                "display_type": display_type,
+                "name": str(output.get("name") or file_path.name),
+                "task_id": task_id,
+                "account_id": str(task.get("account_id") or "").strip(),
+                "project_id": str(task.get("project_id") or "").strip(),
+                "project_name": str(task.get("project_name") or "").strip(),
+                "task_name": str(task.get("workflow_name") or task_id),
+                "task_created_at": int(task.get("created_at") or 0),
+                "rating": rating,
+                "tags": _output_tags(output),
+                "output_index": output_index,
+                "file_index": current_index,
+            }
+            if not matches_public_output_filters(output_item, output_filters):
                 continue
             filename = safe_name(str(output.get("name") or file_path.name), file_path.name)
             archive_name = f"{task_name}/{task_folder}/{filename}"

@@ -23,10 +23,10 @@ server.py  ── HTTP API / 静态文件
 | 任务提交 | `index.html` | 导入 API 工作流、识别输入节点、保存路径配置、提交和查看任务队列 |
 | 提示词工坊 | `prompt.html` | 管理固定/自由文本积木，组合提示词，导入动作、深度图和骨骼图资源 |
 | 成片 | `outputs.html` | 手动浏览本地产物；点击任务下的工作流名称可恢复该任务并跳转任务提交页，也可把产物导入任务节点或批量清理一星产物 |
-| 工作流 | `workflows.html` | 明确导入、保存、编辑、绑定账号/workflowId、导出和删除工作流库副本 |
+| 工作流 | `workflows.html` | 管理工作流库与临时工作流快照：导入外部快照、保存到工作流库、从工作流库加载快照、导出和删除库条目 |
 | 仪表盘 | `dashboard.html` | 按 1D/7D/30D 和账号筛选查看 RH 币消耗、提交次数、处理时长、并发视频响应效率、当前余额、结果快照和注册工作流评分排行 |
 
-历史任务产生的工作流临时副本不会自动进入“工作流”页面；工作流库只显示用户明确导入并保存的记录。
+工作流库只显示用户明确保存的库条目。外部导入或从工作流库加载后得到的是可编辑的临时工作流快照，不会自动登记到工作流库；任务提交时还会从当前快照生成独立的不可变任务快照。
 
 ## 后端职责
 
@@ -43,12 +43,13 @@ server.py  ── HTTP API / 静态文件
 - `data/accounts.json`：账号名称、站点和签到状态，不保存密码或 token。
 - `data/tasks.sqlite3`：任务历史、状态、远程 taskId、注册工作流关联、项目归属、任务级工作流/提示词组/manifest 快照路径、阶段日志、消耗和脱敏错误详情。
 - `data/tasks.sqlite3` 中的 `usage_records`：独立用量台账，保存提交次数、RH 币消耗、处理时长和产物数量；任务删除后仍保留。
-- `data/workflows/`：工作流库副本、每个工作流可选的 `*.prompt_group.json` 提示词组快照和提交期间的工作流快照。
-- `data/workflow-registry.json`：工作流库轻量主索引，只保存本地工作流 ID 和详细记录文件路径。
-- `data/workflow-registry/<workflow_id>.json`：每个工作流独立的详细登记资料，包括名称、所属账号、workflowId、输入配置和关联提示词组。
+- `data/workflow/<workflow_id>/workflow_api.json`：工作流库条目中的 API 工作流文件；它是完整工作流包的一部分，不代表用户当前正在编辑的临时快照。
+- `data/workflow/<workflow_id>/prompt_group.json`：工作流包内部的提示词组文件。提示词组不作为工作流页面中的独立用户资源展示。
+- `data/workflow/<workflow_id>/manifest.json`：工作流注册文件，是该工作流包的顶层配置和唯一入口，保存名称、所属账号、workflowId、输入配置，以及另外两个文件的相对路径。
+- `data/workflow-registry.json`：工作流库的内部目录索引，只保存工作流 ID 与 `workflow/<workflow_id>/manifest.json` 路径；它不是用户需要理解或单独编辑的工作流对象。
 - `data/pasted-inputs/`：剪贴板图片副本；普通拖入/选择文件只保存本机绝对路径，不复制原始输入。
 - `data/outputs/`：默认产物目录；用户可以在设置中指定外部绝对路径。每个任务文件夹保存 `workflow_api.json`、`prompt_group.json` 和 `manifest.json`。输入文件只保留原始路径，不复制到任务目录。
-- `data/prompt/state.json`：提示词工坊当前组装顺序；`data/prompt/groups.json` 是提示词组主索引，完整组内容按组拆分保存在 `data/prompt/groups/<group-id>.json`。
+- `data/prompt/state.json`：提示词工坊当前临时组装顺序。独立提示词组索引和文件可以作为历史数据或兼容数据保留，但新的工作流库条目以自身的 `prompt_group.json` 为准，工作流页面不展示“组状态库”。
 
 成片库的批量一星清理只更新任务中的产物列表并删除对应本地文件，不删除任务历史；独立用量台账中的原始产物数量也不会因清理而回写。
 
@@ -62,7 +63,15 @@ server.py  ── HTTP API / 静态文件
 
 任务项目默认从输出目录或工作流路径中的 `.../projects/<项目名>/...` 推断，也可以由提交 API 显式传入 `project` 覆盖。成片页按任务项目展示项目文件夹和任务卡片；可将任意成片卡片拖到项目文件夹，或使用“移动到项目”菜单，这些操作只更新 SQLite 任务元数据及 manifest 的 `project` 字段，不移动或复制任何媒体文件。应用启动时会为已有任务回填可推断的项目归属，并同步已有 manifest。
 
-工作流库保存的是工作流 JSON、独立登记 sidecar 与可选提示词组快照的组合：工作流登记主索引保存于 `workflow-registry.json`，每个工作流的详细元数据保存于 `data/workflow-registry/<workflow_id>.json`，提示词组保存为 `data/workflows/<workflow_id>.prompt_group.json`。从工作流页面加载时，工作流写入任务提交页草稿，提示词组写入提示词工坊的一次性恢复缓存；用户进入提示词工坊后会自动恢复该组装台。旧工作流没有快照时只加载工作流本身。
+工作流库条目是 `data/workflow/<workflow_id>/` 下的完整三文件工作流包：`manifest.json` 是顶层配置，索引同目录下的 `workflow_api.json` 和 `prompt_group.json`；全局 `workflow-registry.json` 只作为内部目录索引。从外部导入工作流或从工作流库加载工作流时，系统都先创建临时工作流快照；编辑只修改快照，不直接修改工作流库。只有“保存到工作流库”才会创建新的库条目。
+
+从已有库条目更新工作流时，不原地覆盖旧条目：先把编辑后的快照保存为新的工作流条目 B，确认 B 的三个文件完整可读，再迁移旧条目 A 的活动引用，最后删除 A。活动引用包括 Telegram 固定工作流、Telegram 视频工作流、按文件夹随机选择配置、工作流文件夹归属及其他直接保存的工作流 ID；迁移失败时保留 A。任务历史不迁移，任务使用自己的不可变快照和 manifest。
+
+## 工作流快照与任务快照
+
+临时工作流快照是用户当前的可编辑工作区，来源只有两种：从外部 JSON 导入，或从工作流库复制加载。快照可以包含 API 工作流、输入配置、默认值、账号/workflowId 和当前提示词组，但未执行“保存到工作流库”前不进入工作流注册索引。
+
+任务快照是在任务提交时从临时工作流快照生成的不可变副本，保存于任务目录中的 `workflow_api.json`、`prompt_group.json` 和 `manifest.json`。任务快照独立于工作流库；之后删除或替换工作流库条目，不得修改已提交任务的工作流、提示词组、执行参数或产物。历史统计和评分也应读取任务快照中的工作流身份信息，不能依赖被删除的库条目仍然存在。
 
 ## 工作流与账号关系
 
@@ -71,7 +80,7 @@ server.py  ── HTTP API / 静态文件
 ## 任务生命周期
 
 ```text
-导入/加载草稿
+创建/加载临时工作流快照
       ▼
 本地等待队列 ── 有并发槽位 ──▶ 远程提交
       ▲                          │

@@ -25,6 +25,9 @@ def test_compare_subpage_keeps_the_outputs_navigation_context():
     assert '选择本地文件' not in page
     assert 'data-compare-mode="split"' in page
     assert 'data-compare-mode="overlay"' in page
+    assert 'id="toggleCompareFullscreen"' in page
+    assert 'id="compareFullscreenClose"' in page
+    assert "视频会先缩放到同一显示尺寸" in page
 
 
 def test_compare_runtime_supports_local_files_output_assets_and_drop_zones():
@@ -48,6 +51,14 @@ def test_compare_runtime_supports_local_files_output_assets_and_drop_zones():
     assert 'D 后退一帧 · F 前进一帧' in script
     assert 'video.play()' in script
     assert 'currentTime' in script
+    assert 'video.videoWidth' in script and 'video.videoHeight' in script
+    assert 'function syncVideoDisplaySize()' in script
+    assert 'Math.max.apply(Math, dimensions.map' in script
+    assert '--compare-video-display-width' in script and '--compare-video-display-height' in script
+    assert 'loadedmetadata", syncVideoDisplaySize' in script
+    assert 'function toggleCompareFullscreen()' in script
+    assert 'compare-fullscreen-open' in script
+    assert 'event.key === "Escape"' in script
     assert 'compare-divider-handle' not in script
     assert '.compare-divider' in styles
     assert 'pointer-events: auto' in styles
@@ -57,6 +68,14 @@ def test_compare_runtime_supports_local_files_output_assets_and_drop_zones():
     assert ':root[data-theme="light"] .compare-mode.active' in styles
     assert '.compare-split-view' in styles
     assert '.compare-overlay-layer.is-first' in styles
+    assert '.compare-transform > video.is-resolution-normalized' in styles
+    assert 'width: var(--compare-video-display-width)' in styles
+    assert 'height: var(--compare-video-display-height)' in styles
+    assert '.compare-stage.is-fullscreen' in styles
+    assert '.compare-fullscreen-close' in styles
+    assert '.compare-stage.is-fullscreen .compare-overlay-label.is-second' in styles
+    assert 'background: var(--surface-control)' in styles
+    assert 'html.compare-fullscreen-open body' in styles or ':root.compare-fullscreen-open body' in styles
 
 
 def test_output_cards_can_be_dragged_into_content_comparison():

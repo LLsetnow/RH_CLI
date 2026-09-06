@@ -2265,27 +2265,51 @@
       status.classList.toggle("is-ready", Boolean(item.translatedText));
     }
   }
-  function preserveTranslationWhitespace(source, translated) {
-    var value = String(translated || "").trim();
-    var leading = (String(source || "").match(/^\s*/) || [""])[0];
-    var trailing = (String(source || "").match(/\s*$/) || [""])[0];
-    return leading + value + trailing;
+  var chineseTextPattern = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff](?:[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]*[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])?/g;
+  function chineseTextSegments(text) {
+    var source = String(text || "");
+    var segments = [];
+    var match;
+    chineseTextPattern.lastIndex = 0;
+    while ((match = chineseTextPattern.exec(source))) {
+      segments.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+    }
+    chineseTextPattern.lastIndex = 0;
+    return segments;
+  }
+  function hasChineseText(item) {
+    if (!Array.isArray(item.segments)) return chineseTextSegments(item.text).length > 0;
+    return item.segments.some(function (segment) {
+      return segment.type !== "reference" && chineseTextSegments(segment.text).length > 0;
+    });
+  }
+  function translateChineseText(source) {
+    source = String(source || "");
+    var segments = chineseTextSegments(source);
+    if (!segments.length) return Promise.resolve(source);
+    return Promise.all(segments.map(function (segment) {
+      return jsonRequest("/api/prompt/translate", "POST", { text: segment.text }).then(function (data) {
+        var translated = String(data.translated_text || "").trim();
+        if (!translated) throw new Error("阿里云没有返回英文结果");
+        return translated;
+      });
+    })).then(function (translations) {
+      var result = source;
+      for (var index = segments.length - 1; index >= 0; index -= 1) {
+        var segment = segments[index];
+        result = result.slice(0, segment.start) + translations[index] + result.slice(segment.end);
+      }
+      return result;
+    });
   }
   function translateTextSegments(item) {
     if (!Array.isArray(item.segments)) {
-      return jsonRequest("/api/prompt/translate", "POST", { text: String(item.text || "") }).then(function (data) {
-        return String(data.translated_text || "").trim();
-      });
+      return translateChineseText(item.text);
     }
     return Promise.all(item.segments.map(function (segment) {
       if (segment.type === "reference") return Promise.resolve(null);
       var source = String(segment.text || "");
-      if (!source.trim()) return Promise.resolve(source);
-      return jsonRequest("/api/prompt/translate", "POST", { text: source }).then(function (data) {
-        var translated = String(data.translated_text || "").trim();
-        if (!translated) throw new Error("阿里云没有返回英文结果");
-        return preserveTranslationWhitespace(source, translated);
-      });
+      return translateChineseText(source);
     })).then(function (translatedSegments) {
       return item.segments.map(function (segment, index) {
         return segment.type === "reference" ? REFERENCE_SENTINEL_PREFIX + index + "__" : String(translatedSegments[index] == null ? segment.text || "" : translatedSegments[index]);
@@ -2303,6 +2327,7 @@
     button.disabled = true;
     button.classList.add("is-loading");
     button.querySelector("span").textContent = "翻译中…";
+    var containsChinese = hasChineseText(item);
     var hasReferences = Array.isArray(item.segments) && item.segments.some(function (segment) { return segment.type === "reference"; });
     if (hasReferences && !literalTextFromItem(item)) {
       item.translatedText = translationTemplate(item);
@@ -2322,7 +2347,7 @@
       saveState();
       updateTranslationDom(currentIndex);
       renderOutput();
-      showToast("自由文本已翻译为英文");
+      showToast(containsChinese ? "自由文本已翻译为英文" : "未检测到中文，英文内容保持不变");
     }).catch(function (error) {
       showToast("翻译失败：" + error.message, true);
     }).finally(function () {
@@ -3863,6 +3888,28 @@
 
   restoreLibraryViewState();
   bindEvents();
+  document.addEventListener("rh:video-frame-captured", function (event) {
+    var detail = event && event.detail || {};
+    var video = detail.video;
+    var asset = detail.asset;
+    var card = video && video.closest ? video.closest("[data-stage-index]") : null;
+    if (!card || !asset) return;
+    var index = Number(card.dataset.stageIndex);
+    var item = Number.isInteger(index) ? state.stage[index] : null;
+    if (!item || item.kind !== "media") return;
+    state.stage[index] = Object.assign({}, item, {
+      title: asset.name || "视频当前帧",
+      mediaPath: String(asset.path || ""),
+      mediaName: String(asset.name || "视频当前帧.png"),
+      mediaKind: "image",
+      mediaMime: "image/png",
+      previewKind: "image",
+      previewUrl: String(asset.preview_url || ""),
+    });
+    saveState();
+    renderStage();
+    showToast("已将视频当前帧替换为图片媒体");
+  });
   window.addEventListener("rh-focus-prompt-update", function (event) {
     var detail = event && event.detail && typeof event.detail === "object" ? event.detail : {};
     if (!promptApiReady) {

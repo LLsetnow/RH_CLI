@@ -37,6 +37,9 @@ def test_public_state_supports_page_scopes_without_changing_full_snapshot():
         def pose_media_import_type(self):
             return "depth"
 
+        def toolbox_codex_command(self):
+            return "this must not be exposed"
+
         def aliyun_translation_settings(self):
             return {}
 
@@ -48,6 +51,9 @@ def test_public_state_supports_page_scopes_without_changing_full_snapshot():
 
         def accounts(self):
             return []
+
+        def project_folders(self):
+            return [{"id": "project", "name": "样片", "path": ""}]
 
     class FakeManager:
         def public_keys(self, _account_id):
@@ -68,7 +74,7 @@ def test_public_state_supports_page_scopes_without_changing_full_snapshot():
         "workflows": ({"settings", "accounts"}, {"keys", "tasks", "telegram_inbound_workflows", "telegram_video_inbound_workflows"}),
         "prompt": ({"settings"}, {"accounts", "keys", "tasks", "telegram_inbound_workflows", "telegram_video_inbound_workflows"}),
         "outputs": ({"settings"}, {"accounts", "keys", "tasks", "telegram_inbound_workflows", "telegram_video_inbound_workflows"}),
-        "submit": ({"settings", "accounts", "keys", "tasks"}, {"telegram_inbound_workflows", "telegram_video_inbound_workflows"}),
+        "submit": ({"settings", "accounts", "keys", "tasks", "projects"}, {"telegram_inbound_workflows", "telegram_video_inbound_workflows"}),
         "settings": ({"settings", "accounts", "keys", "telegram_inbound_workflows", "telegram_video_inbound_workflows"}, {"tasks"}),
     }
 
@@ -76,9 +82,17 @@ def test_public_state_supports_page_scopes_without_changing_full_snapshot():
         snapshot = web_app.public_state(store, manager, scope=scope)
         assert required <= snapshot.keys()
         assert not (set(snapshot) & omitted)
+        assert "toolbox_codex_command" not in snapshot["settings"]
 
     full = web_app.public_state(store, manager)
     assert {"settings", "accounts", "keys", "tasks", "telegram_inbound_workflows", "telegram_video_inbound_workflows"} <= full.keys()
+
+
+def test_public_workflow_name_migrates_legacy_toolbox_labels_for_display():
+    assert web_app.public_workflow_name("工具箱 · 本地 Codex 图像生成") == "Codex 图像生成"
+    assert web_app.public_workflow_name("工具箱 _ 本地 Codex 图像生成") == "Codex 图像生成"
+    assert web_app.public_workflow_name("工具箱 · 深度图处理") == "深度图处理"
+    assert web_app.public_workflow_name("workflow_api.json") == "workflow_api.json"
 
 
 def test_inspect_workflow_finds_direct_files_and_prompts():
@@ -1540,6 +1554,7 @@ def test_submit_task_records_registered_workflow_id(tmp_path, monkeypatch):
         )
 
         assert task["registered_workflow_id"] == workflow_id
+        assert task["task_type"] == "workflow"
         assert store.task(task["id"])["registered_workflow_id"] == workflow_id
     finally:
         manager.close()
@@ -2042,9 +2057,9 @@ def test_workflow_library_records_can_be_bound_updated_and_deleted(tmp_path, mon
         )
         assert updated["name"] == "人物修复.json"
         assert updated["remote_workflow_id"] == "654321"
-        renamed_path = tmp_path / "data" / "workflows" / f"{workflow_id}_人物修复.json"
+        renamed_path = tmp_path / "data" / "workflows" / f"{workflow_id}.json"
+        assert renamed_path == workflow_path
         assert renamed_path.exists()
-        assert not workflow_path.exists()
         saved = json.loads(renamed_path.read_text(encoding="utf-8"))
         assert saved["__rh_meta__"] == {"workflowId": "654321", "accountId": account["id"]}
 
@@ -2097,6 +2112,11 @@ def test_workflow_library_saves_and_loads_a_prompt_group_package(tmp_path, monke
         assert record["prompt_group_id"] == prompt_group["id"]
         assert record["prompt_group_name"] == prompt_group["name"]
         assert record["prompt_group_path"] == str(package_path.resolve())
+        registry_entry = json.loads(
+            store._workflow_registry_entry_path(workflow_id).read_text(encoding="utf-8")
+        )
+        assert registry_entry["workflow_file"] == f"workflows/{workflow_id}.json"
+        assert registry_entry["prompt_group_file"] == f"workflows/{workflow_id}.prompt_group.json"
         assert store.workflow_detail(workflow_id)["prompt_group"] == prompt_group
 
         store.update_workflow(workflow_id, {"prompt_group": None})
@@ -2112,7 +2132,7 @@ def test_workflow_library_saves_and_loads_a_prompt_group_package(tmp_path, monke
         store._db.close()
 
 
-def test_telegram_submission_repairs_stale_workflow_filename(tmp_path, monkeypatch):
+def test_telegram_submission_migrates_legacy_workflow_to_stable_path(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
     manager = web_app.TaskManager(store)
@@ -2138,7 +2158,7 @@ def test_telegram_submission_repairs_stale_workflow_filename(tmp_path, monkeypat
             submission_source="telegram",
         )
 
-        expected_path = tmp_path / "data" / "workflows" / f"{workflow_id}_telegram-name.json"
+        expected_path = tmp_path / "data" / "workflows" / f"{workflow_id}.json"
         assert task["workflow_name"] == "telegram-name.json"
         assert Path(task["workflow_path"]) == expected_path.resolve()
         assert expected_path.is_file()
@@ -2191,7 +2211,7 @@ def test_workflow_folder_can_be_renamed_without_changing_membership(tmp_path, mo
         store._db.close()
 
 
-def test_rename_workflow_changes_json_filename_and_registry_name(tmp_path, monkeypatch):
+def test_rename_workflow_changes_registry_name_without_moving_json(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
     try:
@@ -2202,10 +2222,10 @@ def test_rename_workflow_changes_json_filename_and_registry_name(tmp_path, monke
 
         renamed = store.rename_workflow(workflow_id, "首帧工作流")
 
-        renamed_path = tmp_path / "data" / "workflows" / f"{workflow_id}_首帧工作流.json"
+        renamed_path = tmp_path / "data" / "workflows" / f"{workflow_id}.json"
         assert renamed["name"] == "首帧工作流.json"
         assert renamed["workflow_path"] == str(renamed_path.resolve())
-        assert not workflow_path.exists()
+        assert workflow_path == renamed_path
         assert renamed_path.exists()
         assert store.workflow_record(workflow_id)["name"] == "首帧工作流.json"
     finally:
@@ -2264,8 +2284,13 @@ def test_legacy_workflow_registry_is_readable_and_migrates_on_write(tmp_path, mo
             "workflows": [{"id": "wf_legacy123", "file": "workflow-registry/wf_legacy123.json"}],
         }
         entry_path = store._workflow_registry_entry_path("wf_legacy123")
-        assert json.loads(entry_path.read_text(encoding="utf-8")) == legacy_record
-        assert store._read_workflow_registry() == [legacy_record]
+        assert json.loads(entry_path.read_text(encoding="utf-8")) == {
+            **legacy_record,
+            "workflow_file": "workflows/wf_legacy123.json",
+        }
+        assert store._read_workflow_registry() == [
+            {**legacy_record, "workflow_file": "workflows/wf_legacy123.json"}
+        ]
     finally:
         store._db.close()
 
@@ -2328,7 +2353,7 @@ def test_task_workflow_copy_is_not_added_to_workflow_library(tmp_path, monkeypat
             register=False,
         )
 
-        assert workflow_path.is_file()
+        assert not workflow_path.exists()
         assert store.workflows() == []
         with pytest.raises(RhCliError) as excinfo:
             store.workflow_record(workflow_id)
@@ -2358,6 +2383,10 @@ def test_load_task_workflow_returns_saved_workflow_and_task_inputs(tmp_path, mon
                 "remote_workflow_id": "123456",
                 "output_dir": str(tmp_path / "out"),
             }
+        )
+        store.save_task_workflow_snapshot(
+            {"id": "task_load", "output_dir": str(tmp_path / "out")},
+            {"2": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0, "mode": "randomize"}}},
         )
 
         loaded = store.load_task_workflow("task_load")
@@ -2397,6 +2426,13 @@ def test_startup_recovery_marks_existing_local_outputs_completed(tmp_path, monke
     (task_folder / "workflow_api.json").write_text("{}", encoding="utf-8")
     (task_folder / "output_1.png").write_bytes(b"png")
     (task_folder / ".output_2.mp4.part").write_bytes(b"partial")
+    store.update_task(
+        task_id,
+        outputs_json=json.dumps(
+            [{"kind": "file", "path": str(task_folder / "output_1.png"), "name": "output_1.png"}],
+            ensure_ascii=False,
+        ),
+    )
     store._db.close()
 
     recovered_store = web_app.LocalStore()
@@ -2409,6 +2445,43 @@ def test_startup_recovery_marks_existing_local_outputs_completed(tmp_path, monke
         assert recovered["outputs"][0]["name"] == "output_1.png"
         assert len(recovered["outputs"]) == 1
         assert "本地产物恢复" in recovered["progress"]
+    finally:
+        recovered_store._db.close()
+
+
+def test_startup_recovery_does_not_complete_from_unrecorded_partial_outputs(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    output_dir = tmp_path / "out"
+    task_id = "task_partial_recover"
+    store = web_app.LocalStore()
+    store.create_task(
+        {
+            "id": task_id,
+            "created_at": 1,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": "recover.json",
+            "files": {},
+            "prompts": {},
+            "key_id": None,
+            "remote_workflow_id": "123456",
+            "output_dir": str(output_dir),
+        }
+    )
+    store.update_task(task_id, status="running", remote_task_id="remote-partial")
+    task_folder = output_dir / task_id
+    task_folder.mkdir(parents=True)
+    (task_folder / "workflow_api.json").write_text("{}", encoding="utf-8")
+    (task_folder / "output_1.png").write_bytes(b"png")
+    store._db.close()
+
+    recovered_store = web_app.LocalStore()
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = recovered_store
+    try:
+        manager._recover_tasks_on_startup()
+        recovered = recovered_store.task(task_id)
+        assert recovered["status"] == "recovering"
+        assert "记录不完整" in recovered["progress"]
     finally:
         recovered_store._db.close()
 
@@ -2687,9 +2760,25 @@ def test_telegram_tasks_are_backfilled_and_new_direct_tasks_use_telegrame_projec
             "project_path": str(tmp_path / "old-project"),
         }
     )
+    store.create_task(
+        {
+            "id": "task_legacy_telegram_input_path",
+            "created_at": 2,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": "legacy-telegram-input.json",
+            "files": {"13:image": str(tmp_path / "telegram-inputs" / "telegram-image.jpg")},
+            "prompts": {},
+            "key_id": None,
+            "remote_workflow_id": "123456",
+            "output_dir": str(tmp_path / "old-project" / "output"),
+            "project_id": "project_old",
+            "project_name": "旧项目",
+            "project_path": str(tmp_path / "old-project"),
+        }
+    )
     store._db.execute(
-        "UPDATE tasks SET submission_source='telegram' WHERE id=?",
-        ("task_legacy_telegram_project",),
+        "UPDATE tasks SET stage_logs_json=? WHERE id=?",
+        (json.dumps([{"stage": "telegram", "message": "已从 Telegram 接收图片并提交工作流"}], ensure_ascii=False), "task_legacy_telegram_project"),
     )
     store._db.commit()
     store._db.close()
@@ -2700,6 +2789,10 @@ def test_telegram_tasks_are_backfilled_and_new_direct_tasks_use_telegrame_projec
         assert legacy["project_name"] == "Telegrame"
         assert legacy["project_id"] == recovered_store.telegram_project()["id"]
         assert recovered_store.project_folder(legacy["project_id"])["name"] == "Telegrame"
+        legacy_input = recovered_store.task("task_legacy_telegram_input_path")
+        assert legacy_input["submission_source"] == "telegram"
+        assert legacy_input["project_name"] == "Telegrame"
+        assert legacy_input["project_id"] == recovered_store.telegram_project()["id"]
 
         recovered_store.create_task(
             {
@@ -2863,12 +2956,17 @@ def test_load_task_workflow_backfills_replay_paths_and_prefers_registered_workfl
             "registered.json",
             json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
         )
-        temporary_id, temporary_path, _ = store.save_workflow(
+        temporary_id, _, _ = store.save_workflow(
             "temporary.json",
             json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
             register=False,
         )
         assert temporary_id != registered_id
+        temporary_path = tmp_path / "temporary.json"
+        temporary_path.write_text(
+            json.dumps({"1": {"class_type": "SaveImage", "inputs": {}}}),
+            encoding="utf-8",
+        )
         task = {
             "id": "task_legacy_replay",
             "created_at": 1,
@@ -2882,6 +2980,10 @@ def test_load_task_workflow_backfills_replay_paths_and_prefers_registered_workfl
             "output_dir": str(tmp_path / "external-output"),
         }
         store.create_task(task)
+        store.save_task_workflow_snapshot(
+            task,
+            {"1": {"class_type": "SaveImage", "inputs": {}}},
+        )
         store.save_task_prompt_group_snapshot(task, group)
 
         loaded = store.load_task_workflow(task["id"])
@@ -2963,8 +3065,10 @@ def test_workflow_name_stays_clean_after_repeated_export_and_submit(tmp_path, mo
         )
 
         assert task["workflow_name"] == "10Eros二采0901_api.json"
-        assert Path(task["workflow_path"]).name.endswith("_10Eros二采0901_api.json")
         loaded = store.load_task_workflow(task["id"])
+        assert Path(task["workflow_path"]).name == "workflow_api.json"
+        assert task["local_workflow_id"] == loaded["workflow_id"]
+        assert not (web_app.WORKFLOW_ROOT / f"{task['local_workflow_id']}.json").exists()
         assert loaded["filename"] == "10Eros二采0901_api.json"
     finally:
         manager.close()

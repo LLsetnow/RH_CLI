@@ -120,7 +120,7 @@
             </div>
             <div class="outputs-toolbar-actions">
               <button id="exportCaseOutputs" class="secondary-button button-compact case-export-button" type="button" disabled aria-label="导出所有案例" title="没有带“案例”标签的媒体文件可导出"><span aria-hidden="true">⇩</span> 导出所有案例 <span id="caseOutputCount">0</span></button>
-              <button id="deleteOneStarOutputs" class="secondary-button button-compact danger-button" type="button" disabled aria-label="删除所有一星成片" title="没有一星成片可删除"><span aria-hidden="true">⌫</span> 删除一星成片 <span id="oneStarOutputCount">0</span></button>
+              <button id="deleteOneStarOutputs" class="secondary-button button-compact danger-button" type="button" disabled aria-label="删除一星成片" title="没有一星成片可删除"><span aria-hidden="true">⌫</span> 删除一星成片 <span id="oneStarOutputCount">0</span></button>
               <a class="secondary-button button-compact tool-entry-link" href="/outputs/compare">内容对比</a>
               <button id="refreshOutputs" class="secondary-button button-compact" type="button"><span aria-hidden="true">↻</span> 刷新</button>
             </div>
@@ -172,6 +172,7 @@
               </span>
             </div>
           </div>
+          <div id="outputWorkflowFilters" class="output-workflow-filters" role="group" aria-label="按工作流筛选" hidden></div>
         </section>
 
         <section id="outputGrid" class="output-grid" aria-live="polite">

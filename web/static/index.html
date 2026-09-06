@@ -8,6 +8,7 @@
     <title>RH Workflow Desk</title>
     <link rel="stylesheet" href="/static/app.css" />
     <link rel="stylesheet" href="/static/workflows.css" />
+    <link rel="stylesheet" href="/static/toolbox.css" />
     <script>
       (function () {
         try {
@@ -81,15 +82,24 @@
       </nav>
 
       <section class="intro-block">
-        <div class="eyebrow">RUNNINGHUB / API WORKFLOW</div>
-        <h1>把工作流交给队列，<br /><em>让本地输入保持在手边。</em></h1>
-        <p>上传 API 格式工作流后，系统会识别文件输入和提示词节点。提交、轮询、下载都在本机完成。</p>
+        <div class="eyebrow">TASK SUBMIT / WORKSPACE</div>
+        <h1>把所有任务，<br /><em>收进一个提交台。</em></h1>
+        <p>在三个功能区之间切换：提交 RunningHub 工作流、直接生成 Codex 图像，或把图片 / 视频处理成深度与骨骼素材。所有结果统一进入任务队列和成片库。</p>
       </section>
 
       <div class="workspace">
         <main class="main-column">
+          <div class="submit-workspace-tabs-sticky">
+            <div class="submit-workspace-tabs-heading"><div class="section-kicker">SUBMIT WORKSPACE</div><span>选择功能区</span></div>
+            <div id="submitWorkspaceTabs" class="submit-workspace-tabs" role="tablist" aria-label="任务提交功能区">
+              <button id="submitWorkspaceTabSubmit" class="submit-workspace-tab active" data-submit-section="submit" type="button" role="tab" aria-selected="true" aria-controls="submitWorkspacePanelSubmit"><span class="submit-workspace-tab-index">01</span><span><strong>任务提交</strong><small>RunningHub 工作流</small></span></button>
+              <button id="submitWorkspaceTabCodex" class="submit-workspace-tab" data-submit-section="codex" type="button" role="tab" aria-selected="false" aria-controls="submitWorkspacePanelCodex"><span class="submit-workspace-tab-index">02</span><span><strong>Codex 图像生成</strong><small>文本 + 参考图</small></span></button>
+              <button id="submitWorkspaceTabMedia" class="submit-workspace-tab" data-submit-section="media" type="button" role="tab" aria-selected="false" aria-controls="submitWorkspacePanelMedia"><span class="submit-workspace-tab-index">03</span><span><strong>深度与骨骼</strong><small>图片 + 视频</small></span></button>
+            </div>
+          </div>
 
-          <section class="panel workflow-panel">
+          <div id="submitWorkspacePanels" class="submit-workspace-panels">
+          <section id="submitWorkspacePanelSubmit" class="panel workflow-panel submit-workspace-panel" data-submit-section="submit" role="tabpanel" aria-labelledby="submitWorkspaceTabSubmit">
             <div class="panel-heading">
               <div>
                 <div class="section-kicker">01 / WORKFLOW</div>
@@ -97,12 +107,10 @@
               </div>
               <div class="workflow-heading-actions">
                 <div class="workflow-library-actions" aria-label="工作流库操作">
-                  <button id="configureWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>配置输入</button>
-                  <button id="renameWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>重命名</button>
-                  <button id="saveWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>保存</button>
+                  <button id="editWorkflowSnapshotButton" class="secondary-button button-compact" type="button" hidden>编辑快照</button>
+                  <button id="saveWorkflowLibraryButton" class="secondary-button button-compact" type="button" hidden>保存到工作流库</button>
                   <button id="exportWorkflowButton" class="secondary-button button-compact" type="button" hidden>导出</button>
                 </div>
-                <button id="openWorkflowJsonButton" class="step-pill workflow-json-button" type="button" aria-label="查看和编辑当前工作流 JSON" title="查看和编辑当前工作流 JSON">JSON</button>
               </div>
             </div>
             <label class="dropzone" id="workflowDropzone" for="workflowFile">
@@ -124,20 +132,100 @@
 
             <div class="submit-strip" id="submitStrip" hidden>
               <div class="submit-config">
-                <label class="field-label" for="instanceType">提交机型</label>
-                <select id="instanceType">
-                  <option value="default">Standard · 24GB · ¥4.70572 / 小时</option>
-                  <option value="plus">Plus · 48GB · ¥6.05020 / 小时</option>
-                  <option value="ultra">Ultra · 84GB · ¥9.07531 / 小时</option>
-                </select>
-                <span class="field-hint">通过 instanceType 指定，默认使用 Standard。</span>
-                <span class="field-hint submit-shortcut">Ctrl + Enter 快捷提交</span>
+                <div class="submit-field submit-instance-field">
+                  <label class="field-label" for="instanceType">提交机型</label>
+                  <select id="instanceType">
+                    <option value="default">Standard · 24GB</option>
+                    <option value="plus">Plus · 48GB</option>
+                    <option value="ultra">Ultra · 84GB</option>
+                  </select>
+                </div>
+                <div class="submit-field submit-project-field">
+                  <label class="field-label" for="taskProject">项目选择</label>
+                  <select id="taskProject">
+                    <option value="">自动归类</option>
+                    <option value="__unclassified__">未归类</option>
+                  </select>
+                </div>
               </div>
+              <div class="submit-repeat-control">
+                  <label class="field-label" for="submitRepeatCount">提交次数</label>
+                  <input id="submitRepeatCount" type="number" min="1" max="20" step="1" value="1" inputmode="numeric" disabled />
+                </div>
               <button id="submitButton" class="primary-button" type="button">
                 <span class="button-glyph">→</span><span class="button-label">加入任务队列</span>
               </button>
             </div>
           </section>
+
+          <section id="submitWorkspacePanelCodex" class="panel toolbox-block submit-workspace-panel" data-submit-section="codex" role="tabpanel" aria-labelledby="submitWorkspaceTabCodex" hidden>
+            <div class="toolbox-block-heading">
+              <div class="toolbox-block-number">02</div>
+              <div><div class="section-kicker">CODEX / IMAGE GENERATION</div><h2>Codex 图像生成</h2></div>
+              <span class="toolbox-block-chip">AUTO</span>
+            </div>
+            <p class="toolbox-description">输入一段要求，可附带任意数量参考图。处理结束后，结果会自动记录为一个本地任务并进入成片库。</p>
+            <div class="toolbox-auto-command-note">
+              <span class="toolbox-auto-command-mark" aria-hidden="true">✦</span>
+              <span><strong>自动调用 Codex 图像生成</strong><small>应用会根据生成要求和参考图自动准备任务，无需填写或理解命令。</small></span>
+              <span class="toolbox-auto-command-key">AUTO</span>
+            </div>
+            <div class="toolbox-field-group toolbox-image-options">
+              <div class="toolbox-field-heading"><span>画幅设置</span><span>RESOLUTION · RATIO</span></div>
+              <div class="toolbox-select-grid">
+                <label class="toolbox-select-field" for="codexImageResolution"><span>分辨率</span><select id="codexImageResolution"><option value="1k" selected>1K</option><option value="2k">2K</option><option value="4k">4K</option></select></label>
+                <label class="toolbox-select-field" for="codexImageSize"><span>比例</span><select id="codexImageSize"><option value="9:16" selected>9:16 · 竖屏</option><option value="1:1">1:1 · 方形</option><option value="16:9">16:9 · 横屏</option><option value="4:3">4:3 · 标准</option><option value="3:4">3:4 · 竖幅</option><option value="3:2">3:2 · 横幅</option><option value="2:3">2:3 · 竖幅</option><option value="4:5">4:5 · 竖幅</option><option value="5:4">5:4 · 横幅</option><option value="2:1">2:1 · 横幅</option><option value="1:2">1:2 · 竖幅</option><option value="3:1">3:1 · 超宽</option><option value="1:3">1:3 · 超长</option><option value="21:9">21:9 · 超宽</option><option value="9:21">9:21 · 超长</option><option value="auto">自动</option></select></label>
+              </div>
+            </div>
+            <div class="toolbox-field-group">
+              <div class="toolbox-field-heading"><span>参考图</span><span class="toolbox-count"><strong id="referenceCount">0</strong> / 不限</span></div>
+              <input id="referencePicker" class="visually-hidden" type="file" accept="image/*" multiple />
+              <div id="referenceDropzone" class="toolbox-dropzone" tabindex="0" role="button" aria-label="添加参考图">
+                <span class="toolbox-drop-mark" aria-hidden="true">＋</span><span><strong>拖入参考图</strong><small>也可以点击选择；0 张也可以直接出图</small></span><span class="toolbox-drop-key">IMAGE</span>
+              </div>
+              <div id="referenceGrid" class="toolbox-reference-grid" aria-live="polite"><div class="toolbox-empty-hint">暂未添加参考图</div></div>
+            </div>
+            <label class="toolbox-field-group" for="codexPrompt"><span class="toolbox-field-heading"><span>生成要求</span><span>TEXT</span></span><textarea id="codexPrompt" rows="5" placeholder="描述画面、主体、风格和你希望 Codex 处理的重点…"></textarea></label>
+            <div class="toolbox-submit-row"><button id="submitCodexImage" class="primary-button" type="button">运行 Codex 图像生成 <span aria-hidden="true">→</span></button><span id="codexTaskStatus" class="toolbox-inline-status" role="status"></span><span id="codexTaskId" class="toolbox-inline-task-id" aria-label="任务 ID"></span></div>
+            <div id="codexTaskResult" class="toolbox-task-result" hidden></div>
+          </section>
+
+          <section id="submitWorkspacePanelMedia" class="panel toolbox-block submit-workspace-panel" data-submit-section="media" role="tabpanel" aria-labelledby="submitWorkspaceTabMedia" hidden>
+            <div class="toolbox-block-heading">
+              <div class="toolbox-block-number">03</div>
+              <div><div class="section-kicker">DEPTH / SKELETON MAP</div><h2>深度与骨骼</h2></div>
+              <span class="toolbox-block-chip">IMAGE + VIDEO</span>
+            </div>
+            <p class="toolbox-description">导入单张图片或完整视频，选择输出类型。视频会逐帧处理，并编码成与原视频节奏一致的新视频。</p>
+            <input id="mediaPicker" class="visually-hidden" type="file" accept="image/*,video/*" />
+            <div class="toolbox-media-input-card">
+              <div class="toolbox-media-input-head">
+                <div><strong>Load Image / Video</strong><small>ToolboxMediaInput</small></div>
+                <span class="toolbox-media-input-chip">IMAGE · VIDEO</span>
+              </div>
+              <div id="mediaDropzone" class="toolbox-dropzone toolbox-media-dropzone" tabindex="0" role="button" aria-label="添加图片或视频">
+                <span class="toolbox-drop-mark" aria-hidden="true">↥</span><span><strong>拖入图片或视频</strong><small>图片处理一张；视频处理全部帧</small></span><span class="toolbox-drop-key">MEDIA</span>
+              </div>
+              <div class="toolbox-media-path-row">
+                <span id="mediaPathLabel" class="toolbox-media-path" title="尚未选择本地媒体">尚未选择本地媒体</span>
+                <button id="mediaChooseButton" class="secondary-button button-compact" type="button">选择文件</button>
+                <button id="mediaOpenFolderButton" class="secondary-button button-compact" type="button" hidden>打开文件夹</button>
+              </div>
+              <div id="mediaPreview" class="toolbox-media-preview"><div class="toolbox-empty-hint">等待输入媒体</div></div>
+              <div id="mediaMeta" class="toolbox-media-meta" hidden></div>
+            </div>
+            <div class="toolbox-field-group">
+              <div class="toolbox-field-heading"><span>输出类型</span><span>PROCESSOR</span></div>
+              <div id="toolboxModeTabs" class="toolbox-mode-tabs" role="tablist" aria-label="输出类型">
+                <button class="toolbox-mode-tab active" data-mode="depth" type="button" role="tab" aria-selected="true"><span class="mode-swatch mode-swatch-depth"></span>深度图<small>黑白灰</small></button>
+                <button class="toolbox-mode-tab" data-mode="skeleton" type="button" role="tab" aria-selected="false"><span class="mode-swatch mode-swatch-skeleton"></span>骨骼图<small>彩色</small></button>
+                <button class="toolbox-mode-tab" data-mode="depth_skeleton" type="button" role="tab" aria-selected="false"><span class="mode-swatch mode-swatch-combined"></span>深度 + 骨骼<small>同一张图</small></button>
+              </div>
+            </div>
+            <div class="toolbox-submit-row"><button id="submitMediaProcess" class="primary-button" type="button">生成处理结果 <span aria-hidden="true">→</span></button><span id="mediaTaskStatus" class="toolbox-inline-status" role="status"></span><span id="mediaTaskId" class="toolbox-inline-task-id" aria-label="任务 ID"></span></div>
+            <div id="mediaTaskResult" class="toolbox-task-result" hidden></div>
+          </section>
+          </div>
 
         </main>
 
@@ -146,7 +234,7 @@
             <span class="process-index">01—03</span>
             <button class="process-step active" type="button" data-process-step="workflow">导入工作流</button>
             <span class="process-arrow" aria-hidden="true">→</span>
-            <button class="process-step" type="button" data-process-step="inputs">配置输入</button>
+            <button class="process-step" type="button" data-process-step="inputs">输入节点</button>
             <span class="process-arrow" aria-hidden="true">→</span>
             <button class="process-step" type="button" data-process-step="queue">任务队列</button>
           </nav>
@@ -373,82 +461,77 @@
         <div id="modalOutputs" class="modal-outputs"></div>
       </div>
     </div>
-    <div id="workflowJsonModal" class="modal-backdrop" hidden>
-      <section class="workflow-json-modal dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowJsonTitle">
+    <div id="workflowEditorModal" class="modal-backdrop" hidden>
+      <section class="workflow-modal-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowEditorTitle">
         <div class="modal-heading">
           <div>
-            <div class="section-kicker">WORKFLOW JSON</div>
-            <h2 id="workflowJsonTitle">查看与编辑 JSON</h2>
+            <div class="section-kicker">WORKFLOW RECORD</div>
+            <h2 id="workflowEditorTitle">编辑当前工作流快照</h2>
           </div>
-          <button id="closeWorkflowJson" class="close-button" type="button" aria-label="关闭 JSON 编辑器">×</button>
+          <button id="closeWorkflowEditor" class="close-button" type="button" aria-label="关闭工作流编辑器">×</button>
         </div>
-        <p class="workflow-json-hint">直接编辑当前工作流的 API JSON。应用后会重新扫描输入节点；如需写入工作流库，请再点击上方“保存”。</p>
-        <div class="workflow-json-meta"><code id="workflowJsonFilename">workflow_api.json</code><span id="workflowJsonState">当前提交工作流</span></div>
-        <textarea id="workflowJsonEditor" class="workflow-json-editor" aria-label="当前工作流 API JSON" spellcheck="false" required></textarea>
-        <div id="workflowJsonStatus" class="workflow-json-status" role="status" aria-live="polite"></div>
-        <div class="workflow-json-toolbar">
-          <button id="restoreWorkflowJsonButton" class="secondary-button button-compact" type="button">恢复当前</button>
-          <button id="formatWorkflowJsonButton" class="secondary-button button-compact" type="button">格式化</button>
-        </div>
-        <div class="dialog-actions">
-          <button id="cancelWorkflowJson" class="secondary-button" type="button">取消</button>
-          <button id="applyWorkflowJson" class="primary-button" type="button"><span class="button-glyph">✓</span><span>应用修改</span></button>
-        </div>
-      </section>
-    </div>
-    <div id="workflowConfigModal" class="modal-backdrop" hidden>
-      <section class="workflow-config-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowConfigTitle">
-        <div class="modal-heading">
-          <div>
-            <div class="section-kicker">INPUT CONFIGURATION</div>
-            <h2 id="workflowConfigTitle">配置输入节点</h2>
+        <p id="workflowEditorHint" class="workflow-editor-hint">这里编辑的是当前任务提交用的临时工作流快照；应用后可继续配置输入，保存到工作流库才会生成新的库条目。</p>
+        <form id="workflowEditorForm" class="workflow-editor-form">
+          <label class="field-group">
+            <span class="field-label">工作流名称</span>
+            <input id="workflowRecordName" type="text" required maxlength="160" placeholder="例如：人物修复 API" />
+          </label>
+          <div class="workflow-editor-grid">
+            <label class="field-group">
+              <span class="field-label">所属账号</span>
+              <select id="workflowRecordAccount">
+                <option value="">未绑定账号</option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span class="field-label">RunningHub workflowId</span>
+              <input id="workflowRecordRemoteId" type="text" inputmode="numeric" autocomplete="off" placeholder="可稍后补充" />
+            </label>
           </div>
-          <button id="closeWorkflowConfig" class="close-button" type="button" aria-label="关闭">×</button>
-        </div>
-        <p id="workflowConfigHint" class="workflow-editor-hint">自动识别模式只读取工作流原始输入；切换到手动选择后，已添加的节点可编辑默认值。</p>
-        <label class="workflow-config-mode field-group">
-          <span class="field-label">输入识别模式</span>
-          <select id="workflowConfigMode">
-            <option value="auto">自动识别文件、提示词、尺寸和 RandomNoise</option>
-            <option value="manual">手动选择需要在任务提交页显示的输入</option>
-          </select>
-        </label>
-        <div id="workflowConfigBuilder" class="workflow-config-builder">
-          <div class="workflow-config-builder-heading">
-            <div><strong>添加输入字段</strong><span>可以把任意标量节点字段加入任务提交面板。</span></div>
+          <section class="workflow-editor-config" aria-labelledby="workflowEditorConfigLabel">
+            <div class="workflow-editor-json-heading">
+              <div>
+                <span id="workflowEditorConfigLabel" class="field-label">配置输入</span>
+                <span class="field-hint">沿用工作流页的输入配置编辑器，修改后会更新当前快照的输入节点。</span>
+              </div>
+            </div>
+            <label class="workflow-config-mode field-group">
+              <span class="field-label">输入识别模式</span>
+              <select id="workflowConfigMode">
+                <option value="auto">自动识别文件、提示词、尺寸和 RandomNoise</option>
+                <option value="manual">手动选择需要在任务提交页显示的输入</option>
+              </select>
+            </label>
+            <div id="workflowConfigBuilder" class="workflow-config-builder">
+              <div class="workflow-config-builder-heading">
+                <div><strong>添加输入字段</strong><span>可以把任意标量节点字段加入任务提交面板。</span></div>
+              </div>
+              <div class="workflow-config-add-grid">
+                <label class="field-group"><span class="field-label">节点</span><select id="workflowConfigNode"></select></label>
+                <label class="field-group"><span class="field-label">字段</span><select id="workflowConfigField"></select></label>
+                <button id="addWorkflowConfigItem" class="secondary-button button-compact" type="button">＋ 添加</button>
+              </div>
+            </div>
+            <div id="workflowConfigItems" class="workflow-config-items"></div>
+          </section>
+          <section class="workflow-editor-json" aria-labelledby="workflowEditorJsonLabel">
+            <div class="workflow-editor-json-heading">
+              <div>
+                <span id="workflowEditorJsonLabel" class="field-label">JSON 文件</span>
+                <span class="field-hint">可直接编辑 API 格式 JSON；应用后会重新分析工作流输入。</span>
+              </div>
+              <div class="workflow-editor-json-actions">
+                <button id="restoreWorkflowJson" class="secondary-button" type="button">复原</button>
+              </div>
+            </div>
+            <textarea id="workflowEditorJson" aria-label="当前工作流 API JSON" spellcheck="false" required></textarea>
+            <div id="workflowJsonStatus" class="workflow-json-status" role="status" aria-live="polite"></div>
+          </section>
+          <div class="dialog-actions">
+            <button id="cancelWorkflowEditor" class="secondary-button" type="button">取消</button>
+            <button id="saveWorkflowRecord" class="primary-button" type="submit"><span class="button-glyph">✓</span><span>应用到当前快照</span></button>
           </div>
-          <div class="workflow-config-add-grid">
-            <label class="field-group"><span class="field-label">节点</span><select id="workflowConfigNode"></select></label>
-            <label class="field-group"><span class="field-label">字段</span><select id="workflowConfigField"></select></label>
-            <button id="addWorkflowConfigItem" class="secondary-button button-compact" type="button">＋ 添加</button>
-          </div>
-        </div>
-        <div id="workflowConfigItems" class="workflow-config-items"></div>
-        <div class="dialog-actions">
-          <button id="cancelWorkflowConfig" class="secondary-button" type="button">取消</button>
-          <button id="saveWorkflowConfig" class="primary-button" type="button"><span class="button-glyph">✓</span><span>保存配置与默认值</span></button>
-        </div>
-      </section>
-    </div>
-    <div id="workflowRenameModal" class="modal-backdrop" hidden>
-      <section class="workflow-rename-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowRenameTitle">
-        <div class="modal-heading">
-          <div>
-            <div class="section-kicker">RENAME WORKFLOW</div>
-            <h2 id="workflowRenameTitle">重命名工作流</h2>
-          </div>
-          <button id="closeWorkflowRename" class="close-button" type="button" aria-label="关闭">×</button>
-        </div>
-        <p class="modal-description">只修改本地工作流文件名，不会改变工作流节点和输入配置。</p>
-        <label class="field-group workflow-rename-field" for="workflowRenameInput">
-          <span class="field-label">文件名</span>
-          <input id="workflowRenameInput" type="text" autocomplete="off" spellcheck="false" placeholder="例如：人物首帧生成.json" />
-          <span class="field-hint">无需填写路径；未填写扩展名时会自动补充 .json。</span>
-        </label>
-        <div class="dialog-actions">
-          <button id="cancelWorkflowRename" class="secondary-button" type="button">取消</button>
-          <button id="saveWorkflowRename" class="primary-button" type="button">保存名称</button>
-        </div>
+        </form>
       </section>
     </div>
     <div id="imagePreviewModal" class="modal-backdrop image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" hidden>

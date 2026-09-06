@@ -6,6 +6,7 @@ import json
 import threading
 import zipfile
 from pathlib import Path
+from urllib.parse import urlencode
 
 import pytest
 
@@ -22,6 +23,195 @@ def _configure_web_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "DB_PATH", data_root / "tasks.sqlite3")
     monkeypatch.setattr(web_app, "default_local_output_dir", lambda: data_root / "outputs")
     monkeypatch.setattr(web_server, "DATA_ROOT", data_root)
+
+
+@pytest.mark.parametrize("project_id, expected", [
+    ("project_a", {"a"}),
+    ("project_b", {"b"}),
+    ("__unclassified__", {"unclassified"}),
+    ("missing_project", set()),
+    ("", {"a", "b", "unclassified"}),
+])
+def test_bulk_output_actions_are_scoped_to_project_over_http(tmp_path, monkeypatch, project_id, expected):
+    _configure_web_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    server = web_server.AppServer(("127.0.0.1", 0))
+    paths = {}
+    for name, folder_id in [("a", "project_a"), ("b", "project_b"), ("unclassified", "")]:
+        task_folder = tmp_path / "outputs" / name
+        task_folder.mkdir(parents=True)
+        paths[name] = [task_folder / "case.mp4", task_folder / "keep.mp4"]
+        for path in paths[name]:
+            path.write_bytes(name.encode())
+        server.store.create_task({
+            "id": name, "created_at": 1,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": "workflow.json", "files": {}, "prompts": {},
+            "output_dir": str(tmp_path / "outputs"),
+            "project_id": folder_id, "project_name": folder_id,
+        })
+        server.store.update_task(name, outputs_json=json.dumps([
+            {"kind": "file", "path": str(paths[name][0]), "mime": "video/mp4", "rating": 1, "tags": ["案例"]},
+            {"kind": "file", "path": str(paths[name][1]), "mime": "video/mp4", "rating": 2},
+        ]))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    query = "?" + urlencode({"project_id": project_id})
+    try:
+        connection.request("GET", "/api/outputs/export/case" + query)
+        response = connection.getresponse()
+        payload = response.read()
+        if expected:
+            assert response.status == 200
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                assert set(archive.namelist()) == {f"workflow.json/{name}/case.mp4" for name in expected}
+        else:
+            assert response.status == 404
+            assert json.loads(payload)["code"] == "NO_CASE_OUTPUTS"
+
+        connection.request("DELETE", "/api/outputs/rating/1" + query)
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["deleted"] == len(expected)
+        assert payload["tasks_updated"] == len(expected)
+        for name, (case_path, keep_path) in paths.items():
+            assert case_path.exists() == (name not in expected)
+            assert keep_path.exists()
+            assert len(server.store.task(name)["outputs"]) == (1 if name in expected else 2)
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_bulk_output_actions_follow_current_filters_over_http(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    server = web_server.AppServer(("127.0.0.1", 0))
+    records = {
+        "match": {"project_id": "project_a", "workflow_name": "流程甲", "name": "目标片段.mp4", "tags": ["案例"], "mime": "video/mp4"},
+        "wrong_name": {"project_id": "project_a", "workflow_name": "流程甲", "name": "其他片段.mp4", "tags": ["案例"], "mime": "video/mp4"},
+        "wrong_type": {"project_id": "project_a", "workflow_name": "流程甲", "name": "目标图片.png", "tags": ["案例"], "mime": "image/png"},
+        "wrong_workflow": {"project_id": "project_a", "workflow_name": "流程乙", "name": "目标片段-乙.mp4", "tags": ["案例"], "mime": "video/mp4"},
+        "wrong_tag": {"project_id": "project_a", "workflow_name": "流程甲", "name": "目标 H.mp4", "tags": ["案例", "H"], "mime": "video/mp4"},
+        "other_project": {"project_id": "project_b", "workflow_name": "流程甲", "name": "目标片段-B.mp4", "tags": ["案例"], "mime": "video/mp4"},
+    }
+    paths = {}
+    for task_id, record in records.items():
+        task_folder = tmp_path / "outputs" / task_id
+        task_folder.mkdir(parents=True)
+        output_path = task_folder / record["name"]
+        output_path.write_bytes(task_id.encode())
+        paths[task_id] = output_path
+        server.store.create_task({
+            "id": task_id,
+            "created_at": 1,
+            "workflow_path": str(tmp_path / "workflow.json"),
+            "workflow_name": record["workflow_name"],
+            "files": {},
+            "prompts": {},
+            "output_dir": str(tmp_path / "outputs"),
+            "project_id": record["project_id"],
+            "project_name": record["project_id"],
+        })
+        server.store.update_task(task_id, outputs_json=json.dumps([
+            {
+                "kind": "file",
+                "path": str(output_path),
+                "name": record["name"],
+                "mime": record["mime"],
+                "rating": 1,
+                "tags": record["tags"],
+            }
+        ]))
+
+    query = "?" + urlencode({
+        "project_id": "project_a",
+        "search": "目标",
+        "type": "video",
+        "rating": "1",
+        "workflow": "流程甲",
+        "tag_case": "include",
+        "tag_h": "exclude",
+    })
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        connection.request("GET", "/api/outputs/export/case" + query)
+        response = connection.getresponse()
+        payload = response.read()
+        assert response.status == 200
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            assert archive.namelist() == [f"流程甲/match/目标片段.mp4"]
+
+        connection.request("DELETE", "/api/outputs/rating/1" + query)
+        response = connection.getresponse()
+        result = json.loads(response.read())
+        assert response.status == 200
+        assert result["deleted"] == 1
+        assert result["tasks_updated"] == 1
+        assert not paths["match"].exists()
+        for task_id in records:
+            if task_id != "match":
+                assert paths[task_id].exists()
+                assert len(server.store.task(task_id)["outputs"]) == 1
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+@pytest.mark.parametrize("selection", ["existing", "unclassified", "automatic", "deleted"])
+def test_task_submission_project_selection_over_http(tmp_path, monkeypatch, selection):
+    _configure_web_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    server = web_server.AppServer(("127.0.0.1", 0))
+    server.manager.close()  # Exercise local submission without dispatching remote jobs.
+    project = server.store.create_project_folder("所选项目")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        connection.request("GET", "/api/state?scope=submit")
+        response = connection.getresponse()
+        assert json.loads(response.read())["projects"][0]["id"] == project["id"]
+        body = {
+            "workflow": {"1": {"class_type": "SaveImage", "inputs": {}}},
+            "workflow_name": "project-selector.json", "remote_workflow_id": "123456",
+            "output_dir": str(tmp_path / "projects" / "自动项目" / "output"),
+            "project": {"existing": {"id": project["id"]}, "unclassified": {}, "automatic": None, "deleted": {"id": "missing"}}[selection],
+        }
+        connection.request("POST", "/api/tasks", body=json.dumps(body), headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        if selection == "deleted":
+            assert response.status == 400
+            assert payload["error"] == "PROJECT_FOLDER_NOT_FOUND"
+            assert server.store.tasks() == []
+            return
+        assert response.status == 202
+        task = payload["task"]
+        expected_name = {"existing": "所选项目", "unclassified": "", "automatic": "自动项目"}[selection]
+        assert task["project_name"] == expected_name
+        if selection == "existing":
+            assert task["project_id"] == project["id"]
+        assert task["output_dir"] == body["output_dir"]
+        manifest = json.loads(Path(task["manifest_path"]).read_text())
+        assert manifest["project"]["name"] == expected_name
+        server.store._backfill_task_projects()
+        assert server.store.task(task["id"])["project_name"] == expected_name
+        if selection == "unclassified":
+            assert server.store.task(task["id"])["project_inference_disabled"] == 1
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
 
 
 def test_output_supports_http_ranges_for_video_seek(tmp_path, monkeypatch):

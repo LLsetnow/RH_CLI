@@ -16,6 +16,7 @@ import uuid
 import webbrowser
 import zipfile
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,12 +24,25 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from rh_cli.errors import RhCliError
 
-from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_dashboard, public_key, public_output_media, public_outputs, public_state, safe_name, workflow_input_catalog
+from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, matches_public_output_filters, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_dashboard, public_key, public_output_media, public_outputs, public_state, redact_detail, safe_name, workflow_input_catalog
 from .action_store import ActionStore
 from .prompt_store import PromptStore
 from .prompt_writer import AliyunPromptWriter
 from .reference_store import ReferenceStore
 from .translation import AliyunTranslationClient
+from .toolbox import (
+    IMAGE_SUFFIXES,
+    TOOLBOX_MODES,
+    default_codex_image_command,
+    expand_command_template,
+    find_generated_media,
+    normalize_codex_image_resolution,
+    normalize_codex_image_size,
+    normalize_toolbox_mode,
+    process_media,
+    run_local_command,
+    validate_local_file,
+)
 from .vision import AliyunVisionClient
 from .video_downloader import (
     SOCIAL_PLATFORM_LABELS,
@@ -41,6 +55,42 @@ from .video_downloader import (
 
 STATIC_ROOT = WEB_ROOT / "static"
 LOCAL_PREVIEW_LIMIT = 8 * 1024 * 1024
+
+
+def output_action_filters(query: str) -> dict[str, str]:
+    """Parse the output library's folder and active filters for bulk actions."""
+    values = parse_qs(query or "", keep_blank_values=False)
+    filters: dict[str, str] = {}
+    for key in (
+        "project_id",
+        "search",
+        "type",
+        "rating",
+        "workflow",
+        "tag_case",
+        "tag_h",
+        "range_start",
+        "range_end",
+        "account_id",
+    ):
+        value = str(values.get(key, [""])[0] or "").strip()
+        if value:
+            filters[key] = value
+    filters["has_filters"] = "1" if any(
+        key in filters
+        for key in (
+            "search",
+            "type",
+            "rating",
+            "workflow",
+            "tag_case",
+            "tag_h",
+            "range_start",
+            "range_end",
+            "account_id",
+        )
+    ) else "0"
+    return filters
 PASTED_IMAGE_EXTENSIONS = {
     "image/avif": ".avif",
     "image/bmp": ".bmp",
@@ -686,6 +736,252 @@ def generate_prompt_skeleton(body: dict[str, object], root_value: str | Path) ->
             pass
 
 
+class ToolboxManager:
+    """Run local toolbox jobs and persist them through the normal task store."""
+
+    def __init__(self, store: LocalStore) -> None:
+        self.store = store
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rh-toolbox")
+
+    @staticmethod
+    def _asset_path(value: object, *, label: str, suffixes: set[str]) -> Path:
+        if isinstance(value, dict):
+            value = value.get("path")
+        return validate_local_file(value, label=label, suffixes=suffixes)
+
+    def _new_task(
+        self,
+        *,
+        name: str,
+        files: dict[str, str],
+        prompts: dict[str, str],
+        custom_inputs: dict[str, object],
+    ) -> tuple[dict[str, object], Path]:
+        task_id = f"task_{uuid.uuid4().hex[:12]}"
+        created_at = int(time.time() * 1000)
+        output_root = Path(self.store.output_dir()).expanduser().resolve()
+        task_folder = output_root / task_id
+        task_folder.mkdir(parents=True, exist_ok=True)
+        task = {
+            "id": task_id,
+            "created_at": created_at,
+            "workflow_path": str(task_folder / ".toolbox-command.json"),
+            "workflow_name": str(name or "本地处理").strip() or "本地处理",
+            "task_type": "toolbox",
+            "remote_workflow_id": "",
+            "registered_workflow_id": "",
+            "submission_source": "local",
+            "files": files,
+            "prompts": prompts,
+            "custom_inputs": custom_inputs,
+            "input_config": {"mode": "toolbox", "items": []},
+            "bypassed_nodes": [],
+            "random_noise": {},
+            "resolution": {},
+            "key_id": None,
+            "account_id": "",
+            "instance_type": "default",
+            "output_prefix": "",
+            "output_dir": str(output_root),
+            "initial_status": "running",
+            "initial_progress": "已启动本地处理…",
+        }
+        self.store.create_task(task)
+        self.store.update_task(task_id, started_at=created_at, progress="已启动本地处理…")
+        return task, task_folder
+
+    def _update_progress(self, task_id: str, message: str, *, record_log: bool = True) -> None:
+        self.store.update_task(task_id, progress=message)
+        if record_log:
+            self.store.append_stage_log(task_id, "toolbox", message)
+
+    def _log_codex_cli_result(self, task_id: str, result: subprocess.CompletedProcess[str]) -> None:
+        stdout = str(result.stdout or "")
+        stderr = str(result.stderr or "")
+        visible_streams = []
+        if stdout.strip():
+            visible_streams.append("stdout:\n" + str(redact_detail(stdout)))
+        else:
+            visible_streams.append("stdout:（空）")
+        if stderr.strip():
+            visible_streams.append("stderr:\n" + str(redact_detail(stderr)))
+        else:
+            visible_streams.append("stderr:（空）")
+        self.store.append_stage_log(
+            task_id,
+            "toolbox",
+            f"Codex CLI 会话返回（退出码 {result.returncode}）\n" + "\n".join(visible_streams),
+            level="error" if result.returncode else "info",
+            detail={"returncode": result.returncode, "stdout": stdout, "stderr": stderr},
+        )
+
+    @staticmethod
+    def _file_output(path: Path, *, node_id: str) -> dict[str, str]:
+        mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        return {
+            "kind": "file",
+            "path": str(path),
+            "name": path.name,
+            "file_type": path.suffix.lstrip(".") or "file",
+            "mime": mime,
+            "node_id": node_id,
+        }
+
+    def _finish(self, task_id: str, outputs: list[dict[str, str]], started_at: int) -> None:
+        completed_at = int(time.time() * 1000)
+        self.store.update_task(
+            task_id,
+            status="completed",
+            progress=f"已完成 · {len(outputs)} 个产物",
+            completed_at=completed_at,
+            outputs_json=json.dumps(outputs, ensure_ascii=False),
+            error="",
+            error_detail="{}",
+            duration=str(max(0, completed_at - started_at)),
+        )
+        self.store.append_stage_log(task_id, "toolbox", f"本地处理完成，生成 {len(outputs)} 个产物")
+
+    def _fail(self, task_id: str, error: Exception, started_at: int) -> None:
+        completed_at = int(time.time() * 1000)
+        message = error.message if isinstance(error, RhCliError) else str(error)
+        detail = {"code": error.code, "message": message} if isinstance(error, RhCliError) else {"message": message}
+        self.store.update_task(
+            task_id,
+            status="failed",
+            progress="本地处理失败",
+            completed_at=completed_at,
+            error=message,
+            error_detail=json.dumps(detail, ensure_ascii=False),
+            duration=str(max(0, completed_at - started_at)),
+        )
+        self.store.append_stage_log(task_id, "toolbox", message, level="error", detail=detail)
+
+    def submit_image(self, body: dict[str, object]) -> dict[str, object]:
+        # The concrete CLI stays server-side. The browser only sends the prompt,
+        # canvas options, and references, so users never need to know or edit command syntax.
+        command = default_codex_image_command()
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            raise RhCliError("TOOLBOX_PROMPT_MISSING", "请输入图像生成要求。")
+        resolution = normalize_codex_image_resolution(body.get("resolution"))
+        size = normalize_codex_image_size(body.get("size") or body.get("aspect_ratio"))
+        raw_references = body.get("references")
+        if not isinstance(raw_references, list):
+            raw_references = []
+        references = [
+            self._asset_path(item, label=f"参考图 {index + 1}", suffixes=IMAGE_SUFFIXES)
+            for index, item in enumerate(raw_references)
+        ]
+        # Validate the template before creating a task. This keeps malformed CLI
+        # settings from leaving a task that can only fail asynchronously.
+        expand_command_template(
+            command,
+            {
+                "prompt": prompt,
+                "output": "/pending/toolbox-result.png",
+                "references": [str(path) for path in references],
+                "mode": "image",
+                "resolution": resolution,
+                "size": size,
+            },
+        )
+        task, task_folder = self._new_task(
+            name="Codex 图像生成",
+            files={f"reference_{index + 1}": str(path) for index, path in enumerate(references)},
+            prompts={"prompt": prompt},
+            custom_inputs={
+                "tool": "codex",
+                "engine": "gpt-image",
+                "resolution": resolution,
+                "aspect_ratio": size,
+                "reference_count": len(references),
+            },
+        )
+        self._executor.submit(
+            self._run_image,
+            task["id"],
+            task_folder,
+            command,
+            prompt,
+            references,
+            resolution,
+            size,
+            int(task["created_at"]),
+        )
+        return self.store.task(str(task["id"])) or task
+
+    def _run_image(
+        self,
+        task_id: str,
+        task_folder: Path,
+        command: str,
+        prompt: str,
+        references: list[Path],
+        resolution: str,
+        size: str,
+        started_at: int,
+    ) -> None:
+        try:
+            output = task_folder / "result.png"
+            context = {
+                "prompt": prompt,
+                "output": str(output),
+                "references": [str(path) for path in references],
+                "mode": "image",
+                "resolution": resolution,
+                "size": size,
+            }
+            self._update_progress(task_id, "正在执行本地 Codex 命令…")
+            expand_command_template(command, context)
+            run_local_command(command, context, cwd=task_folder, on_result=lambda result: self._log_codex_cli_result(task_id, result))
+            generated = find_generated_media(task_folder)
+            if not generated:
+                raise RhCliError("TOOLBOX_OUTPUT_MISSING", "本地命令已结束，但任务目录中没有找到图片结果。")
+            outputs = [self._file_output(path, node_id="codex") for path in generated]
+            self._finish(task_id, outputs, started_at)
+        except Exception as error:
+            self._fail(task_id, error, started_at)
+
+    def submit_media(self, body: dict[str, object]) -> dict[str, object]:
+        mode = normalize_toolbox_mode(body.get("mode"))
+        source = self._asset_path(body.get("input"), label="输入媒体", suffixes=IMAGE_SUFFIXES | {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"})
+        label = {"depth": "深度图", "skeleton": "骨骼图", "depth_skeleton": "深度+骨骼图"}[mode]
+        task, task_folder = self._new_task(
+            name=label + ("视频处理" if source.suffix.lower() not in IMAGE_SUFFIXES else "处理"),
+            files={"input": str(source)},
+            prompts={},
+            custom_inputs={"tool": "media_processor", "mode": mode, "input_type": "video" if source.suffix.lower() not in IMAGE_SUFFIXES else "image"},
+        )
+        self._executor.submit(self._run_media, task["id"], task_folder, source, mode, int(task["created_at"]))
+        return self.store.task(str(task["id"])) or task
+
+    def _run_media(self, task_id: str, task_folder: Path, source: Path, mode: str, started_at: int) -> None:
+        try:
+            last_phase = ""
+
+            def report_progress(message: str) -> None:
+                nonlocal last_phase
+                phase = str(message).split("（", 1)[0].split(" ·", 1)[0].strip()
+                should_log = phase != last_phase
+                last_phase = phase
+                self._update_progress(task_id, message, record_log=should_log)
+
+            output = process_media(
+                mode,
+                source,
+                task_folder,
+                self.store.media_library_root(),
+                progress=report_progress,
+            )
+            outputs = [self._file_output(output, node_id=mode)]
+            self._finish(task_id, outputs, started_at)
+        except Exception as error:
+            self._fail(task_id, error, started_at)
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=False)
+
+
 class LocalHandler(BaseHTTPRequestHandler):
     server_version = "RHWorkflowDesk/0.1"
 
@@ -752,6 +1048,12 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed_url = urlparse(self.path)
         path = unquote(parsed_url.path)
+        if path in {"/toolbox", "/toolbox/"}:
+            self.send_response(HTTPStatus.FOUND)
+            self._headers(length=0)
+            self.send_header("Location", "/?workspace=codex")
+            self.end_headers()
+            return
         if path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self._headers(length=0)
@@ -777,7 +1079,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/outputs/export/case":
             _, manager = self.state
-            self._serve_case_outputs_archive(manager)
+            filters = output_action_filters(parsed_url.query)
+            self._serve_case_outputs_archive(manager, filters=filters)
             return
         if path == "/api/dashboard":
             store, manager = self.state
@@ -1029,6 +1332,12 @@ class LocalHandler(BaseHTTPRequestHandler):
                 action_store = self.server.action_store  # type: ignore[attr-defined]
                 self._json(200, generate_prompt_skeleton(self._body(), action_store.source_root))
                 return
+            if path == "/api/toolbox/image":
+                self._json(202, {"task": self.server.toolbox.submit_image(self._body())})  # type: ignore[attr-defined]
+                return
+            if path == "/api/toolbox/media":
+                self._json(202, {"task": self.server.toolbox.submit_media(self._body())})  # type: ignore[attr-defined]
+                return
             if path == "/api/prompt/actions":
                 action_store = self.server.action_store  # type: ignore[attr-defined]
                 body = self._body()
@@ -1112,7 +1421,9 @@ class LocalHandler(BaseHTTPRequestHandler):
                     raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
                 store, _ = self.state
                 prompt_group = (
-                    self.server.prompt_store.task_group_snapshot()  # type: ignore[attr-defined]
+                    body.get("prompt_group")
+                    if isinstance(body.get("prompt_group"), dict)
+                    else self.server.prompt_store.task_group_snapshot()  # type: ignore[attr-defined]
                     if body.get("include_current_prompt_group")
                     else self.server.prompt_store.get_group(str(body.get("prompt_group_id") or ""))  # type: ignore[attr-defined]
                 )
@@ -1123,6 +1434,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     remote_workflow_id=str(body.get("remote_workflow_id") or ""),
                     source_dir=str(body.get("source_dir") or ""),
                     input_config=body.get("input_config") if isinstance(body.get("input_config"), dict) else None,
+                    input_defaults=body.get("input_defaults") if isinstance(body.get("input_defaults"), list) else None,
                     prompt_group=prompt_group,
                 )
                 self._json(201, store.workflow_detail(workflow_id))
@@ -1143,7 +1455,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if not isinstance(content, str):
                     raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
                 store, _ = self.state
-                workflow_id, workflow_path, analysis = store.save_workflow(
+                workflow_id, _, analysis = store.save_workflow(
                     str(body.get("filename") or "workflow.json"),
                     content,
                     account_id=str(body.get("account_id") or ""),
@@ -1151,7 +1463,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     source_dir=str(body.get("source_dir") or ""),
                     register=False,
                 )
-                saved_workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                saved_workflow = json.loads(content)
                 analysis["input_catalog"] = workflow_input_catalog(saved_workflow, analysis)
                 saved_metadata = saved_workflow.get("__rh_meta__") if isinstance(saved_workflow, dict) else {}
                 saved_metadata = saved_metadata if isinstance(saved_metadata, dict) else {}
@@ -1159,7 +1471,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                     200,
                     {
                         "workflow_id": workflow_id,
-                        "filename": workflow_path.name[len(f"{workflow_id}_") :] if workflow_path.name.startswith(f"{workflow_id}_") else workflow_path.name,
+                        # The on-disk path is ID-addressed; keep the original
+                        # user-facing filename in the response instead of
+                        # leaking the storage key into the editor state.
+                        "filename": str(body.get("filename") or "workflow.json"),
                         "analysis": analysis,
                         "remote_workflow_id": analysis.get("remote_workflow_id", ""),
                         "account_id": str(saved_metadata.get("accountId") or saved_metadata.get("account_id") or ""),
@@ -1430,6 +1745,34 @@ class LocalHandler(BaseHTTPRequestHandler):
                 workflow_id = path.rsplit("/", 1)[-1]
                 store, _ = self.state
                 changes = self._body()
+                if path.endswith("/replace"):
+                    old_workflow_id = path.split("/")[-2]
+                    prompt_group = (
+                        changes.get("prompt_group")
+                        if isinstance(changes.get("prompt_group"), dict)
+                        else self.server.prompt_store.task_group_snapshot()  # type: ignore[attr-defined]
+                        if changes.get("include_current_prompt_group")
+                        else self.server.prompt_store.get_group(str(changes.get("prompt_group_id") or ""))  # type: ignore[attr-defined]
+                    )
+                    workflow = store.replace_workflow(
+                        old_workflow_id,
+                        str(changes.get("name") or "workflow.json"),
+                        str(changes.get("content") or ""),
+                        account_id=str(changes.get("account_id") or ""),
+                        remote_workflow_id=str(changes.get("remote_workflow_id") or ""),
+                        source_dir=str(changes.get("source_dir") or ""),
+                        input_config=changes.get("input_config") if isinstance(changes.get("input_config"), dict) else None,
+                        input_defaults=changes.get("input_defaults") if isinstance(changes.get("input_defaults"), list) else None,
+                        prompt_group=prompt_group,
+                    )
+                    self._json(200, workflow)
+                    return
+                unsupported_direct_changes = set(changes) - {"folder_id"}
+                if unsupported_direct_changes:
+                    raise RhCliError(
+                        "WORKFLOW_SNAPSHOT_REQUIRED",
+                        "工作流库内容只能通过临时快照保存为新工作流包；请使用 /replace。",
+                    )
                 if "prompt_group_id" in changes:
                     changes["prompt_group"] = self.server.prompt_store.get_group(  # type: ignore[attr-defined]
                         str(changes.get("prompt_group_id") or "")
@@ -1551,8 +1894,17 @@ class LocalHandler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True})
                 return
             if path == "/api/outputs/rating/1":
-                store, _ = self.state
-                self._json(200, {"ok": True, **store.delete_outputs_by_rating(1)})
+                store, manager = self.state
+                filters = output_action_filters(urlparse(self.path).query)
+                output_keys = None
+                if filters.get("has_filters") == "1":
+                    output_keys = {
+                        (str(item.get("task_id") or ""), int(item.get("output_index") or 0))
+                        for item in public_outputs(store, manager).get("outputs", [])
+                        if int(item.get("rating") or 0) == 1 and matches_public_output_filters(item, filters)
+                    }
+                project_id = filters.get("project_id", "")
+                self._json(200, {"ok": True, **store.delete_outputs_by_rating(1, project_id=project_id, output_keys=output_keys)})
                 return
             if path.startswith("/api/tasks/"):
                 task_id = path.rsplit("/", 1)[-1]
@@ -1585,8 +1937,8 @@ class LocalHandler(BaseHTTPRequestHandler):
 
         self._serve_file_with_ranges(file_path, "OUTPUT_NOT_FOUND", "产物不存在")
 
-    def _serve_case_outputs_archive(self, manager: TaskManager) -> None:
-        media = public_output_media(manager)
+    def _serve_case_outputs_archive(self, manager: TaskManager, *, project_id: str = "", filters: dict[str, str] | None = None) -> None:
+        media = public_output_media(manager, project_id=project_id, filters=filters)
         if not media:
             self._json(404, {"code": "NO_CASE_OUTPUTS", "message": "还没有带“案例”标签的媒体文件。"})
             return
@@ -1800,6 +2152,7 @@ class AppServer(ThreadingHTTPServer):
         self._runtime_logs_lock = threading.Lock()
         self.store = LocalStore()
         self.manager = TaskManager(self.store)
+        self.toolbox = ToolboxManager(self.store)
         configured_library_path = self.store.prompt_library_path()
         self.prompt_store = PromptStore(DATA_ROOT, library_path=configured_library_path)
         configured_media_root = self.store.media_library_root()
@@ -1811,6 +2164,10 @@ class AppServer(ThreadingHTTPServer):
             self.action_store = ActionStore(DATA_ROOT, source_path=configured_action_path or None)
             self.reference_store = ReferenceStore(DATA_ROOT, source_paths=self.store.reference_resources_paths())
         super().__init__(address, LocalHandler)
+
+    def server_close(self) -> None:
+        self.toolbox.shutdown()
+        super().server_close()
 
     def append_runtime_log(self, message: str, level: str = "info") -> None:
         with self._runtime_logs_lock:

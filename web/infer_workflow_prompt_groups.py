@@ -39,6 +39,7 @@ def _read_workflow_registry(data_root: Path) -> list[dict[str, Any]]:
         return []
 
     entries_root = (data_root / "workflow-registry").resolve()
+    data_root_resolved = data_root.resolve()
     records: list[dict[str, Any]] = []
     for item in raw_records:
         if not isinstance(item, dict):
@@ -58,7 +59,12 @@ def _read_workflow_registry(data_root: Path) -> list[dict[str, Any]]:
                 ]
             )
             entry_path = next(
-                (candidate for candidate in candidates if candidate.is_relative_to(entries_root)),
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.is_file()
+                    and (candidate.is_relative_to(data_root_resolved) or candidate.is_relative_to(entries_root))
+                ),
                 None,
             )
             if entry_path is not None:
@@ -218,9 +224,11 @@ def _mode_for(path: Path, fallback: int = 0o644) -> int:
 
 
 def _write_workflow_registry(data_root: Path, records: list[dict[str, Any]]) -> None:
-    """Persist the split workflow index without reintroducing inline records."""
+    """Persist the package manifests and their compact global index."""
     registry_path = data_root / "workflow-registry.json"
-    entries_root = data_root / "workflow-registry"
+    package_root = data_root / "workflow"
+    package_layout = package_root.is_dir()
+    legacy_entries_root = data_root / "workflow-registry"
     index_records: list[dict[str, str]] = []
     for record in records:
         if not isinstance(record, dict):
@@ -228,7 +236,20 @@ def _write_workflow_registry(data_root: Path, records: list[dict[str, Any]]) -> 
         workflow_id = str(record.get("id") or "").strip()
         if not workflow_id or Path(workflow_id).name != workflow_id:
             continue
-        entry_path = entries_root / f"{workflow_id}.json"
+        record = dict(record)
+        if package_layout:
+            record["workflow_file"] = f"workflow/{workflow_id}/workflow_api.json"
+            record["prompt_group_file"] = f"workflow/{workflow_id}/prompt_group.json"
+            record["manifest_file"] = f"workflow/{workflow_id}/manifest.json"
+            record["package_dir"] = f"workflow/{workflow_id}"
+            entry_path = package_root / workflow_id / "manifest.json"
+        else:
+            record["workflow_file"] = f"workflows/{workflow_id}.json"
+            if str(record.get("prompt_group_id") or "").strip():
+                record["prompt_group_file"] = f"workflows/{workflow_id}.prompt_group.json"
+            else:
+                record.pop("prompt_group_file", None)
+            entry_path = legacy_entries_root / f"{workflow_id}.json"
         _atomic_write(entry_path, record, _mode_for(entry_path, 0o600))
         index_records.append(
             {
@@ -289,7 +310,9 @@ def _group_document(group: dict[str, Any]) -> dict[str, Any]:
 
 def _sidecar_group(data_root: Path, workflow_id: str, fallback: dict[str, Any]) -> dict[str, Any] | None:
     """Read a workflow-associated group snapshot when it contains items."""
-    sidecar = data_root / "workflows" / f"{workflow_id}.prompt_group.json"
+    package_sidecar = data_root / "workflow" / workflow_id / "prompt_group.json"
+    legacy_sidecar = data_root / "workflows" / f"{workflow_id}.prompt_group.json"
+    sidecar = package_sidecar if package_sidecar.is_file() else legacy_sidecar
     value = _read_json(sidecar, {})
     group_id = str(value.get("id") or fallback.get("id") or "").strip()
     name = str(value.get("name") or fallback.get("name") or "").strip()
@@ -343,7 +366,15 @@ def build_plan(data_root: Path, library_path: Path) -> dict[str, Any]:
                 repair_groups.append(recovered)
             skipped.append({"id": workflow_id, "reason": "已有提示词组关联"})
             continue
-        workflow_files = list((data_root / "workflows").glob(f"{workflow_id}_*.json"))
+        stable_workflow_file = data_root / "workflow" / workflow_id / "workflow_api.json"
+        if stable_workflow_file.is_file():
+            workflow_files = [stable_workflow_file]
+        else:
+            # Read the previous flat library during migration, but never
+            # write the old name-based convention back to the registry.
+            legacy_root = data_root / "workflows"
+            legacy_stable = legacy_root / f"{workflow_id}.json"
+            workflow_files = [legacy_stable] if legacy_stable.is_file() else list(legacy_root.glob(f"{workflow_id}_*.json"))
         if len(workflow_files) != 1:
             skipped.append({"id": workflow_id, "reason": f"工作流文件数量异常：{len(workflow_files)}"})
             continue
@@ -376,6 +407,7 @@ def build_plan(data_root: Path, library_path: Path) -> dict[str, Any]:
         "folders": folders,
         "skipped": skipped,
         "block_count": len(blocks),
+        "package_layout": (data_root / "workflow").is_dir(),
     }
 
 
@@ -383,7 +415,12 @@ def apply_plan(plan: dict[str, Any]) -> None:
     # Write sidecars first. If a later registry write fails, the next run can
     # safely rebuild the same sidecars because the registry still has no link.
     for record, group in zip(plan["plan_records"], plan["plan_groups"]):
-        sidecar = plan["groups_path"].parent.parent / "workflows" / f"{record['id']}.prompt_group.json"
+        package_root = plan["groups_path"].parent.parent / "workflow"
+        sidecar = (
+            package_root / str(record["id"]) / "prompt_group.json"
+            if plan.get("package_layout")
+            else plan["groups_path"].parent.parent / "workflows" / f"{record['id']}.prompt_group.json"
+        )
         _atomic_write(sidecar, group, 0o600)
 
     # PromptStore uses a split format: groups.json is an index and each

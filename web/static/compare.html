@@ -132,6 +132,7 @@
                   <button class="compare-mode" type="button" data-compare-mode="overlay" role="tab" aria-selected="false">覆盖对比</button>
                 </div>
                 <button id="resetCompareTransform" class="secondary-button button-compact" type="button">复位视图</button>
+                <button id="toggleCompareFullscreen" class="secondary-button button-compact" type="button" aria-pressed="false">全屏对比</button>
               </div>
             </div>
 
@@ -139,7 +140,7 @@
               <div class="compare-stage-empty">
                 <span class="compare-stage-empty-mark">A&nbsp;＋&nbsp;B</span>
                 <strong>把两份素材放进来</strong>
-                <span>图片支持同步平移和缩放；视频会以覆盖方式对齐播放。</span>
+                <span>图片支持同步平移和缩放；视频会先缩放到同一显示尺寸，再以覆盖方式对齐播放。</span>
               </div>
             </div>
             <div id="compareControls" class="compare-controls" hidden></div>
@@ -168,6 +169,7 @@
         </section>
       </main>
     </div>
+    <button id="compareFullscreenClose" class="compare-fullscreen-close" type="button" aria-label="退出全屏对比" title="退出全屏对比" hidden>×</button>
 
     <script>window.RHMotion.startPageEnter();</script>
     <script src="/static/compare.js"></script>

@@ -83,7 +83,7 @@
     var status = record.analysis_error ? "JSON 异常" : (bound ? "已绑定账号" : "待绑定账号");
     return '<article class="workflow-card' + (bound ? "" : " is-unbound") + (selected ? " is-selected" : "") + '" draggable="true" data-workflow-drag-id="' + esc(record.id) + '">' +
       '<div class="workflow-card-top"><button class="workflow-card-title workflow-card-title-button" type="button" data-action="edit-workflow" data-workflow-id="' + esc(record.id) + '" aria-label="编辑工作流：' + esc(record.name) + '" title="编辑工作流"><strong title="' + esc(record.name) + '">' + esc(record.name) + '</strong><small title="' + esc(record.id) + '">' + esc(record.id) + '</small></button><span class="workflow-status' + (bound ? "" : " unbound") + '">' + status + '</span></div>' +
-      '<button class="workflow-card-body" type="button" data-action="select-workflow" data-workflow-id="' + esc(record.id) + '" aria-pressed="' + (selected ? "true" : "false") + '" aria-busy="' + (loading ? "true" : "false") + '"' + (loading ? " disabled" : "") + ' aria-label="选择并加载工作流与提示词组：' + esc(record.name) + '" title="加载到任务提交页和提示词工坊">' +
+      '<button class="workflow-card-body" type="button" data-action="select-workflow" data-workflow-id="' + esc(record.id) + '" aria-pressed="' + (selected ? "true" : "false") + '" aria-busy="' + (loading ? "true" : "false") + '"' + (loading ? " disabled" : "") + ' aria-label="加载工作流快照：' + esc(record.name) + '" title="加载到任务提交页和提示词工坊：复制到临时工作流快照">' +
       '<div class="workflow-card-meta">' +
       '<div class="workflow-meta-row"><span>所属账号</span><span title="' + esc(accountLabel(record)) + '">' + esc(accountLabel(record)) + '</span></div>' +
       '<div class="workflow-meta-row"><span>workflowId</span><span><code>' + esc(record.remote_workflow_id || "未设置") + '</code></span></div>' +
@@ -219,19 +219,18 @@
     if (state.editingPromptGroupFolderId) focusPromptGroupFolderNameInput();
   }
   function refreshWorkflows() {
-    return Promise.all([request("/api/workflows"), request("/api/workflow-folders"), request("/api/state?scope=workflows"), request("/api/prompt/groups")]).then(function (results) {
+    return Promise.all([request("/api/workflows"), request("/api/workflow-folders"), request("/api/state?scope=workflows")]).then(function (results) {
       state.workflows = results[0].workflows || [];
       state.folders = results[1].folders || [];
       state.accounts = results[2].accounts || [];
       state.telegram = results[2].settings && results[2].settings.telegram || {};
-      state.promptGroups = results[3].groups || [];
-      state.promptGroupFolders = results[3].folders || [];
       if (state.activeFolderId && !folderRecord(state.activeFolderId)) state.activeFolderId = "";
-      if (state.activePromptGroupFolderId && !promptGroupFolderRecord(state.activePromptGroupFolderId)) state.activePromptGroupFolderId = "";
       renderWorkflows();
-      renderPromptGroups();
     }).catch(function (error) { showToast(error.message, true); });
   }
+  // Kept as an extension hook for older prompt-workbench integrations. The
+  // workflow page no longer calls this endpoint or renders its result.
+  function loadLegacyPromptGroups() { return request("/api/prompt/groups"); }
   function refreshWorkflowLibrary() {
     var button = $("refreshWorkflows");
     if (button) button.disabled = true;
@@ -245,19 +244,21 @@
     var content = rawContent;
     try { content = JSON.stringify(JSON.parse(rawContent), null, 2); } catch (error) {}
     state.editor = {
-      mode: record ? "edit" : "import",
-      id: record ? record.id : "",
+      mode: "snapshot",
+      sourceWorkflowId: record ? record.id : "",
       content: content,
       savedContent: content,
-      sourceDir: imported ? imported.sourceDir : ""
+      sourceDir: imported ? imported.sourceDir : (record ? record.source_dir : ""),
+      inputConfig: record && record.input_config && typeof record.input_config === "object" ? JSON.parse(JSON.stringify(record.input_config)) : null,
+      inputDefaults: imported && Array.isArray(imported.inputDefaults) ? imported.inputDefaults : [],
+      promptGroup: imported && imported.promptGroup ? imported.promptGroup : null
     };
-    $("workflowEditorTitle").textContent = record ? "编辑工作流资料" : "导入工作流";
-    $("workflowEditorHint").textContent = record ? "修改工作流资料，也可以更新它关联的提示词组；不会改变任务历史。" : "工作流 JSON 已读取，保存时可以一起关联提示词组。";
+    $("workflowEditorTitle").textContent = record ? "编辑临时工作流快照" : "导入工作流快照";
+    $("workflowEditorHint").textContent = record ? "这是从工作流库复制出的临时快照。保存时会创建新的工作流库条目并迁移活动引用。" : "导入内容只存在于临时快照；保存到工作流库后才会创建库条目。";
     $("workflowRecordName").value = record ? record.name : imported.filename;
     $("workflowRecordRemoteId").value = record ? (record.remote_workflow_id || "") : (imported.remoteWorkflowId || "");
     $("workflowEditorJson").value = content;
     renderAccountOptions(record ? record.account_id : "");
-    renderPromptGroupOptions(record ? record.prompt_group_id : "");
     window.RHMotion.openModal("workflowEditorModal", "workflowRecordName");
   }
   function importWorkflowFile(file) {
@@ -298,26 +299,10 @@
     if (!parsed) return;
     var button = $("saveWorkflowJson");
     button.disabled = true;
-    if (editor.mode === "import") {
-      editor.content = parsed.content;
-      editor.savedContent = parsed.content;
-      $("workflowEditorJson").value = parsed.content;
-      showToast("JSON 已更新，点击“保存工作流”写入本机工作流库");
-      button.disabled = false;
-      return;
-    }
-    jsonRequest("/api/workflows/" + encodeURIComponent(editor.id), "PATCH", { content: parsed.content }).then(function () {
-      return fetchWorkflow(editor.id);
-    }).then(function (data) {
-      var content = JSON.stringify(data.workflow, null, 2);
-      editor.content = content;
-      editor.savedContent = content;
-      $("workflowEditorJson").value = content;
-      showToast("工作流 JSON 已保存");
-      return refreshWorkflows();
-    }).catch(function (error) {
-      showToast("保存工作流 JSON 失败：" + error.message, true);
-    }).finally(function () { button.disabled = false; });
+    editor.content = parsed.content;
+    $("workflowEditorJson").value = parsed.content;
+    showToast("JSON 已应用到临时快照；点击“保存到工作流库”创建新库条目");
+    button.disabled = false;
   }
   function restoreWorkflowJson() {
     if (!state.editor) return;
@@ -338,11 +323,15 @@
       account_id: $("workflowRecordAccount").value,
       remote_workflow_id: $("workflowRecordRemoteId").value.trim(),
       prompt_group_id: $("workflowRecordPromptGroup").value,
-      content: parsed.content
+      content: parsed.content,
+      input_config: state.editor.inputConfig,
+      input_defaults: state.editor.inputDefaults || [],
+      prompt_group: state.editor.promptGroup && typeof state.editor.promptGroup === "object" ? state.editor.promptGroup : null,
+      include_current_prompt_group: !state.editor.promptGroup
     };
     var promise;
-    if (state.editor.mode === "edit") {
-      promise = jsonRequest("/api/workflows/" + encodeURIComponent(state.editor.id), "PATCH", payload);
+    if (state.editor.sourceWorkflowId) {
+      promise = jsonRequest("/api/workflows/" + encodeURIComponent(state.editor.sourceWorkflowId) + "/replace", "PATCH", payload);
     } else {
       payload.filename = name;
       payload.source_dir = state.editor.sourceDir;
@@ -350,7 +339,7 @@
     }
     promise.then(function () {
       window.RHMotion.closeModal("workflowEditorModal");
-      showToast(state.editor.mode === "edit" ? "工作流资料已更新" : "工作流已保存到本机");
+      showToast(state.editor.sourceWorkflowId ? "已创建新工作流包并迁移活动引用" : "已保存到工作流库");
       state.editor = null;
       return refreshWorkflows();
     }).catch(function (error) {
@@ -475,8 +464,21 @@
       var record = data.record || {};
       var catalog = data.analysis && Array.isArray(data.analysis.input_catalog) ? data.analysis.input_catalog : [];
       var saved = record.input_config && record.input_config.mode === "manual" ? record.input_config : null;
+      state.editor = {
+        mode: "snapshot",
+        sourceWorkflowId: id,
+        content: JSON.stringify(data.workflow || {}, null, 2),
+        savedContent: JSON.stringify(data.workflow || {}, null, 2),
+        sourceDir: record.source_dir || "",
+        inputConfig: record.input_config && typeof record.input_config === "object" ? JSON.parse(JSON.stringify(record.input_config)) : null,
+        inputDefaults: [],
+        promptGroup: data.prompt_group || null
+      };
+      $("workflowRecordName").value = record.name || "workflow.json";
+      $("workflowRecordRemoteId").value = record.remote_workflow_id || "";
+      renderAccountOptions(record.account_id || "");
       state.configEditor = {
-        id: id, record: record, catalog: catalog, mode: saved ? "manual" : "auto",
+        id: id, record: record, catalog: catalog, mode: saved ? "manual" : "auto", snapshot: state.editor,
         items: saved ? saved.items.map(function (item) {
           var catalogItem = catalog.find(function (entry) { return entry.id === item.id; });
           var merged = Object.assign({}, catalogItem || {}, item);
@@ -557,17 +559,23 @@
     var items = editor.items.map(function (item, index) {
       return Object.assign({}, item, { order: index });
     });
-    jsonRequest("/api/workflows/" + encodeURIComponent(editor.id), "PATCH", {
-      input_config: { mode: editor.mode, items: editor.mode === "manual" ? items : [] },
-      input_defaults: editor.mode === "manual" ? items.filter(function (item) { return !item.virtual && item.field; }).map(function (item) {
+    var inputConfig = { mode: editor.mode, items: editor.mode === "manual" ? items : [] };
+    var inputDefaults = editor.mode === "manual" ? items.filter(function (item) { return !item.virtual && item.field; }).map(function (item) {
         return { node_id: item.node_id, field: item.field, default: item.default_value };
-      }) : []
-    }).then(function () {
-      window.RHMotion.closeModal("workflowConfigModal");
-      state.configEditor = null;
-      showToast(editor.mode === "manual" ? "工作流输入配置已保存" : "已恢复自动识别输入");
-      return refreshWorkflows();
-    }).catch(function (error) { showToast("保存输入配置失败：" + error.message, true); }).finally(function () { button.disabled = false; });
+      }) : [];
+    var packageCompatibility = { input_defaults: editor.mode === "manual" ? inputDefaults : [] };
+    if (state.editor) {
+      state.editor.inputConfig = inputConfig;
+      state.editor.inputDefaults = inputDefaults;
+    }
+    window.RHMotion.closeModal("workflowConfigModal");
+    state.configEditor = null;
+    if (state.editor) {
+      $("workflowEditorJson").value = state.editor.content;
+      window.RHMotion.openModal("workflowEditorModal", "workflowRecordName");
+    }
+    showToast(editor.mode === "manual" ? "输入配置已应用到临时快照，请继续保存到工作流库" : "已恢复自动识别，并应用到临时快照");
+    button.disabled = false;
   }
   function updateConfigDefault(target, index, editor) {
     if (!editor.items[index]) return;
@@ -1185,7 +1193,7 @@
     if (action === "export-workflow") exportWorkflow(id);
     if (action === "edit-workflow") {
       fetchWorkflow(id).then(function (data) {
-        openEditor(data.record, { content: JSON.stringify(data.workflow, null, 2) });
+          openEditor(data.record, { content: JSON.stringify(data.workflow, null, 2), promptGroup: data.prompt_group || null });
       }).catch(function (error) { showToast("打开编辑失败：" + error.message, true); });
     }
     if (action === "delete-workflow") {
@@ -1220,12 +1228,6 @@
     $("workflowGroups").addEventListener("contextmenu", handleWorkflowContextMenu);
     $("workflowFolderContextMenu").addEventListener("click", handleFolderMenuAction);
     $("workflowCardContextMenu").addEventListener("click", handleWorkflowMenuAction);
-    $("promptGroupGroups").addEventListener("click", handlePromptGroupAction);
-    $("promptGroupGroups").addEventListener("keydown", handlePromptGroupFolderNameKeydown);
-    $("promptGroupGroups").addEventListener("blur", handlePromptGroupFolderNameBlur, true);
-    $("promptGroupGroups").addEventListener("contextmenu", handleWorkflowContextMenu);
-    $("promptGroupFolderContextMenu").addEventListener("click", handlePromptGroupFolderMenuAction);
-    $("promptGroupCardContextMenu").addEventListener("click", handlePromptGroupMenuAction);
     $("importWorkflowButton").addEventListener("click", function () { $("workflowImportFile").click(); });
     $("workflowImportFile").addEventListener("change", function () { importWorkflowFile(this.files[0]); this.value = ""; });
     $("workflowImportDropzone").addEventListener("dragenter", function (event) { event.preventDefault(); this.classList.add("dragging"); });
@@ -1241,11 +1243,6 @@
     $("workflowGroups").addEventListener("dragover", handleWorkflowLibraryDragOver);
     $("workflowGroups").addEventListener("dragleave", handleWorkflowLibraryDragLeave);
     $("workflowGroups").addEventListener("drop", handleWorkflowLibraryDrop);
-    $("promptGroupGroups").addEventListener("dragstart", handlePromptGroupDragStart);
-    $("promptGroupGroups").addEventListener("dragend", handlePromptGroupDragEnd);
-    $("promptGroupGroups").addEventListener("dragover", handlePromptGroupDragOver);
-    $("promptGroupGroups").addEventListener("dragleave", handlePromptGroupDragLeave);
-    $("promptGroupGroups").addEventListener("drop", handlePromptGroupDrop);
     $("workflowEditorForm").addEventListener("submit", saveWorkflowRecord);
     $("closeWorkflowEditor").addEventListener("click", function () { state.editor = null; window.RHMotion.closeModal("workflowEditorModal"); });
     $("cancelWorkflowEditor").addEventListener("click", function () { state.editor = null; window.RHMotion.closeModal("workflowEditorModal"); });
@@ -1309,10 +1306,6 @@
     $("workflowGroups").addEventListener("click", function (event) {
       var button = event.target.closest("#createWorkflowFolder");
       if (button) createWorkflowFolder();
-    });
-    $("promptGroupGroups").addEventListener("click", function (event) {
-      var button = event.target.closest("#createPromptGroupFolder");
-      if (button) createPromptGroupFolder();
     });
   }
   bindEvents();

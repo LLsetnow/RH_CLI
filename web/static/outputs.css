@@ -94,6 +94,14 @@
 .output-tag-filter.active[data-output-tag-mode="off"]:hover { border-color: var(--line-soft); color: var(--muted); background: var(--panel-glass); }
 .output-tag-filter.active[data-output-tag-mode="include"]:hover { border-color: var(--accent-outline); color: var(--accent); background: var(--accent-ghost); }
 .output-tag-filter.active[data-output-tag-mode="exclude"]:hover { border-color: var(--danger-strong); color: var(--danger); background: var(--danger-ghost); }
+.output-workflow-filters { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.output-workflow-filters[hidden] { display: none; }
+.output-workflow-filter-label { flex: 0 0 auto; color: var(--muted); font-size: 10px; font-weight: 680; }
+.output-workflow-filter-options { display: flex; min-width: 0; align-items: center; flex-wrap: wrap; gap: 7px; }
+.output-workflow-filter { display: inline-flex; min-width: 0; max-width: 180px; min-height: 27px; align-items: center; overflow: hidden; padding: 0 9px; border: 1px solid var(--line-soft); border-radius: 999px; color: var(--muted); background: var(--panel-glass); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; transition: color var(--motion-interaction) ease, border-color var(--motion-interaction) ease, background var(--motion-interaction) ease, transform var(--motion-fast) var(--ease-out); }
+.output-workflow-filter:hover { border-color: var(--accent-outline); color: var(--accent); background: var(--accent-ghost); transform: translateY(-1px); }
+.output-workflow-filter.is-selected { border-color: var(--accent-outline); color: var(--accent); background: var(--accent-soft); box-shadow: 0 5px 14px var(--shadow-soft); }
+.output-workflow-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .output-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 15px; margin-top: 17px; }
 .output-pagination { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 24px; }
 .output-pagination[hidden] { display: none; }
@@ -166,7 +174,7 @@
 .rating-value { color: var(--subtle); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; white-space: nowrap; }
 .artifact-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; color: var(--subtle); font-size: 9px; }
 .artifact-foot-info { display: flex; min-width: 0; align-items: center; gap: 8px; }
-.artifact-resolution { color: var(--muted); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; white-space: nowrap; }
+.artifact-resolution, .artifact-duration { color: var(--muted); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; white-space: nowrap; }
 .artifact-cost { color: var(--warm); }
 .outputs-empty { grid-column: 1 / -1; display: flex; min-height: 250px; flex-direction: column; align-items: center; justify-content: center; padding: 30px; border: 1px dashed var(--border-empty); border-radius: 16px; color: var(--subtle); text-align: center; }
 .outputs-empty strong { color: var(--muted); font-size: 13px; }
@@ -246,6 +254,9 @@
   .outputs-sort select { flex: 1; }
   .output-tag-filters { width: 100%; margin-left: 0; padding-left: 0; border-left: 0; gap: 8px; }
   .output-tag-filter-group { flex: 1 1 190px; justify-content: space-between; }
+  .output-workflow-filters { align-items: flex-start; flex-direction: column; }
+  .output-workflow-filter-options { width: 100%; }
+  .output-workflow-filter { max-width: min(100%, 260px); }
   .output-grid { grid-template-columns: 1fr; }
   .output-pagination { flex-wrap: wrap; gap: 8px; }
   .output-page-status { order: -1; width: 100%; text-align: center; }

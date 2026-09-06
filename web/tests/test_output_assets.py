@@ -41,8 +41,9 @@ def test_output_cards_support_local_selection_and_media_shortcuts():
     assert 'event.key === "ArrowUp"' in script
     assert 'event.key === "ArrowDown"' in script
     assert "function outputKeyboardNavigationAllowed(event)" in script
-    assert 'target.closest(".artifact-card")' in script
-    assert 'target.closest("input, select, textarea, [contenteditable=\\"true\\"], audio, video")' in script
+    assert r'target.closest("input, select, textarea, [contenteditable=\"true\"]")' in script
+    assert 'document.addEventListener("keydown", handleOutputArrowNavigation, true)' in script
+    assert 'document.addEventListener("click", restoreArtifactFocusAfterClick, true)' in script
     assert "targetPage = currentPage - 1" in script
     assert "targetPage = currentPage + 1" in script
     assert "state.page = targetPage" in script
@@ -91,6 +92,11 @@ def test_output_media_cards_show_native_resolution_beside_time():
     assert "artifact-foot-info" in script
     assert ".artifact-foot-info" in styles
     assert ".artifact-resolution" in styles
+    assert "function formatVideoDuration(value)" in script
+    assert "function artifactDurationMarkup(item)" in script
+    assert 'class="artifact-duration"' in script
+    assert "media.duration" in script
+    assert ".artifact-duration" in styles
 
 
 def test_video_players_expose_a_loop_toggle():
@@ -192,6 +198,10 @@ def test_outputs_are_browsable_by_project_folder_and_reclassifiable_per_task():
     assert 'data-output-project="' in script
     assert '"/api/tasks/" + encodeURIComponent(item.task_id) + "/project"' in script
     assert "只会改变项目归类，不会移动或复制成片文件" in script
+    move_handler = script.split("function confirmOutputProjectMove()", 1)[1].split("function confirmOutputImport", 1)[0]
+    assert "requestOutputTaskProject(item, targetId)" in move_handler
+    assert "refreshOutputCollection();" in move_handler
+    assert "render();" not in move_handler
     assert ".output-project-card" in styles
     assert ".output-project-move-option" in styles
 
@@ -261,6 +271,26 @@ def test_output_page_limits_cards_and_exposes_pagination_controls():
     assert '$("outputPagination").addEventListener("click"' in script
     assert ".output-pagination" in styles
     assert ".output-page-number.active" in styles
+
+
+def test_project_output_view_exposes_workflow_name_filters_with_bounded_labels():
+    page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert 'id="outputWorkflowFilters"' in page
+    assert 'aria-label="按工作流筛选"' in page
+    assert "OUTPUT_WORKFLOW_FILTER_MAX_CHARS" in script
+    assert "function outputWorkflowNames()" in script
+    assert "function renderWorkflowFilters()" in script
+    assert "function outputWorkflowFilterLabel(name)" in script
+    assert "outputWorkflowFilterLabel(name)" in script
+    assert "state.workflowFilter" in script
+    assert 'data-output-workflow="' in script
+    assert "outputWorkflowFilterMatches(item)" in script
+    assert ".output-workflow-filters" in styles
+    assert ".output-workflow-filter" in styles
+    assert "text-overflow: ellipsis" in styles
 
 
 def test_output_cards_support_star_ratings_and_rating_filters():
@@ -465,23 +495,33 @@ def test_workflow_submit_exposes_all_instance_type_options():
     page = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
 
     assert 'id="instanceType"' in page
-    assert 'value="default">Standard · 24GB · ¥4.70572 / 小时' in page
-    assert 'value="plus">Plus · 48GB · ¥6.05020 / 小时' in page
-    assert 'value="ultra">Ultra · 84GB · ¥9.07531 / 小时' in page
+    assert 'value="default">Standard · 24GB</option>' in page
+    assert 'value="plus">Plus · 48GB</option>' in page
+    assert 'value="ultra">Ultra · 84GB</option>' in page
+    assert "¥4.70572" not in page
+    assert "¥6.05020" not in page
+    assert "¥9.07531" not in page
 
 
-def test_workflow_submit_can_rename_save_and_export_current_workflow():
+def test_workflow_submit_can_edit_save_and_export_current_workflow():
     page = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
-    assert 'id="renameWorkflowLibraryButton"' in page
+    assert 'id="editWorkflowSnapshotButton"' in page
     assert 'id="saveWorkflowLibraryButton"' in page
+    assert 'id="workflowEditorModal"' in page
+    assert 'id="restoreWorkflowJson"' in page
+    assert 'id="workflowEditorConfigLabel"' in page
     assert 'id="overwriteWorkflowLibraryButton"' not in page
+    assert 'id="renameWorkflowLibraryButton"' not in page
     assert '>导出</button>' in page
     assert 'function buildCurrentWorkflow()' in script
-    assert 'function openWorkflowRename()' in script
-    assert 'function saveWorkflowRename()' in script
-    assert 'jsonRequest("/api/workflows/" + encodeURIComponent(appState.workflowId), "PATCH", { name: name })' in script
+    assert 'function openWorkflowEditor()' in script
+    assert 'function saveWorkflowRecord(event)' in script
+    assert 'function applyWorkflowEditorJson(parsed)' in script
+    assert 'jsonRequest("/api/workflows/analyze", "POST"' in script
+    assert 'function openWorkflowRename()' not in script
+    assert 'function saveWorkflowRename()' not in script
     assert 'function saveWorkflowLibrary()' in script
     assert 'jsonRequest("/api/workflows", "POST", payload)' in script
     assert 'input_config' in script

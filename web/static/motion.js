@@ -345,6 +345,110 @@
     });
   }
 
+  var videoContextMenu = null;
+  var videoContextTarget = null;
+
+  function closeVideoContextMenu() {
+    if (!videoContextMenu) return;
+    videoContextMenu.hidden = true;
+    videoContextTarget = null;
+  }
+
+  function ensureVideoContextMenu() {
+    if (videoContextMenu) return videoContextMenu;
+    videoContextMenu = document.createElement("div");
+    videoContextMenu.className = "video-context-menu";
+    videoContextMenu.hidden = true;
+    videoContextMenu.setAttribute("role", "menu");
+    videoContextMenu.setAttribute("aria-label", "视频操作");
+    videoContextMenu.innerHTML = '<div class="video-context-menu-time">当前播放位置 <strong data-video-context-time>0.0s</strong></div><button type="button" data-capture-video-frame role="menuitem">截取当前帧</button>';
+    document.body.appendChild(videoContextMenu);
+    videoContextMenu.querySelector("[data-capture-video-frame]").addEventListener("click", function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      captureVideoFrame(videoContextTarget, this);
+    });
+    return videoContextMenu;
+  }
+
+  function showVideoContextMenu(video, event) {
+    var menu = ensureVideoContextMenu();
+    videoContextTarget = video;
+    var time = menu.querySelector("[data-video-context-time]");
+    if (time) time.textContent = (Number(video.currentTime || 0)).toFixed(2) + "s";
+    menu.hidden = false;
+    var rect = menu.getBoundingClientRect();
+    menu.style.left = Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8)) + "px";
+    menu.style.top = Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8)) + "px";
+    var button = menu.querySelector("[data-capture-video-frame]");
+    if (button) button.focus();
+  }
+
+  function captureVideoFrame(video, button) {
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      closeVideoContextMenu();
+      showToast(document.querySelector(".toast-stack"), "视频画面还没有加载完成，请稍后再试", true);
+      return;
+    }
+    if (button) {
+      button.disabled = true;
+      button.textContent = "正在截取…";
+    }
+    var canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    var context = canvas.getContext("2d");
+    if (!context) {
+      closeVideoContextMenu();
+      showToast(document.querySelector(".toast-stack"), "当前环境无法截取视频帧", true);
+      return;
+    }
+    try { context.drawImage(video, 0, 0, canvas.width, canvas.height); } catch (error) {
+      closeVideoContextMenu();
+      showToast(document.querySelector(".toast-stack"), "视频帧读取失败，请确认素材来自本地工作台", true);
+      return;
+    }
+    var dataUrl;
+    try { dataUrl = canvas.toDataURL("image/png"); } catch (error) {
+      closeVideoContextMenu();
+      showToast(document.querySelector(".toast-stack"), "视频帧导出失败", true);
+      return;
+    }
+    var base64 = dataUrl.split(",")[1] || "";
+    fetch("/api/paste-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ name: "video-frame-" + Date.now() + ".png", mime: "image/png", data: base64 })
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error(data.message || "截帧保存失败");
+        return data;
+      });
+    }).then(function (asset) {
+      video.dispatchEvent(new CustomEvent("rh:video-frame-captured", { bubbles: true, detail: { video: video, asset: asset } }));
+      showToast(document.querySelector(".toast-stack"), "已保存当前帧，可作为图片输入使用");
+      closeVideoContextMenu();
+    }).catch(function (error) {
+      showToast(document.querySelector(".toast-stack"), error.message, true);
+      if (button) { button.disabled = false; button.textContent = "截取当前帧"; }
+    });
+  }
+
+  document.addEventListener("contextmenu", function (event) {
+    var target = event.target;
+    var video = target && target.closest ? target.closest("video") : null;
+    if (!video) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showVideoContextMenu(video, event);
+  }, true);
+  document.addEventListener("pointerdown", function (event) {
+    if (videoContextMenu && !videoContextMenu.hidden && !videoContextMenu.contains(event.target)) closeVideoContextMenu();
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") closeVideoContextMenu();
+  });
+
   if (!prefersReducedMotion()) {
     document.documentElement.classList.add("motion-page-enter-from-" + pendingPageDirection);
     if (!nativePageTransition) document.documentElement.classList.add("motion-page-enter");
@@ -363,6 +467,8 @@
     openModal: openModal,
     navigateTopLevelPage: navigateTopLevelPage,
     showToast: showToast,
+    captureVideoFrame: captureVideoFrame,
+    closeVideoContextMenu: closeVideoContextMenu,
     startPageEnter: startPageEnter,
     prefersReducedMotion: prefersReducedMotion,
     videoPlayerMarkup: videoPlayerMarkup

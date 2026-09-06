@@ -45,6 +45,11 @@
 .compare-mode.active { color: var(--accent); }
 .compare-mode:disabled { cursor: not-allowed; opacity: .38; }
 .compare-stage { position: relative; min-height: clamp(420px, 59vh, 690px); margin-top: 20px; overflow: hidden; border: 1px solid var(--border-stage); border-radius: 15px; background: var(--surface-media); box-shadow: inset 0 0 0 1px var(--light-ghost), 0 18px 42px var(--shadow-medium); outline: none; }
+.compare-stage.is-fullscreen { position: fixed; z-index: 30; inset: 0; width: 100vw; height: 100vh; min-height: 0; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+.compare-fullscreen-close { position: fixed; z-index: 31; top: 18px; right: 18px; display: grid; width: 38px; height: 38px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--surface-control); box-shadow: 0 12px 30px var(--shadow-medium); font-size: 24px; line-height: 1; cursor: pointer; }
+.compare-fullscreen-close[hidden] { display: none; }
+.compare-fullscreen-close:hover, .compare-fullscreen-close:focus-visible { border-color: var(--accent); color: var(--accent); background: var(--surface-control-hover); outline: none; }
+:root.compare-fullscreen-open, :root.compare-fullscreen-open body { overflow: hidden; }
 .compare-stage[data-mode="overlay"] .compare-overlay-view, .compare-stage[data-mode="overlay"] .compare-overlay-layer .compare-transform { cursor: grab; }
 .compare-stage[data-mode="overlay"] .compare-divider, .compare-stage.is-dividing .compare-overlay-view, .compare-stage.is-dividing .compare-overlay-layer .compare-transform { cursor: ew-resize; }
 .compare-stage:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), inset 0 0 0 1px var(--light-ghost); }
@@ -62,6 +67,7 @@
 .compare-pane-tag { left: 12px; }
 .compare-transform { position: absolute; inset: 0; display: grid; place-items: center; cursor: grab; touch-action: none; }
 .compare-transform > img, .compare-transform > video { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 0; background: var(--surface-media); transform: translate3d(var(--pan-x, 0px), var(--pan-y, 0px), 0) scale(var(--zoom, 1)); transform-origin: center center; user-select: none; pointer-events: none; }
+.compare-transform > video.is-resolution-normalized { width: var(--compare-video-display-width); height: var(--compare-video-display-height); }
 .compare-pane .compare-transform > img, .compare-pane .compare-transform > video { max-width: none; max-height: none; }
 .compare-media-placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; color: var(--subtle); font-size: 10px; text-align: center; background: repeating-linear-gradient(135deg, var(--light-ghost) 0, var(--light-ghost) 1px, transparent 1px, transparent 12px); }
 .compare-overlay-layer { position: absolute; inset: 0; overflow: hidden; background: var(--surface-media); }
@@ -69,6 +75,7 @@
 .compare-overlay-label { top: 12px; }
 .compare-overlay-label.is-first { left: 12px; z-index: 5; }
 .compare-overlay-label.is-second { right: 12px; z-index: 1; }
+.compare-stage.is-fullscreen .compare-overlay-label.is-second { right: 74px; }
 .compare-divider { position: absolute; z-index: 7; top: 0; bottom: 0; left: var(--divider, 50%); width: 18px; margin-left: -9px; cursor: ew-resize; pointer-events: auto; }
 .compare-divider::before { position: absolute; top: 0; bottom: 0; left: 50%; border-left: 2px solid var(--accent); filter: drop-shadow(0 0 8px var(--accent-outline)); content: ""; pointer-events: none; transform: translateX(-1px); }
 .compare-controls { display: flex; align-items: center; gap: 10px; min-height: 44px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-deep); }
