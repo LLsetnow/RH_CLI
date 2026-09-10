@@ -14,11 +14,15 @@
 - `data/workflow-registry.json`：工作流库的内部目录索引；只有登记到这里的完整工作流包会显示在“工作流”页面
 - `data/input/<来源>/`：本地输入文件统一目录；来源包括 `downloaded`、`pasted`、`prompt`、`telegram` 和 `transcoded`
 - `data/outputs/`：默认输出目录下的任务产物；普通工作流任务的 `<task_id>/` 保存 `workflow_api.json`、`prompt_group.json` 和路径清单 `manifest.json`，Codex/深度/骨骼/角色语音工具箱任务保存包含本地 workflowId、统一 `feature` 类型、提示词、画幅参数和输入路径的 `manifest.json`。输入文件不复制到任务目录，只保存原始路径
-- `VideoMake/ref/Resources.json`：ref 资源目录和各 JSON 索引的机器可读入口；其中 `sources.prompt` 指向提示词基础积木文件。`data/prompt/state.json` 保存当前临时组装顺序；独立提示词组文件只作为历史或兼容数据保留，新的工作流包以自身携带的提示词组为准。基础积木路径由该索引解析，内容放在 JSON 的 `blocks` 数组中，每项包含 `id`、`category`、`tags`、`title` 和 `text`
+- `VideoMake/ref/Resources.json`：ref 资源目录和各 JSON 索引的机器可读入口；其中 `sources.prompt` 指向提示词基础积木文件，`sources.tts` 指向 GPT-SoVITS 角色目录。`data/prompt/state.json` 保存当前临时组装顺序；独立提示词组文件只作为历史或兼容数据保留，新的工作流包以自身携带的提示词组为准。基础积木路径由该索引解析，内容放在 JSON 的 `blocks` 数组中，每项包含 `id`、`category`、`tags`、`title` 和 `text`
 - `VideoMake/ref/pose/pose.json`：动作库 JSON 源文件。动作原图、深度图和骨骼图仍从 ref 原目录读取，不会复制到本项目
 - `VideoMake/ref/Resources.json`：ref 资源目录和各 JSON 索引的机器可读入口清单
 - `web/docs/translation.md`：提示词工坊自由文本的阿里云翻译配置和英文导出规则
 - `web/docs/telegram.md`：任务完成后的 Telegram Bot 成片推送配置和投递规则
+
+### 从零创建资源库
+
+打开“设置 → 扩展功能”，在“媒体库 ref 文件夹”中填写一个新的文件夹路径，点击“新建资源库”。应用会在空目录中创建 `Resources.json`、提示词、动作、人物、音频、背景、服装和 TTS 的目录与空索引，并立即将它设为当前资源库；已有内容的目录不会被覆盖。之后可以在提示词工坊中逐项添加资源。TTS 模型文件仍需要用户自行放入 `sources.tts` 指向的目录，每个人物目录必须包含 GPT 模型、SoVITS 模型和 `reference/` 下的参考音频与 `参考文本.txt`。
 
 仪表盘入口为 `/dashboard`，支持 `1D`、`7D`、`30D` 时间范围，并可在“消耗概况”中按账号筛选或查看全部账号；日消耗、提交次数和处理时长来自 SQLite 中独立的 `usage_records`，已识别的视频产物还会用于计算并发场景下的单位视频响应效率，不会因为删除历史任务而消失。仪表盘的“高分工作流”只统计工作流库中已登记的工作流，并复用成片库当前可见产物的评分，按已评分星级总和列出当前范围前 5 名。余额按账号去重，每个账号只取最近一次成功查询的一个 API Key，避免同一账号的多个 Key 重复累加。
 
@@ -69,6 +73,127 @@ npm run package:win
 ```
 
 构建会生成 `web/dist/RH-Workflow-Desk-0.3.1-x64.exe` 和 `SHA256SUMS.txt`；安装后的任务数据写入 Windows 用户数据目录。
+
+## 新用户首次安装与配置
+
+推荐按下面的顺序配置。只想提交普通 RunningHub 工作流时，完成前四步即可；翻译、视觉分析、TTS、深度图、骨骼图和 Telegram 都是按需启用的扩展能力。
+
+### 1. 先确认本机依赖
+
+| 项目 | 是否必需 | 用途 |
+| --- | --- | --- |
+| macOS Apple Silicon 或 Windows x64 | 必需 | 当前发布安装包的目标平台 |
+| Python 3.10+ | 仅源码运行必需 | 启动 `web/backend` 本地服务；安装包已内置 |
+| 网络访问 | 提交任务必需 | 访问 RunningHub 以及已启用的阿里云、Telegram 服务 |
+| `ffmpeg` / `ffprobe` | 处理视频时必需 | 视频转码、读取时长和尺寸、下载后检查媒体 |
+| `yt-dlp` | 使用社交平台下载或 Telegram 视频入站时必需 | 下载 Bilibili、抖音、X/Twitter 等视频 |
+
+源码运行还需要在仓库根目录安装 Python 依赖；Electron 开发版需要在 `web/` 下执行 `npm install`。如果网络环境使用代理，请在启动本地服务的进程中配置标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
+
+### 2. 启动并确认本地服务
+
+源码运行：
+
+```bash
+./web/scripts/start.sh --no-browser
+```
+
+然后打开 `http://127.0.0.1:8766`。安装包用户直接启动 RH Workflow Desk 即可；Electron 会自动启动同一个本地 Python 服务。
+
+第一次配置前先确认页面能正常打开，再进入“设置”。不要同时运行多个源码服务或多个安装包实例，否则可能同时写入同一份 SQLite 任务库。
+
+### 3. 配置 RunningHub API Key
+
+打开“设置 → 平台配置”，添加 RunningHub API Key：
+
+1. 填写名称，选择站点（`runninghub.cn` 或 `runninghub.ai`）。
+2. 粘贴 API Key，点击“检测并保存”。
+3. 等待余额和账号类型检测成功；检测失败时先检查站点、Key 有效期和网络。
+4. 如有多个 Key，再设置“个人 API Key 并发数”和“API Key 调度策略”。个人 Key 并发范围是 1—3；共享/企业 Key 不受这个个人上限限制。
+
+普通 API 提交只需要 API Key，不要求在 RunningHub 网页中保持登录。账号登录属于可选能力，主要用于网页账号相关操作和签到。API Key 会脱敏显示，敏感配置只保存在本机，不要提交到 Git、截图或日志。
+
+### 4. 导入并验证第一个工作流
+
+在“任务提交”中导入 ComfyUI **API 格式** JSON，然后填写远程 RunningHub `workflowId`。本地页面的工作流 ID（例如 `wf_...`）不能代替远程 `workflowId`。
+
+提交前检查：
+
+- JSON 是 API 格式，而不是普通 UI 工作流格式；
+- 远端已安装工作流需要的模型和自定义节点；
+- 图片、音频、视频等本地输入路径可读；
+- 必要时在任务页配置尺寸、随机种子、提示词和节点覆盖值；
+- 先用单个小任务验证提交、轮询、下载和产物保存，再开启批量队列。
+
+如需长期复用，导入后点击“保存到工作流库”。工作流库会保存 API JSON、提示词组和运行配置；临时快照、工作流库条目和任务快照的区别见下文“工作流快照与工作流库”。
+
+### 5. 从零创建并绑定资源库
+
+如果要使用提示词工坊、人物/动作/背景/音频/服装卡片或角色 TTS，打开“设置 → 扩展功能”：
+
+1. 在“媒体库 ref 文件夹”填写一个新的文件夹路径，或使用“选择文件夹”。
+2. 点击“新建资源库”。目标目录必须为空，初始化不会覆盖已有内容。
+3. 初始化完成后，应用会创建 `Resources.json`、各类空索引和媒体目录，并立即切换到这个资源库。
+4. 再通过提示词工坊添加资源，或把已有资源按索引约定迁入对应目录。
+
+资源库的入口始终是 `Resources.json`。它通过 `sources` 索引 `prompt`、`pose`、`character`、`audio`、`background`、`clothes` 和 `tts`；因此迁移资源时应修改索引或目录结构，不要在代码中写死外部项目的绝对路径。普通 RunningHub 工作流提交不依赖资源库，但提示词和媒体卡片功能依赖它。
+
+### 6. 配置角色 TTS（可选）
+
+TTS 不再由 `tts.py` 写死某个项目路径，而是从当前资源库的 `Resources.json` 中读取 `sources.tts`。每个角色目录至少需要：
+
+```text
+<资源库>/tts/<角色名>/
+├── 一个 GPT-SoVITS *.ckpt
+├── 一个 SoVITS *.pth
+└── reference/
+    ├── 一个 *.wav
+    └── 参考文本.txt
+```
+
+资源文件应由用户单独准备，空资源库初始化器不会复制模型。GPT-SoVITS 服务默认监听 `http://127.0.0.1:9889`；如果服务地址不同，在启动前设置 `RH_TTS_API_URL`。配置好后，打开 TTS 页面确认角色列表能被读取，再进行合成测试。
+
+### 7. 配置本地媒体运行时（按需）
+
+深度图和骨骼图工具使用 RH_CLI 自己的运行时，不依赖 VideoMake 项目的 `.runtime`：
+
+```text
+<RH_CLI>/.runtime/depth_anything_v2_small_f16/
+<RH_CLI>/.runtime/pose_dwpose/
+```
+
+对应的模型和虚拟环境必须完整存在，辅助脚本位于 `tools/`。如需把运行时放到其他位置，可设置 `RH_RUNTIME_ROOT` 指向运行时根目录；工具脚本仍从 RH_CLI 项目内读取。没有使用深度图或骨骼图时可以不安装这两套运行时。
+
+### 8. 配置可选的云服务和 Telegram
+
+- **阿里云翻译**：在“设置 → 阿里云翻译”填写 AccessKey ID 和 AccessKey Secret，或在启动前设置 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`。详细规则见 [翻译配置](docs/translation.md)。
+- **阿里云视觉分析**：在“设置 → 阿里云视觉”填写百炼 API Key，或设置 `DASHSCOPE_API_KEY`（兼容 `ALIYUN_VISION_API_KEY`）；用于图片卡片的视觉分析，默认使用 `qwen-vl-max`。
+- **Telegram 成片推送/入站**：在“设置 → Telegram”填写 Bot Token、推送 Chat ID 和入站 Chat ID；也可设置 `RH_TELEGRAM_BOT_TOKEN`、`RH_TELEGRAM_PUSH_CHAT_ID`、`RH_TELEGRAM_INBOUND_CHAT_ID`、`RH_TELEGRAM_ENABLED=1`。详细的工作流条件、下载、重试和 Cookie 规则见 [Telegram 配置](docs/telegram.md)。
+
+这些服务都不是普通本地提交的前置条件。只启用实际需要的服务，并为每个服务单独验证一次连接。
+
+### 9. 首次验收清单
+
+完成配置后，建议按以下顺序做一次小验收：
+
+1. 页面能打开，设置保存后刷新仍存在。
+2. RunningHub API Key 检测成功并能读取余额。
+3. 一个最小 API 工作流能成功提交、轮询并下载产物。
+4. 输入文件进入 `data/input/<来源>/`，产物进入设置的输出目录。
+5. 若使用资源库，`Resources.json` 和各索引可读取；若使用 TTS，角色列表能显示。
+6. 若使用 Telegram、翻译或视觉分析，分别执行一次测试，不要把“配置已保存”当作“远程服务可用”。
+
+### 配置文件和数据位置
+
+源码模式默认把运行数据放在 `web/data/`；安装包模式把数据放在操作系统用户数据目录。主要内容如下：
+
+- `keys.json`：RunningHub API Key、云服务 Key 和 Telegram 配置；只保存在本机。
+- `accounts.json`：账号名称、站点和签到状态，不保存密码或 token。
+- `tasks.sqlite3`：任务历史、队列状态、阶段日志和用量台账。
+- `input/<来源>/`：统一输入缓存，按 `downloaded`、`pasted`、`prompt`、`telegram`、`transcoded` 等来源二次分类。
+- `outputs/`：默认任务产物、工作流快照、提示词组快照和 `manifest.json`。
+
+迁移到新电脑时，应分别迁移 API/云服务配置、资源库、TTS 模型、`.runtime` 和需要保留的任务/产物；不要把密钥、Cookie 或完整用户数据目录直接提交到仓库。
 
 ## 工作流快照与工作流库
 

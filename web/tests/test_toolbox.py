@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import time
@@ -351,6 +352,24 @@ def test_discover_tts_voices_requires_the_matching_local_asset_set(tmp_path):
     assert [voice["id"] for voice in voices] == ["千夏"]
     assert voices[0]["prompt_text"] == "参考台词"
     assert voices[0]["reference_path"].endswith("千夏/reference/sample.wav")
+
+
+def test_discover_tts_voices_uses_the_resources_index(tmp_path):
+    root = tmp_path / "ref"
+    voice_dir = root / "tts" / "角色"
+    reference_dir = voice_dir / "reference"
+    reference_dir.mkdir(parents=True)
+    (voice_dir / "voice.ckpt").write_bytes(b"gpt")
+    (voice_dir / "voice.pth").write_bytes(b"sovits")
+    (reference_dir / "sample.wav").write_bytes(b"wav")
+    (reference_dir / "参考文本.txt").write_text("参考台词", encoding="utf-8")
+    index = root / "Resources.json"
+    index.write_text(json.dumps({"media_root": ".", "sources": {"tts": "tts"}}, ensure_ascii=False), encoding="utf-8")
+
+    voices = tts_module.discover_tts_voices(resources_index_path=index)
+
+    assert [voice["id"] for voice in voices] == ["角色"]
+    assert voices[0]["reference_path"].endswith("角色/reference/sample.wav")
 
 
 def test_tts_client_switches_model_and_sends_selected_reference(monkeypatch, tmp_path):

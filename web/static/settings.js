@@ -654,6 +654,21 @@
         }
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; button.textContent = original; });
     });
+    $("createMediaLibrary").addEventListener("click", function () {
+      if (state.dirty) return showToast("请先保存或放弃当前配置修改，再新建资源库", true);
+      var path = value("mediaLibraryRoot");
+      if (!path) return showToast("请先填写新资源库的文件夹路径", true);
+      if (!window.confirm("将在该路径创建空的资源库目录和索引文件，已有内容不会被覆盖。继续吗？")) return;
+      var button = this;
+      var original = button.textContent;
+      button.disabled = true;
+      button.textContent = "创建中…";
+      jsonRequest("/api/resource-library", "POST", { path: path }).then(function (data) {
+        setValue("mediaLibraryRoot", data.path || path);
+        showToast("资源库已创建并设为当前媒体库");
+        return refresh(true);
+      }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; button.textContent = original; });
+    });
     $("testTelegram").addEventListener("click", function () { if (state.dirty) return showToast("请先保存配置，再测试 Telegram", true); var button = this; button.disabled = true; jsonRequest("/api/telegram/test", "POST", {}).then(function (data) { showToast(data.message || "Telegram 测试消息已发送"); }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; }); });
     $("clearTelegram").addEventListener("click", function () { if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？点击右下角保存后生效。")) return; state.clearingTelegram = true; setValue("telegramBotToken", ""); setValue("telegramPushChatId", ""); setValue("telegramInboundChatId", ""); setChecked("telegramEnabled", false); setChecked("telegramInboundEnabled", false); setChecked("telegramVideoInboundEnabled", false); setValue("telegramInboundMode", "fixed"); setValue("telegramInboundWorkflow", ""); setValue("telegramInboundFolder", ""); setValue("telegramVideoInboundWorkflow", ""); updateTelegramInboundControls(); updateTelegramVideoInboundControls(); markDirty(); showToast("已准备清除 Telegram 配置，请保存"); });
     $("credentialList").addEventListener("click", handleCredentialClick);

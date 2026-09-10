@@ -10,9 +10,9 @@ from typing import Any
 import httpx
 
 from rh_cli.errors import RhCliError
+from .resource_library import default_resource_index_path, resolve_tts_root
 
 
-TTS_ROOT = Path("/Users/apple/Documents/VideoMake/ref/tts")
 TTS_API_URL = "http://127.0.0.1:9889"
 TTS_TEXT_LIMIT = 20_000
 
@@ -47,10 +47,25 @@ def _voice_record(directory: Path) -> dict[str, Any] | None:
     }
 
 
-def discover_tts_voices(root: str | Path = TTS_ROOT) -> list[dict[str, Any]]:
-    root_path = Path(root).expanduser().resolve()
+def discover_tts_voices(
+    root: str | Path | None = None,
+    *,
+    resources_index_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        root_path = (
+            Path(root).expanduser().resolve()
+            if root is not None
+            else resolve_tts_root(resources_index_path)
+        )
+    except RhCliError:
+        raise
     if not root_path.is_dir():
-        raise RhCliError("TTS_ASSET_ROOT_MISSING", f"找不到角色 TTS 目录：{root_path}")
+        index_path = Path(resources_index_path).expanduser().resolve() if resources_index_path else default_resource_index_path()
+        raise RhCliError(
+            "TTS_ASSET_ROOT_MISSING",
+            f"找不到角色 TTS 目录：{root_path}（请检查 {index_path} 的 sources.tts）",
+        )
     voices = []
     for directory in sorted(root_path.iterdir(), key=lambda item: item.name):
         if not directory.is_dir() or directory.name.startswith("."):
@@ -63,7 +78,11 @@ def discover_tts_voices(root: str | Path = TTS_ROOT) -> list[dict[str, Any]]:
     return voices
 
 
-def public_tts_voices(root: str | Path = TTS_ROOT) -> list[dict[str, str]]:
+def public_tts_voices(
+    root: str | Path | None = None,
+    *,
+    resources_index_path: str | Path | None = None,
+) -> list[dict[str, str]]:
     return [
         {
             "id": str(voice["id"]),
@@ -71,22 +90,53 @@ def public_tts_voices(root: str | Path = TTS_ROOT) -> list[dict[str, str]]:
             "reference_path": str(voice["reference_path"]),
             "reference_name": str(voice["reference_name"]),
         }
-        for voice in discover_tts_voices(root)
+        for voice in discover_tts_voices(root, resources_index_path=resources_index_path)
     ]
 
 
 class TtsClient:
     """Serialize model switching and synthesis requests to the local API."""
 
-    def __init__(self, root: str | Path = TTS_ROOT, api_url: str | None = None) -> None:
-        self.root = Path(root).expanduser().resolve()
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        api_url: str | None = None,
+        resources_index_path: str | Path | None = None,
+    ) -> None:
+        self.root_override = Path(root).expanduser().resolve() if root is not None else None
+        self.resources_index_path = (
+            Path(resources_index_path).expanduser().resolve()
+            if resources_index_path
+            else default_resource_index_path()
+        )
         self.api_url = str(api_url or os.environ.get("RH_TTS_API_URL") or TTS_API_URL).rstrip("/")
         self._lock = threading.RLock()
         self._loaded_voice_id = ""
 
+    def set_resources_index_path(self, value: str | Path) -> None:
+        self.root_override = None
+        self.resources_index_path = Path(value).expanduser().resolve()
+
+    def voices(self) -> list[dict[str, Any]]:
+        return discover_tts_voices(
+            self.root_override,
+            resources_index_path=self.resources_index_path,
+        )
+
+    def public_voices(self) -> list[dict[str, str]]:
+        return [
+            {
+                "id": str(voice["id"]),
+                "name": str(voice["name"]),
+                "reference_path": str(voice["reference_path"]),
+                "reference_name": str(voice["reference_name"]),
+            }
+            for voice in self.voices()
+        ]
+
     def voice(self, voice_id: str) -> dict[str, Any]:
         clean_id = str(voice_id or "").strip()
-        for voice in discover_tts_voices(self.root):
+        for voice in self.voices():
             if str(voice["id"]) == clean_id:
                 return voice
         raise RhCliError("TTS_VOICE_NOT_FOUND", f"找不到角色 TTS：{clean_id or '未选择'}")

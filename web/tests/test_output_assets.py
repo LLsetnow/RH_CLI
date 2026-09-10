@@ -609,6 +609,8 @@ def test_settings_exposes_configurable_media_library_root_and_help():
     assert 'data-tooltip="统一读取 ref/pose/pose.json' in page
     assert ".field-help::after" in styles
     assert "/api/pick-media-root" in script
+    assert 'id="createMediaLibrary"' in settings_page
+    assert 'jsonRequest("/api/resource-library", "POST"' in script
     assert "media_library_root" in script
 
 

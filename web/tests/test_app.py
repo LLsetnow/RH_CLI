@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import http.client
 import threading
 from datetime import datetime
 from types import SimpleNamespace
@@ -1386,6 +1387,34 @@ def test_media_library_root_setting_replaces_legacy_resource_paths(tmp_path, mon
         assert store._read_json_file().get("reference_resources_paths") is None
     finally:
         store._db.close()
+
+
+def test_resource_library_api_initializes_and_activates_empty_root(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    target = tmp_path / "new-ref"
+    server = web_server.AppServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        body = json.dumps({"path": str(target)}).encode("utf-8")
+        connection.request("POST", "/api/resource-library", body=body, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+
+        assert response.status == 201
+        assert payload["path"] == str(target.resolve())
+        assert (target / "Resources.json").is_file()
+        assert (target / "prompt/library.json").is_file()
+        assert server.store.media_library_root() == str(target.resolve())
+        assert server.prompt_store.library_path == (target / "prompt/library.json").resolve()
+        assert server.action_store.source_path == (target / "pose/pose.json").resolve()
+        assert server.toolbox._tts.resources_index_path == (target / "Resources.json").resolve()
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
 
 
 def test_public_key_masks_secret():

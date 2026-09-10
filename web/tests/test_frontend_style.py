@@ -540,7 +540,8 @@ def test_character_tts_workspace_uses_local_voice_assets_and_task_queue():
     assert 'jsonRequest("/api/tts/voices", "GET")' in script
     assert 'jsonRequest("/api/toolbox/tts", "POST"' in script
     assert 'pollTask("tts", task.id)' in script
-    assert "TTS_ROOT = Path(\"/Users/apple/Documents/VideoMake/ref/tts\")" in tts_source
+    assert "resolve_tts_root" in tts_source
+    assert "sources.tts" in tts_source or "resolve_tts_root" in tts_source
     assert '"sample_steps": 8' in tts_source
 
 

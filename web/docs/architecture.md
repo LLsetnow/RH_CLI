@@ -34,6 +34,7 @@ backend/
 - `backend/server.py` 提供静态文件和本地 JSON API，例如状态、任务、产物、工作流、设置、文件预览和原生文件/目录选择器。
 - `backend/app.py` 中的 `LocalStore` 负责 SQLite 任务历史、独立用量记录、工作流资料和本地持久化；`TaskManager` 负责本地等待队列、并发槽位、提交、轮询、产物下载和重启恢复。仪表盘的消耗指标只读取 `usage_records`，首次启动时从已有任务回填，删除任务不会删除用量记录；注册工作流评分排行则读取成片库当前可见产物的评分，只保留工作流库中已登记的工作流。
 - `backend/prompt_store.py`、`backend/action_store.py`、`backend/reference_store.py` 分别管理提示词、动作和参考资源的 JSON 索引；动作/参考资源统一从设置的媒体库 ref 根目录读取固定目录中的 JSON 文件。每个条目保存稳定 `id`、分类、标签、文本和相对媒体路径，前端编辑、新建和删除后由对应 Store 原子重写 JSON；不再生成或读取 Markdown 及派生索引缓存。
+- `backend/resource_library.py` 负责从零创建空资源库和解析 `Resources.json`；初始化只接受空目录，不覆盖已有文件。TTS 目录通过 `sources.tts` 解析，和人物、动作、参考资源共用同一个媒体库根目录。
 - API Key、账号和 token 等敏感信息只能脱敏后进入页面或日志，不能写入调试输出、文档或 git。
 
 ## 数据目录

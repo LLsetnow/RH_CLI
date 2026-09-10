@@ -32,7 +32,8 @@ from .prompt_writer import AliyunPromptWriter
 from .reference_store import ReferenceStore
 from .input_paths import input_source_path
 from .runtime_paths import depth_runtime_paths, skeleton_runtime_paths
-from .tts import TtsClient, public_tts_voices
+from .resource_library import initialize_resource_library, resource_index_path
+from .tts import TtsClient
 from .translation import AliyunTranslationClient
 from .toolbox import (
     IMAGE_SUFFIXES,
@@ -933,9 +934,20 @@ class ToolboxManager:
     def __init__(self, store: LocalStore) -> None:
         self.store = store
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rh-toolbox")
-        self._tts = TtsClient()
+        configured_root = store.media_library_root()
+        self._tts = TtsClient(
+            resources_index_path=resource_index_path(configured_root)
+            if configured_root
+            else None,
+        )
         self._action_video_jobs: dict[str, dict[str, object]] = {}
         self._action_video_jobs_lock = threading.Lock()
+
+    def set_resource_root(self, root: str | Path) -> None:
+        self._tts.set_resources_index_path(resource_index_path(root))
+
+    def tts_voices(self) -> list[dict[str, str]]:
+        return self._tts.public_voices()
 
     @staticmethod
     def _asset_path(value: object, *, label: str, suffixes: set[str]) -> Path:
@@ -1415,7 +1427,10 @@ class LocalHandler(BaseHTTPRequestHandler):
             self._json(200, state)
             return
         if path == "/api/tts/voices":
-            self._json(200, {"voices": public_tts_voices()})
+            try:
+                self._json(200, {"voices": self.server.toolbox.tts_voices()})  # type: ignore[attr-defined]
+            except Exception as exc:
+                self._json(400 if isinstance(exc, RhCliError) else 500, self._safe_error(exc))
             return
         if path == "/api/outputs":
             store, manager = self.state
@@ -1855,6 +1870,16 @@ class LocalHandler(BaseHTTPRequestHandler):
                 selected = pick_local_directory_on_macos("选择媒体库 ref 文件夹")
                 self._json(200, {"path": str(selected) if selected else ""})
                 return
+            if path == "/api/resource-library":
+                body = self._body()
+                root = initialize_resource_library(str(body.get("path") or ""))
+                self.server.configure_media_library(root)  # type: ignore[attr-defined]
+                self._json(201, {
+                    "path": str(root),
+                    "index_path": str(resource_index_path(root)),
+                    "initialized": True,
+                })
+                return
             if path == "/api/workflows":
                 body = self._body()
                 content = body.get("content")
@@ -2125,12 +2150,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     self.server.prompt_store.set_library_path(prompt_path)  # type: ignore[attr-defined]
                     result["prompt_library_path"] = str(self.server.prompt_store.library_path)  # type: ignore[attr-defined]
                 if "media_library_root" in body:
-                    media_root = store.set_media_library_root(str(body.get("media_library_root") or ""))
-                    self.server.action_store.set_source_root(media_root)  # type: ignore[attr-defined]
-                    self.server.reference_store.set_source_root(media_root)  # type: ignore[attr-defined]
-                    indexed_library_path = store.prompt_library_path()
-                    if Path(indexed_library_path).is_file():
-                        self.server.prompt_store.set_library_path(indexed_library_path)  # type: ignore[attr-defined]
+                    media_root = self.server.configure_media_library(str(body.get("media_library_root") or ""))  # type: ignore[attr-defined]
                     result["media_library_root"] = media_root
                     result["action_resources_path"] = str(self.server.action_store.source_path)  # type: ignore[attr-defined]
                     result["reference_resources_paths"] = self.server.reference_store.source_paths()  # type: ignore[attr-defined]
@@ -2671,6 +2691,17 @@ class AppServer(ThreadingHTTPServer):
             self.reference_store = ReferenceStore(DATA_ROOT, source_paths=self.store.reference_resources_paths())
         super().__init__(address, LocalHandler)
         self.store.start_usage_backfill()
+
+    def configure_media_library(self, root: str | Path) -> str:
+        """Switch all local resource stores to one indexed media-library root."""
+        media_root = self.store.set_media_library_root(str(root))
+        self.action_store.set_source_root(media_root)
+        self.reference_store.set_source_root(media_root)
+        indexed_library_path = self.store.prompt_library_path()
+        if Path(indexed_library_path).is_file():
+            self.prompt_store.set_library_path(indexed_library_path)
+        self.toolbox.set_resource_root(media_root)
+        return media_root
 
     def server_close(self) -> None:
         self.toolbox.shutdown()
