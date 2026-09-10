@@ -1237,6 +1237,9 @@ class LocalStore:
         for directory in (DATA_ROOT, WORKFLOW_ROOT, OUTPUT_ROOT):
             directory.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._usage_backfill_stop = threading.Event()
+        self._usage_backfill_thread: threading.Thread | None = None
+        self._usage_backfill_task_ids: list[str] = []
         self._db = sqlite3.connect(DB_PATH, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -4376,7 +4379,7 @@ class LocalStore:
         self._sync_task_manifest_project_metadata(updated)
         return self.task(task_id) or updated
 
-    def _sync_usage_record_locked(self, task_id: str) -> None:
+    def _sync_usage_record_locked(self, task_id: str, *, probe_missing: bool = True) -> None:
         row = self._db.execute(
             "SELECT id, created_at, updated_at, account_id, dispatch_key_site, started_at, completed_at, status, workflow_name, cost_type, cost, duration, outputs_json FROM tasks WHERE id=?",
             (task_id,),
@@ -4392,7 +4395,7 @@ class LocalStore:
             "SELECT video_seconds FROM usage_records WHERE task_id=?",
             (task_id,),
         ).fetchone()
-        video_seconds = _video_seconds_from_outputs(outputs)
+        video_seconds = _video_seconds_from_outputs(outputs, probe_missing=probe_missing)
         previous_video_seconds = _decimal_value(previous_usage["video_seconds"]) if previous_usage else None
         if video_seconds <= 0 and previous_video_seconds is not None and previous_video_seconds > 0:
             # The ledger outlives task/output cleanup, so never lose a duration
@@ -4449,8 +4452,48 @@ class LocalStore:
         with self._lock:
             task_ids = [str(row[0]) for row in self._db.execute("SELECT id FROM tasks").fetchall()]
             for task_id in task_ids:
-                self._sync_usage_record_locked(task_id)
+                # Do not run ffprobe while the HTTP service is still being
+                # constructed. The full media backfill starts after the
+                # listening socket is bound.
+                self._sync_usage_record_locked(task_id, probe_missing=False)
             self._db.commit()
+            self._usage_backfill_task_ids = task_ids
+
+    def start_usage_backfill(self) -> None:
+        """Finish expensive video-duration backfill after startup is ready."""
+        with self._lock:
+            if self._usage_backfill_thread and self._usage_backfill_thread.is_alive():
+                return
+            task_ids = list(self._usage_backfill_task_ids)
+            if not task_ids:
+                return
+            self._usage_backfill_stop.clear()
+            self._usage_backfill_thread = threading.Thread(
+                target=self._finish_usage_backfill,
+                args=(task_ids,),
+                daemon=True,
+                name="rh-usage-backfill",
+            )
+            self._usage_backfill_thread.start()
+
+    def _finish_usage_backfill(self, task_ids: list[str]) -> None:
+        processed = 0
+        for task_id in task_ids:
+            if self._usage_backfill_stop.is_set():
+                return
+            with self._lock:
+                self._sync_usage_record_locked(task_id, probe_missing=True)
+                processed += 1
+                if processed % 32 == 0:
+                    self._db.commit()
+        with self._lock:
+            self._db.commit()
+
+    def close(self) -> None:
+        self._usage_backfill_stop.set()
+        thread = self._usage_backfill_thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=6)
 
     def update_output_rating(self, task_id: str, output_index: int, rating: Any) -> dict[str, Any]:
         try:
@@ -7342,7 +7385,7 @@ def _apply_telegram_video_duration(workflow: dict[str, Any], video_path: Path) -
     return measured
 
 
-def _video_seconds_from_outputs(outputs: Any) -> float:
+def _video_seconds_from_outputs(outputs: Any, *, probe_missing: bool = True) -> float:
     total = 0.0
     if not isinstance(outputs, list):
         return total
@@ -7354,9 +7397,9 @@ def _video_seconds_from_outputs(outputs: Any) -> float:
             duration = _decimal_value(output.get(field))
             if duration is not None and duration > 0:
                 break
-        if duration is None or duration <= 0:
+        if probe_missing and (duration is None or duration <= 0):
             duration = _probe_video_duration(Path(str(output.get("path") or "")).expanduser())
-        if duration > 0:
+        if duration is not None and duration > 0:
             total += duration
     return total
 

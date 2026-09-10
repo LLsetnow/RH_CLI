@@ -1717,6 +1717,60 @@ def test_dashboard_calculates_video_response_time_after_merging_concurrent_tasks
         store._db.close()
 
 
+def test_usage_backfill_defers_video_probe_until_after_server_startup(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    probed_paths = []
+    probe_result = [0]
+
+    def fake_probe(path):
+        probed_paths.append(path)
+        return probe_result[0]
+
+    monkeypatch.setattr(web_app, "_probe_video_duration", fake_probe)
+    store = web_app.LocalStore()
+    task_id = "task_deferred_video_backfill"
+    video_path = tmp_path / "outputs" / task_id / "output.mp4"
+    try:
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": 1,
+                "workflow_path": str(tmp_path / "workflow.json"),
+                "workflow_name": "workflow.json",
+                "files": {},
+                "prompts": {},
+                "output_dir": str(tmp_path / "outputs"),
+            }
+        )
+        store.update_task(
+            task_id,
+            status="completed",
+            outputs_json=json.dumps([{"kind": "file", "path": str(video_path), "mime": "video/mp4"}]),
+        )
+        probed_paths.clear()
+        probe_result[0] = 12.5
+    finally:
+        store.close()
+        store._db.close()
+
+    reopened = web_app.LocalStore()
+    try:
+        assert probed_paths == []
+        assert reopened.usage_records()[0]["video_seconds"] == "0"
+
+        reopened.start_usage_backfill()
+        thread = reopened._usage_backfill_thread
+        assert thread is not None
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert probed_paths == [video_path]
+        assert reopened.usage_records()[0]["video_seconds"] == "12.5"
+    finally:
+        reopened.close()
+        reopened._db.close()
+
+
 def test_dashboard_counts_rolling_telegram_usage_and_money_spend(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()

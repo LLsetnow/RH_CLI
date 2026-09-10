@@ -2698,6 +2698,7 @@ class AppServer(ThreadingHTTPServer):
             self.action_store = ActionStore(DATA_ROOT, source_path=configured_action_path or None)
             self.reference_store = ReferenceStore(DATA_ROOT, source_paths=self.store.reference_resources_paths())
         super().__init__(address, LocalHandler)
+        self.store.start_usage_backfill()
 
     def server_close(self) -> None:
         self.toolbox.shutdown()
@@ -2741,6 +2742,7 @@ class AppServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         self.manager.close()
+        self.store.close()
         self.store._db.close()
         super().server_close()
 
