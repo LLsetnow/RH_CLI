@@ -1,13 +1,14 @@
 {
   "name": "rh-workflow-desk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "author": "LLsetnow",
-  "description": "RH Workflow Desk 的 macOS 桌面版",
+  "description": "RH Workflow Desk 的 Windows 和 macOS 桌面版",
   "main": "electron/main.cjs",
   "scripts": {
     "electron": "electron .",
-    "package:mac": "./scripts/build-macos.sh"
+    "package:mac": "./scripts/build-macos.sh",
+    "package:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1"
   },
   "devDependencies": {
     "electron": "^44.1.1",
@@ -21,12 +22,6 @@
       "electron/**/*",
       "static/**/*",
       "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "build/macos/rh-workflow-desk-server",
-        "to": "rh-workflow-desk-server"
-      }
     ],
     "directories": {
       "output": "dist"
@@ -49,7 +44,37 @@
             "arm64"
           ]
         }
+      ],
+      "extraResources": [
+        {
+          "from": "build/macos/rh-workflow-desk-server",
+          "to": "rh-workflow-desk-server"
+        }
       ]
+    },
+    "win": {
+      "icon": "static/assets/rh-workflow-desk.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "build/windows/rh-workflow-desk-server.exe",
+          "to": "rh-workflow-desk-server.exe"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "RH Workflow Desk"
     }
   }
 }

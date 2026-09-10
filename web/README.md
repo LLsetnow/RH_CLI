@@ -46,9 +46,9 @@ npm run electron
 
 Electron 版本会自动启动本地 Python 服务，并让拖入文件同时获得本机绝对路径和图片预览。关闭窗口时会停止本地服务。
 
-### macOS 正式安装包
+### 正式安装包
 
-Apple Silicon（arm64）用户可以直接从 [GitHub Releases](https://github.com/LLsetnow/RH_CLI/releases/latest) 下载 `.dmg` 安装包；发布页同时提供 `.zip` 和 `SHA256SUMS.txt`。当前安装包未使用 Apple Developer ID 签名，首次打开时如果 macOS 拦截，请在 Finder 中右键应用选择“打开”，或在“系统设置 → 隐私与安全性”中允许。
+macOS Apple Silicon（arm64）用户可以从 [GitHub Releases](https://github.com/LLsetnow/RH_CLI/releases/latest) 下载 `.dmg` 安装包；Windows x64 用户下载 `.exe` 安装程序。发布页同时提供对应的 `SHA256SUMS.txt`。当前安装包未使用 Apple Developer ID 或 Windows 代码签名，首次运行时如果系统提示风险，请确认来源后允许运行。
 
 从源码重新构建 Apple Silicon 安装包：
 
@@ -58,7 +58,17 @@ npm install
 npm run package:mac
 ```
 
-构建会先用 PyInstaller 打包内置 Python 本地服务，再生成带当前版本号的 `web/dist/RH-Workflow-Desk-0.3.0-arm64.dmg`、对应 `.zip` 和校验文件；安装后的任务数据写入 macOS 用户数据目录。
+构建会先用 PyInstaller 打包内置 Python 本地服务，再生成带当前版本号的 `web/dist/RH-Workflow-Desk-0.3.1-arm64.dmg`、对应 `.zip` 和校验文件；安装后的任务数据写入 macOS 用户数据目录。
+
+Windows x64 安装包在 GitHub Actions 的 Windows runner 上构建，以确保内置 Python 服务是真正的 Windows `.exe`：
+
+```powershell
+cd web
+npm install
+npm run package:win
+```
+
+构建会生成 `web/dist/RH-Workflow-Desk-0.3.1-x64.exe` 和 `SHA256SUMS.txt`；安装后的任务数据写入 Windows 用户数据目录。
 
 ## 工作流快照与工作流库
 

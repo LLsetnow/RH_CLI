@@ -1,0 +1,65 @@
+name: Release Windows desktop app
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.25"
+
+      - name: Install JavaScript dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: ./web/scripts/build-windows.ps1
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem web/dist -Filter "*.exe" -File)
+          if ($installer.Length -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installer.Length)."
+          }
+          if ($installer.Length -le 0) {
+            throw "Windows installer is empty."
+          }
+          $checksums = Get-Item web/dist/SHA256SUMS.txt
+          if ($checksums.Length -le 0) {
+            throw "SHA256SUMS.txt is empty."
+          }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: RH Workflow Desk ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            web/dist/*.exe
+            web/dist/SHA256SUMS.txt
