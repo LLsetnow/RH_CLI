@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from rh_cli.errors import RhCliError
-from web import video_downloader
+from web.backend import video_downloader
 
 
 def test_normalize_douyin_url_accepts_short_and_standard_links():

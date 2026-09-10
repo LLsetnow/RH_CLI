@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from web import app as web_app
+from web.backend import app as web_app
 
 
 def _configure_web_paths(tmp_path, monkeypatch):

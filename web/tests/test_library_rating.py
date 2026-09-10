@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
-from web.action_store import ActionStore
-from web.prompt_store import PromptStore
-from web.reference_store import ReferenceStore
+from web.backend.action_store import ActionStore
+from web.backend.prompt_store import PromptStore
+from web.backend.reference_store import ReferenceStore
 
 
 def test_prompt_store_writes_and_clears_numeric_rating_tag(tmp_path):

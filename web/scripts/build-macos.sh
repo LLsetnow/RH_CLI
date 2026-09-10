@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-WEB_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+WEB_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$WEB_ROOT/.." && pwd)
 BACKEND_ROOT="$WEB_ROOT/build/macos"
 BACKEND_PATH="$BACKEND_ROOT/rh-workflow-desk-server"
@@ -31,7 +31,7 @@ PYTHONPATH="$REPO_ROOT/src:$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     --paths "$REPO_ROOT/src" \
     --paths "$REPO_ROOT" \
     --add-data "$WEB_ROOT/static:web/static" \
-    "$WEB_ROOT/backend_entry.py"
+    "$WEB_ROOT/backend/backend_entry.py"
 
 test -x "$BACKEND_PATH"
 echo "[2/3] 构建 Electron macOS 安装包…"

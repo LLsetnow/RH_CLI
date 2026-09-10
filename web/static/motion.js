@@ -190,9 +190,14 @@
       document.dispatchEvent(new CustomEvent("rh-submit-task"));
       return;
     }
+    window.location.href = taskSubmitUrl({ autoSubmit: true });
+  }
+
+  function taskSubmitUrl(options) {
     var target = new URL("/", window.location.href);
-    target.searchParams.set("autoSubmit", "1");
-    window.location.href = target.href;
+    target.searchParams.set("workspace", "submit");
+    if (options && options.autoSubmit) target.searchParams.set("autoSubmit", "1");
+    return target.href;
   }
 
   document.addEventListener("keydown", function (event) {
@@ -469,6 +474,7 @@
     showToast: showToast,
     captureVideoFrame: captureVideoFrame,
     closeVideoContextMenu: closeVideoContextMenu,
+    taskSubmitUrl: taskSubmitUrl,
     startPageEnter: startPageEnter,
     prefersReducedMotion: prefersReducedMotion,
     videoPlayerMarkup: videoPlayerMarkup

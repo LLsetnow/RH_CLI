@@ -29,11 +29,27 @@ def test_global_ctrl_enter_submits_from_any_page():
     assert "event.metaKey" in motion
     assert '.modal-backdrop.is-open:not([hidden])' in motion
     assert 'document.dispatchEvent(new CustomEvent("rh-submit-task"))' in motion
-    assert 'target.searchParams.set("autoSubmit", "1")' in motion
-    assert 'document.addEventListener("rh-submit-task", submitTask)' in app
+    assert 'target.searchParams.set("workspace", "submit")' in motion
+    assert 'taskSubmitUrl({ autoSubmit: true })' in motion
+    assert 'activateSubmitWorkspaceSection("submit", { updateUrl: true });' in app
+    assert 'document.addEventListener("rh-submit-task", function ()' in app
     assert "function submitAfterInitialLoad()" in app
     assert 'params.get("autoSubmit") !== "1"' in app
     assert 'event.ctrlKey && event.key === "Enter"' not in app
+
+
+def test_task_submission_navigation_always_selects_the_submit_workspace():
+    pages = ("index.html", "prompt.html", "toolbox.html", "outputs.html", "compare.html", "workflows.html", "dashboard.html", "settings.html")
+    motion = (STATIC_ROOT / "motion.js").read_text(encoding="utf-8")
+    assert "function taskSubmitUrl(options)" in motion
+    assert "taskSubmitUrl: taskSubmitUrl" in motion
+    for page_name in pages:
+        page = (STATIC_ROOT / page_name).read_text(encoding="utf-8")
+        assert 'href="/?workspace=submit"' in page, page_name
+
+    for script_name in ("workflows.js", "outputs.js", "prompt.js", "focus.js"):
+        script = (STATIC_ROOT / script_name).read_text(encoding="utf-8")
+        assert "window.RHMotion.taskSubmitUrl()" in script, script_name
 
 
 def test_slide_runtime_covers_page_navigation_and_dialogs():
@@ -147,11 +163,12 @@ def test_action_library_can_import_depth_into_task_load_image():
     app_js = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
     assert 'data-import-depth' in prompt_js
-    assert "action-card-import" in prompt_js
+    assert "libraryContextImportItems" in prompt_js
     assert 'id="depthImportModal"' in prompt_html
     assert ".depth-import-dialog" in prompt_css
     assert "/depth-path" in prompt_js
     assert "target.bypassed" in prompt_js
+    assert "loadMediaTargets" in prompt_js
     assert "is-disabled" in prompt_js
     assert '已保存到任务草稿' in prompt_js
     assert '>导入媒体</button>' in prompt_js
@@ -160,6 +177,28 @@ def test_action_library_can_import_depth_into_task_load_image():
     assert 'link.download = modifiedWorkflowName(sourceName)' in app_js
     assert 'window.localStorage.getItem("rh-workflow-desk-draft-v1")' in prompt_js
     assert "focusInputFromQuery" in app_js
+
+
+def test_video_action_library_can_import_all_variants_into_load_video():
+    prompt_js = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+
+    assert "actionVideoImportInfos" in prompt_js
+    assert "LoadVideo" in prompt_js
+    assert 'mediaKind: "video"' in prompt_js
+    assert 'depth-skeleton-video-path' in prompt_js
+    assert 'data-library-context-import-media-kind' in prompt_js
+
+
+def test_prompt_video_import_follows_the_currently_displayed_action_variant():
+    prompt_js = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+
+    assert "function stageActionMediaKind(index, fallback)" in prompt_js
+    assert "candidate.videoKind = stageActionMediaKind" in prompt_js
+    assert "preferredVideoKind = String(candidate.videoKind || candidate.video_kind || \"\")" in prompt_js
+    assert "toggle.dataset.actionMediaCurrent" in prompt_js
+    assert "trigger.dataset.importWorkflowVariant = toggle.dataset.actionMediaCurrent" in prompt_js
+    assert "video_kind: item.videoKind || \"\"" in prompt_js
+    assert "videoKind: snapshot.video_kind || \"\"" in prompt_js
 
 
 def test_action_library_supports_skeleton_generation_and_preview():

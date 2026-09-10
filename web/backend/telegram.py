@@ -57,28 +57,64 @@ class TelegramNotifier:
                 chat_ids.append(chat_id)
         return chat_ids
 
+    @classmethod
+    def chat_id_setting(cls, data: dict[str, Any], key: str, environment_key: str) -> str:
+        """Resolve a split Chat ID setting while keeping legacy configs readable."""
+        if key in data:
+            local_value = str(data.get(key) or "").strip()
+            if local_value:
+                return local_value
+            return str(os.environ.get(environment_key) or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
+        legacy_value = str(data.get("telegram_chat_id") or "").strip()
+        if legacy_value:
+            return legacy_value
+        return str(os.environ.get(environment_key) or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
+
+    @staticmethod
+    def local_chat_id_setting(data: dict[str, Any], key: str) -> str:
+        """Return a local split Chat ID, including the legacy local value."""
+        if key in data:
+            return str(data.get(key) or "").strip()
+        return str(data.get("telegram_chat_id") or "").strip()
+
+    @classmethod
+    def chat_id_allowed(cls, configured: Any, chat_id: Any) -> bool:
+        """Return whether a Telegram chat is allowed by a list or wildcard."""
+        target = str(chat_id or "").strip()
+        chat_ids = cls.parse_chat_ids(configured)
+        return "*" in chat_ids or bool(target and target in chat_ids)
+
     def credentials(self) -> tuple[str, str]:
         data = self.store._read_json_file()
         local_token = str(data.get("telegram_bot_token") or "").strip()
-        local_chat_id = str(data.get("telegram_chat_id") or "").strip()
-        if local_token and local_chat_id:
-            return local_token, local_chat_id
+        push_chat_id = self.chat_id_setting(data, "telegram_push_chat_id", "RH_TELEGRAM_PUSH_CHAT_ID")
+        if local_token:
+            return local_token, push_chat_id
         return (
             str(os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip(),
-            str(os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip(),
+            push_chat_id,
         )
 
     def settings(self) -> dict[str, Any]:
         data = self.store._read_json_file()
-        token, chat_id = self.credentials()
-        chat_ids = self.parse_chat_ids(chat_id)
+        token = str(data.get("telegram_bot_token") or os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
+        push_chat_id = self.chat_id_setting(data, "telegram_push_chat_id", "RH_TELEGRAM_PUSH_CHAT_ID")
+        inbound_chat_id = self.chat_id_setting(data, "telegram_inbound_chat_id", "RH_TELEGRAM_INBOUND_CHAT_ID")
+        chat_ids = self.parse_chat_ids(push_chat_id)
+        inbound_chat_ids = self.parse_chat_ids(inbound_chat_id)
         local_configured = bool(
             str(data.get("telegram_bot_token") or "").strip()
-            and self.parse_chat_ids(data.get("telegram_chat_id"))
+            and (
+                self.parse_chat_ids(self.local_chat_id_setting(data, "telegram_push_chat_id"))
+                or self.parse_chat_ids(self.local_chat_id_setting(data, "telegram_inbound_chat_id"))
+            )
         )
         environment_configured = bool(
             str(os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
-            and self.parse_chat_ids(os.environ.get("RH_TELEGRAM_CHAT_ID"))
+            and (
+                self.parse_chat_ids(os.environ.get("RH_TELEGRAM_PUSH_CHAT_ID") or os.environ.get("RH_TELEGRAM_CHAT_ID"))
+                or self.parse_chat_ids(os.environ.get("RH_TELEGRAM_INBOUND_CHAT_ID") or os.environ.get("RH_TELEGRAM_CHAT_ID"))
+            )
         )
         enabled = bool(data.get("telegram_enabled")) if "telegram_enabled" in data else self._is_true(os.environ.get("RH_TELEGRAM_ENABLED"))
         inbound_mode = str(data.get("telegram_inbound_mode") or "fixed").strip().lower()
@@ -113,11 +149,19 @@ class TelegramNotifier:
             except Exception:
                 video_inbound_workflow_name = "工作流已删除"
         return {
-            "configured": bool(token and chat_ids),
+            "configured": bool(token and (chat_ids or inbound_chat_ids)),
+            "push_configured": bool(token and chat_ids),
+            "inbound_configured": bool(token and inbound_chat_ids),
             "enabled": enabled,
             "bot_token_hint": self._mask(token),
-            "chat_id": chat_id,
+            # chat_id/chat_ids remain aliases for older clients and callers.
+            "chat_id": push_chat_id,
             "chat_ids": chat_ids,
+            "push_chat_id": push_chat_id,
+            "push_chat_ids": chat_ids,
+            "inbound_chat_id": inbound_chat_id,
+            "inbound_chat_ids": inbound_chat_ids,
+            "inbound_any_chat": "*" in inbound_chat_ids,
             "source": "local" if local_configured else "environment" if environment_configured else "",
             "inbound_enabled": bool(data.get("telegram_inbound_enabled")),
             "inbound_mode": inbound_mode,
@@ -497,6 +541,7 @@ class TelegramNotifier:
         *,
         force: bool = False,
         output_indices: list[int] | None = None,
+        chat_ids: list[str] | None = None,
     ) -> dict[str, int | str]:
         settings = self.settings()
         task = self.store.task(task_id) or {"id": task_id, "workflow_name": "RH Workflow Desk"}
@@ -504,8 +549,15 @@ class TelegramNotifier:
         if not force and not is_telegram_inbound and not settings["enabled"]:
             return {"status": "disabled", "sent": 0, "failed": 0}
         token, chat_id = self.credentials()
-        chat_ids = self.parse_chat_ids(chat_id)
-        if not token or not chat_ids:
+        configured_chat_ids = self.parse_chat_ids(chat_id)
+        if chat_ids is None:
+            target_chat_ids = configured_chat_ids
+        else:
+            requested_chat_ids = self.parse_chat_ids(",".join(str(value) for value in chat_ids))
+            if not requested_chat_ids or any(value not in configured_chat_ids for value in requested_chat_ids):
+                raise TelegramDeliveryError("选择的 Telegram 推送用户无效，请重新选择。")
+            target_chat_ids = requested_chat_ids
+        if not token or not target_chat_ids:
             return {"status": "not_configured", "sent": 0, "failed": 0}
         sent = 0
         failed = 0
@@ -514,8 +566,8 @@ class TelegramNotifier:
                 continue
             index = output_indices[position] if output_indices and position < len(output_indices) else position
             output_key = self._output_key(index, output)
-            for target_chat_id in chat_ids:
-                delivery_key = self._delivery_key(output_key, target_chat_id, len(chat_ids) > 1)
+            for target_chat_id in target_chat_ids:
+                delivery_key = self._delivery_key(output_key, target_chat_id, len(target_chat_ids) > 1)
                 claim_id = uuid4().hex
                 if not self.store.claim_telegram_delivery(
                     task_id,

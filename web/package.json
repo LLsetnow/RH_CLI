@@ -7,7 +7,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "electron": "electron .",
-    "package:mac": "./build-macos.sh"
+    "package:mac": "./scripts/build-macos.sh"
   },
   "devDependencies": {
     "electron": "^44.1.1",

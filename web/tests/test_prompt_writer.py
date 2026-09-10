@@ -5,7 +5,7 @@ import json
 import pytest
 
 from rh_cli.errors import RhCliError
-from web.prompt_writer import AliyunPromptWriter
+from web.backend.prompt_writer import AliyunPromptWriter
 
 
 def test_aliyun_prompt_writer_sends_text_only_and_reads_chinese_result(monkeypatch):
@@ -22,7 +22,7 @@ def test_aliyun_prompt_writer_sends_text_only_and_reads_chinese_result(monkeypat
         captured.update(kwargs)
         return FakeResponse()
 
-    monkeypatch.setattr("web.prompt_writer.httpx.post", fake_post)
+    monkeypatch.setattr("web.backend.prompt_writer.httpx.post", fake_post)
 
     result = AliyunPromptWriter("sk-test-key").write(
         "【固定积木】\n提示词内容：电影感镜头\n\n【媒体积木】\n媒体类型：图片",

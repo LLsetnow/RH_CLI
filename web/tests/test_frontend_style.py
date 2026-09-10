@@ -3,6 +3,7 @@ import re
 
 
 STATIC_ROOT = Path(__file__).parents[1] / "static"
+BACKEND_ROOT = STATIC_ROOT.parent / "backend"
 PAGE_STYLES = ("prompt.css", "toolbox.css", "outputs.css", "workflows.css", "compare.css", "dashboard.css", "settings.css", "focus.css")
 PAGE_MARKUP = ("index.html", "prompt.html", "toolbox.html", "outputs.html", "workflows.html", "compare.html", "dashboard.html", "settings.html")
 MODAL_MARKUP = ("index.html", "prompt.html", "outputs.html", "workflows.html", "settings.html")
@@ -37,6 +38,21 @@ def test_submit_page_exposes_random_submission_repeat_control():
     assert ".submit-repeat-control" in styles
 
 
+def test_submit_page_exposes_task_name_for_output_prefix_and_task_list_title():
+    markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+
+    assert 'id="taskName"' in markup
+    assert 'maxlength="160"' in markup
+    assert 'for="taskName"' in markup
+    assert 'output_prefix: submitTaskName || null' in script
+    assert 'function taskDisplayName(task)' in script
+    assert 'task.task_name || task.output_prefix' in script
+    assert "var displayName = taskDisplayName(task);" in script
+    assert ".submit-task-name" in styles
+
+
 def test_submit_input_jump_tags_scroll_to_matching_cards():
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
@@ -45,6 +61,18 @@ def test_submit_input_jump_tags_scroll_to_matching_cards():
     assert 'window.scrollTo({ top: nextScroll, behavior: "smooth" });' in script
     assert 'querySelector(".submit-workspace-tabs-sticky")' in script
     assert "String(item.dataset.inputId || \"\") === targetId" in script
+
+
+def test_all_input_titles_show_the_actual_node_id():
+    script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+
+    assert "function inputTitleMarkup(item, fallbackTitle)" in script
+    assert "inputTitleMarkup(item)" in script
+    assert "inputTitleMarkup(item, \"尺寸\")" in script
+    assert 'inputTitleMarkup(item, item.label || item.title || item.field)' in script
+    assert ".input-card .input-node-id" in styles
+    assert ".input-card .input-title" in styles
 
 
 def test_submit_controls_are_ordered_in_one_row_without_inline_helper_copy():
@@ -60,6 +88,12 @@ def test_submit_controls_are_ordered_in_one_row_without_inline_helper_copy():
     assert 'id="submitRepeatHint"' not in markup
     assert "grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.25fr) minmax(112px, .62fr) max-content" in styles
     assert ".submit-strip > .primary-button { align-self: flex-start; min-width: 142px;" in styles
+
+
+def test_workflow_library_buttons_keep_their_labels_on_one_line():
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+
+    assert ".workflow-library-actions .secondary-button { flex: 0 0 auto; white-space: nowrap; }" in styles
 
 
 def test_frontend_guidance_rule_is_documented():
@@ -243,6 +277,23 @@ def test_telegram_push_chat_id_fields_describe_comma_separated_targets():
         assert "例如 -1001234567890, -1009876543210" in markup
 
 
+def test_telegram_settings_expose_separate_push_and_inbound_chat_fields():
+    settings_markup = (STATIC_ROOT / "settings.html").read_text(encoding="utf-8")
+    settings_script = (STATIC_ROOT / "settings.js").read_text(encoding="utf-8")
+    submit_markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    submit_script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+
+    for markup in (settings_markup, submit_markup):
+        assert 'id="telegramPushChatId"' in markup
+        assert 'id="telegramInboundChatId"' in markup
+        assert "共用" in markup
+    for script in (settings_script, submit_script):
+        assert "telegram_push_chat_id" in script
+        assert "telegram_inbound_chat_id" in script
+
+    assert "填写 * 可接收任意聊天" in submit_markup
+
+
 def test_telegram_inbound_settings_offer_fixed_and_folder_random_modes():
     markup = (STATIC_ROOT / "settings.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "settings.js").read_text(encoding="utf-8")
@@ -339,7 +390,7 @@ def test_prompt_library_resource_cards_keep_controls_below_title_and_prompt_area
 def test_prompt_library_cards_support_numeric_json_ratings():
     script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
     styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
 
     assert "function libraryRatingFromTags" in script
     assert "function setLibraryCardRating" in script
@@ -375,7 +426,7 @@ def test_prompt_library_keeps_mode_and_filters_visible_while_scrolling_and_acros
 
 
 def test_public_navigation_has_one_order_and_structure():
-    expected_order = ["/workflows", "/prompt", "/", "/outputs", "/dashboard", "/settings"]
+    expected_order = ["/workflows", "/prompt", "/?workspace=submit", "/outputs", "/dashboard", "/settings"]
 
     for filename in PAGE_MARKUP:
         markup = (STATIC_ROOT / filename).read_text(encoding="utf-8")
@@ -391,11 +442,20 @@ def test_toolbox_media_input_matches_workflow_node_style_and_import_contract():
     script = (STATIC_ROOT / "toolbox.js").read_text(encoding="utf-8")
 
     assert 'class="toolbox-media-input-card"' in markup
+    assert 'class="toolbox-media-settings-row"' in markup
+    assert "视频按 24 FPS 处理" in markup
     assert 'id="mediaPathLabel"' in markup
     assert 'id="mediaChooseButton"' in markup
     assert 'id="mediaOpenFolderButton"' in markup
     assert 'id="codexImageResolution"' in markup
     assert 'id="codexImageSize"' in markup
+    assert 'id="mediaResolution"' in markup
+    assert 'id="mediaStartFrame"' in markup
+    assert 'id="mediaDuration"' in markup
+    assert 'value="original" selected>原始' in markup
+    assert 'value="480p">480p' in markup
+    assert 'value="720p">720p' in markup
+    assert 'value="1080p">1080p' in markup
     assert 'value="1k" selected' in markup
     assert 'value="9:16" selected' in markup
     assert 'class="toolbox-auto-command-note"' in markup
@@ -405,6 +465,7 @@ def test_toolbox_media_input_matches_workflow_node_style_and_import_contract():
     assert ".visually-hidden" in styles
     assert ".toolbox-reference-card { position: relative; min-width: 0; margin: 0;" in styles
     assert ".toolbox-media-input-card" in styles
+    assert ".toolbox-media-settings-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));" in styles
     assert "file.path" in script
     assert "inferFileDescriptor" in script
     assert 'jsonRequest("/api/prompt/media"' in script
@@ -412,31 +473,90 @@ def test_toolbox_media_input_matches_workflow_node_style_and_import_contract():
     assert 'jsonRequest("/api/pick-file", "POST")' in script
     assert 'resolution: String($("codexImageResolution").value || "1k")' in script
     assert 'size: String($("codexImageSize").value || "9:16")' in script
+    assert 'resolution: String($("mediaResolution").value || "original")' in script
+    assert 'duration_seconds: String($("mediaDuration").value || "").trim() || null' in script
+    assert 'start_frame: mediaStartFrameValue()' in script
+    assert 'resolutionSelect.value = String(custom.resolution || "original")' in script
+    assert 'startFrameInput.value = custom.start_frame == null ? "0" : String(custom.start_frame)' in script
+    assert 'durationInput.value = custom.duration_seconds == null ? "" : String(custom.duration_seconds)' in script
+    assert "var MEDIA_PREVIEW_FPS = 24;" in script
+    assert "function syncMediaPreview(video, resetPosition)" in script
+    assert 'var toolboxDraftStorageKey = "rh-workflow-desk-toolbox-draft-v1"' in script
+    assert "function saveToolboxDraftNow()" in script
+    assert "function restoreToolboxDraft()" in script
+    assert "references: state.references.map(draftAsset).filter(Boolean)" in script
+    assert "bindToolboxDraftInputs();" in script
     assert 'bindDropzone($("mediaDropzone"), $("mediaPicker"), setMediaFile, chooseMediaFile);' in script
     assert "function chooseMediaFile" in script
+    assert "var selectedFile = file && file.name ? file : file && file[0];" in script
+    assert "file = selectedFile || null;" in script
     assert 'body: { command:' not in script
 
 
-def test_task_submit_owns_the_three_switchable_workspaces_and_hides_cli_details():
+def test_task_submit_owns_the_four_switchable_workspaces_and_hides_cli_details():
     markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
 
-    assert re.findall(r'data-submit-section="([^"]+)"', markup) == ["submit", "codex", "media", "submit", "codex", "media"]
+    assert re.findall(r'data-submit-section="([^"]+)"', markup) == ["submit", "codex", "media", "tts", "submit", "codex", "media", "tts"]
     assert 'role="tablist" aria-label="任务提交功能区"' in markup
     assert 'id="submitWorkspacePanelCodex"' in markup
     assert 'id="submitWorkspacePanelMedia"' in markup
+    assert 'id="submitWorkspaceTabTts"' in markup
+    assert 'id="submitWorkspacePanelTts"' in markup
+    assert 'id="ttsVoice"' in markup
+    assert 'id="ttsText"' in markup
     assert 'id="codexCommand"' not in markup
     assert "function activateSubmitWorkspaceSection" in script
     assert "submitWorkspaceStorageKey" in script
     assert 'script.src = "/static/toolbox.js"' in script
     assert 'self.send_header("Location", "/?workspace=codex")' in server
     assert 'name="Codex 图像生成"' in server
+    assert 'path == "/api/tts/voices"' in server
+    assert 'path == "/api/toolbox/tts"' in server
 
     styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
     assert ".submit-workspace-tab:hover" not in styles
     assert ".submit-workspace-tab.active" in styles
     assert ".submit-workspace-tabs-sticky { position: sticky;" not in styles
+
+
+def test_character_tts_workspace_uses_local_voice_assets_and_task_queue():
+    markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "toolbox.css").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "toolbox.js").read_text(encoding="utf-8")
+    tts_source = (BACKEND_ROOT / "tts.py").read_text(encoding="utf-8")
+
+    assert "CHARACTER / VOICE" in markup
+    assert "GPT-SOVITS V4" in markup
+    assert "ttsReferenceAudio" in markup
+    assert ".tts-voice-select-row" in styles
+    assert "function loadTtsVoices()" in script
+    assert 'jsonRequest("/api/tts/voices", "GET")' in script
+    assert 'jsonRequest("/api/toolbox/tts", "POST"' in script
+    assert 'pollTask("tts", task.id)' in script
+    assert "TTS_ROOT = Path(\"/Users/apple/Documents/VideoMake/ref/tts\")" in tts_source
+    assert '"sample_steps": 8' in tts_source
+
+
+def test_toolbox_tasks_have_replay_manifest_and_hide_instance_model():
+    app_script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    toolbox_script = (STATIC_ROOT / "toolbox.js").read_text(encoding="utf-8")
+    output_script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
+    app_source = (BACKEND_ROOT / "app.py").read_text(encoding="utf-8")
+
+    assert "task_type\": \"toolbox\"" in server
+    assert "save_toolbox_manifest" in server
+    assert '"kind": "rh-toolbox-task"' in app_source
+    assert "toolbox.codex-image" in app_source
+    assert "load_task_replay" in server
+    assert "function replayTask(data)" in toolbox_script
+    assert 'window.RHToolbox = { replayTask: replayTask }' in toolbox_script
+    assert "toolboxReplaySection" in app_script
+    assert "toolboxTask ? ''" in app_script
+    assert "rh-workflow-desk-toolbox-replay-v1" in output_script
+    assert "复现此次工具箱任务" in output_script
 
 
 def test_task_detail_exposes_live_progress_and_refreshes_open_task():
@@ -475,7 +595,7 @@ def test_focus_mode_tiles_six_pages_and_converts_shift_wheel_to_horizontal_scrol
     styles = (STATIC_ROOT / "focus.css").read_text(encoding="utf-8")
     shared_motion = (STATIC_ROOT / "motion.js").read_text(encoding="utf-8")
     shared_styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
     expected_focus_order = ["workflows", "prompt", "submit", "outputs", "dashboard", "settings"]
     assert re.findall(r'data-focus-page="([^"]+)"', page) == expected_focus_order * 2
     assert 'var focusPageOrder = ["workflows", "prompt", "submit", "outputs", "dashboard", "settings"];' in script
@@ -569,7 +689,7 @@ def test_focus_mode_keeps_all_route_navigation_inert():
     assert 'href="/"' not in page
     assert 'id="focusExit"' in page
     assert 'aria-label="退出专注模式"' in page
-    assert 'window.location.href = "/"' in focus_script
+    assert 'window.location.href = window.RHMotion.taskSubmitUrl()' in focus_script
     assert ".focus-exit { flex: 0 0 auto; white-space: nowrap; }" in focus_styles
     assert '.focus-panel[data-focus-page="submit"] .workspace' in focus_styles
     assert 'grid-template-columns: minmax(0, 1.55fr) minmax(340px, .9fr);' in focus_styles
@@ -614,7 +734,7 @@ def test_workflow_cards_overwrite_task_submit_workflow():
     assert "queuePromptGroupSnapshot(data.prompt_group)" in load_workflow
     assert "notifySubmitImport({ kind: \"workflow\", draft: draft, promptGroup: promptGroup, hasPromptGroup: hasPromptGroup })" in load_workflow
     assert "任务提交面板已同步" in load_workflow
-    assert 'window.location.href = "/"' in load_workflow
+    assert 'window.RHMotion.taskSubmitUrl()' in load_workflow
     assert "加载到任务提交页和提示词工坊" in script
     assert ".workflow-card-title-button { display: block; flex: 0 1 auto;" in styles
     assert "max-width: calc(100% - 12px);" in styles
@@ -653,7 +773,13 @@ def test_workflow_library_uses_folder_hierarchy_and_drag_targets():
     assert 'data-folder-drop-id="' in script
     assert "handleWorkflowDragStart" in script
     assert "moveWorkflowToFolder" in script
+    assert 'jsonRequest("/api/workflows/reorder", "PATCH"' in script
+    assert "animateWorkflowCollection" in script
+    assert "workflowDragDropHandled" in script
+    assert 'data-workflow-folder-id="' in script
     assert ".workflow-folder-grid { display: grid;" in styles
+    assert ".workflow-card.is-sort-target" in styles
+    assert "prefers-reduced-motion: reduce" in styles
     assert ".workflow-folder-context-menu, .workflow-card-context-menu { position: fixed;" in styles
     assert "function hasExternalWorkflowFileDrag(event)" in script
     assert "function handleWorkflowLibraryDrop(event)" in script
@@ -702,6 +828,8 @@ def test_submit_page_uses_one_workflow_snapshot_editor_with_restore_action():
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
 
     assert 'id="editWorkflowSnapshotButton"' in markup
+    assert 'id="workflowPanelTitle"' in markup
+    assert 'id="workflowPanelTitle">导入 API 工作流</h2>' in markup
     assert 'id="workflowEditorModal"' in markup
     assert 'id="workflowRecordName"' in markup
     assert 'id="workflowRecordAccount"' in markup
@@ -716,6 +844,8 @@ def test_submit_page_uses_one_workflow_snapshot_editor_with_restore_action():
     assert 'id="renameWorkflowLibraryButton"' not in markup
     assert '$("editWorkflowSnapshotButton").addEventListener("click", openWorkflowEditor);' in script
     assert "function openWorkflowEditor()" in script
+    assert "function setWorkflowPanelTitle()" in script
+    assert 'title.textContent = name;' in script
     assert "function saveWorkflowRecord(event)" in script
     assert "function applyWorkflowEditorJson(parsed)" in script
     assert "function saveWorkflowJson()" not in script
@@ -750,8 +880,8 @@ def test_workflow_input_defaults_are_limited_to_manual_items():
 def test_workflow_library_keeps_prompt_group_with_workflow_and_loads_both_drafts():
     markup = (STATIC_ROOT / "workflows.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "workflows.js").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
-    app_source = (STATIC_ROOT.parent / "app.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
+    app_source = (BACKEND_ROOT / "app.py").read_text(encoding="utf-8")
 
     assert 'id="workflowRecordPromptGroup"' in markup
     assert "关联提示词组" in markup
@@ -759,7 +889,7 @@ def test_workflow_library_keeps_prompt_group_with_workflow_and_loads_both_drafts
     assert 'prompt_group_id: $("workflowRecordPromptGroup").value' in script
     assert 'pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1"' in script
     assert "queuePromptGroupSnapshot(data.prompt_group)" in script
-    assert 'window.location.href = "/"' in script
+    assert 'window.RHMotion.taskSubmitUrl()' in script
     assert 'path == "/api/prompt/groups"' in server
     assert "prompt_group=prompt_group" in server
     assert "include_current_prompt_group" in server
@@ -774,7 +904,7 @@ def test_prompt_group_library_lives_on_workflow_page_and_loads_into_prompt_workb
     workflow_styles = (STATIC_ROOT / "workflows.css").read_text(encoding="utf-8")
     prompt_markup = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
     prompt_script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
 
     assert 'id="promptGroupGroups"' in workflow_markup
     assert 'id="promptGroupFolderContextMenu"' in workflow_markup
@@ -795,9 +925,10 @@ def test_prompt_group_library_lives_on_workflow_page_and_loads_into_prompt_workb
     assert ".workflow-unclassified-collection { padding: 0; border-color: transparent;" in workflow_styles
     assert ':root[data-theme="light"] .workflow-unclassified-collection {' in workflow_styles
     assert ".prompt-group-library { display: grid;" in workflow_styles
-    assert 'id="groupName"' in prompt_markup
-    assert 'placeholder="输入新建提示词组名称"' in prompt_markup
-    assert 'id="saveGroup"' in prompt_markup
+    assert 'id="addTextStage"' not in prompt_markup
+    assert 'class="group-create-panel"' not in prompt_markup
+    assert 'id="groupName"' not in prompt_markup
+    assert 'id="saveGroup"' not in prompt_markup
     assert 'id="groupList"' not in prompt_markup
     assert "function loadPromptGroupFromQuery()" in prompt_script
     assert "loadPromptGroupFromQuery();" in prompt_script
@@ -817,7 +948,7 @@ def test_workflow_light_theme_uses_white_panel_surfaces():
 
 
 def test_telegram_submission_passes_workflow_prompt_group_to_task_snapshot():
-    app_source = (STATIC_ROOT.parent / "app.py").read_text(encoding="utf-8")
+    app_source = (BACKEND_ROOT / "app.py").read_text(encoding="utf-8")
 
     assert 'prompt_group = detail.get("prompt_group")' in app_source
     assert '"id": f"telegram-{workflow_id}"' in app_source
@@ -826,8 +957,8 @@ def test_telegram_submission_passes_workflow_prompt_group_to_task_snapshot():
 def test_task_submit_exposes_the_workflow_input_configuration_editor():
     markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
-    app_source = (STATIC_ROOT.parent / "app.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
+    app_source = (BACKEND_ROOT / "app.py").read_text(encoding="utf-8")
 
     assert '<link rel="stylesheet" href="/static/workflows.css" />' in markup
     assert 'id="editWorkflowSnapshotButton"' in markup
@@ -884,25 +1015,91 @@ def test_task_queue_adapts_card_count_to_available_width():
     assert ".queue-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }" not in css
 
 
-def test_action_cards_keep_depth_import_button_visible_when_pair_is_missing():
+def test_action_cards_move_media_import_into_context_panel():
+    markup = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
     css = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
 
-    assert "var hasColorImage = Boolean(action.image_available || action.color_image_available);" in script
-    assert "暂无可用深度图，请先完成原图与深度图配对" in script
-    assert 'class="import-workflow-button action-card-import"' in script
+    assert 'aria-label="媒体库操作"' in markup
+    assert 'data-library-context-actions' in markup
+    assert "function libraryContextImportItems(target)" in script
+    assert "openLibraryImageContextMenu(event, card)" in script
+    assert "data-library-context-import" in script
+    assert "暂无可用" in script
     assert '.import-depth-button:disabled, .import-workflow-button:disabled' in css
+    assert "data-library-context-action=" in script
+    assert 'action: "open-folder"' in script
+    assert 'action: "delete"' in script
+    assert "打开所在文件夹" in script
+    assert "删除媒体文件和索引内容" in script
+    assert "删除积木索引内容" in script
+    assert 'target.kind === "block"' in script
+    assert 'label: "导入音频"' in script
+    assert 'endpoint: referenceEndpoint + "audio-path"' in script
+    assert 'mediaKind: "audio"' in script
+    assert 'targetMediaKind === "audio"' in script
+    assert "LoadAudio" in script
+    assert 'jsonRequest(endpoint, "POST")' in script
+    assert 'jsonRequest(endpoint, "DELETE")' in script
+    assert 'window.confirm("删除「"' in script
+    assert ".library-context-menu-delete" in css
+
+
+def test_action_library_supports_looping_video_variants():
+    markup = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
+
+    assert 'data-resource-media-type="video"' in markup
+    for path_id in ("resourceVideoPath", "resourceDepthVideoPath", "resourceSkeletonVideoPath", "resourceDepthSkeletonVideoPath"):
+        assert 'id="' + path_id + '"' in markup
+    assert 'role: "depth_skeleton_video"' in script
+    assert "autoplay muted loop playsinline" in script
+    assert "data-action-media-video" in script
+    assert "video_ready" in script
+    assert "function loadMediaTargets(draft, mediaKind)" in script
+    assert "workflowImportMediaKind" in script
+    assert "LoadVideo" in script
+    for label in ("原视频", "深度视频", "骨骼视频", "深度+骨骼视频"):
+        assert 'label: "' + label + '"' in script
+    assert ".action-media-video[hidden]" in styles
+    assert "object-fit: contain" in styles
+    assert ".resource-media-type-tabs" in styles
+    assert "function resourceMediaDescription(kind)" in script
+    assert "视频动作支持拖入或选择 MP4、MOV、WebM 等视频文件" in script
+    assert 'id="actionVideoGenerationOptions"' in markup
+    assert 'id="resourceVideoResolution"' in markup
+    for option in ('value="480p"', 'value="720p"', 'value="1080p"', 'value="original"'):
+        assert option in markup
+    assert 'id="resourceVideoStartFrame"' in markup
+    assert 'id="resourceVideoDuration"' in markup
+    assert "function generateActionVideo()" in script
+    assert 'data-resource-media-generate-video' in script
+    assert '"/api/prompt/actions/generate-video"' in script
+    assert "resourcePayload.source = media[0]" in script
+    assert 'if (!text) return showToast("请填写动作文本", true);' not in script
+    assert "文本内容（可选）" in script
+    assert "resourcePayload.depth_skeleton_video_path" in script
+    assert "资源已保存，深度和骨骼视频正在后台生成" in script
+    assert "function watchActionVideoGeneration(jobId, actionId)" in script
+    assert "/api/prompt/actions/generate-video/" in script
+    assert ".action-video-generation-grid" in styles
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in styles
+    assert ".action-video-generation-grid input, .action-video-generation-grid select { min-height: 32px; min-width: 0; margin-top: 8px; }" in styles
 
 
 def test_prompt_workbench_builds_minimax_media_inputs_from_current_stage():
     markup = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
 
     assert 'id="importMedia"' in markup
+    assert 'type="button" disabled title="请先导入包含 MiniMax H3 节点的工作流">导入媒体</button>' in markup
     assert "function currentWorkflowContext()" in script
     assert "MiniMax H3 节点" in script
     assert "function usedReferenceMedia()" in script
+    assert "importMediaButton.hidden = false" in script
+    assert "importMediaButton.disabled = !workflowContext.hasMiniMax || !hasImportableMedia" in script
     assert "function buildMinimaxMediaWorkflow" in script
     assert 'class_type: "LoadImage"' in script
     assert 'class_type: "LoadAudio"' in script
@@ -911,6 +1108,31 @@ def test_prompt_workbench_builds_minimax_media_inputs_from_current_stage():
     assert 'jsonRequest("/api/workflows/analyze", "POST"' in script
     assert "window.localStorage.setItem(draftStorageKey" in script
     assert 'path.endswith("/audio-path")' in server
+
+
+def test_prompt_and_task_pages_support_add_remove_and_three_media_input_types():
+    prompt = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
+    task = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    markup = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "app.css").read_text(encoding="utf-8")
+
+    assert 'ref_videos.ref_video_' in prompt
+    assert 'class_type: "VHS_LoadVideo"' in prompt
+    assert '["image", "audio", "video"]' in prompt
+    assert 'id="mediaInputModal"' in markup
+    assert 'value="image">图片' in markup
+    assert 'value="audio">音频' in markup
+    assert 'value="video">视频' in markup
+    assert "function addMediaInputNode()" in task
+    assert "function removeMediaInputNode(nodeId, inputId)" in task
+    assert "function refreshWorkflowAnalysis(previousValues, successMessage)" in task
+    assert 'data-action="remove-media-input"' in task
+    assert "rh_dynamic_media" in task
+    assert "ref_images.ref_image_" in task
+    assert "ref_audios.ref_audio_" in task
+    assert "ref_videos.ref_video_" in task
+    assert ".media-input-toolbar" in styles
+    assert ".input-media-delete" in styles
 
 
 def test_library_uses_one_outer_scroll_container():
@@ -993,7 +1215,7 @@ def test_prompt_free_text_has_english_translation_flow():
 def test_prompt_free_text_has_chinese_ai_prompt_writer():
     script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
     styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
 
     assert 'data-ai-prompt-stage' in script
     assert '>AI提示词</span>' in script
@@ -1010,7 +1232,7 @@ def test_prompt_free_text_supports_persistent_at_card_references_and_protected_t
     markup = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
     styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
-    store = (Path(__file__).parents[2] / "web" / "prompt_store.py").read_text(encoding="utf-8")
+    store = (BACKEND_ROOT / "prompt_store.py").read_text(encoding="utf-8")
 
     assert 'id="promptReferenceSuggest"' in markup
     assert 'contenteditable="true"' in script
@@ -1089,8 +1311,8 @@ def test_prompt_media_block_supports_picker_clipboard_drop_and_stage_persistence
     markup = (STATIC_ROOT / "prompt.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "prompt.js").read_text(encoding="utf-8")
     styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
-    store = (Path(__file__).parents[2] / "web" / "prompt_store.py").read_text(encoding="utf-8")
-    server = (STATIC_ROOT.parent / "server.py").read_text(encoding="utf-8")
+    store = (BACKEND_ROOT / "prompt_store.py").read_text(encoding="utf-8")
+    server = (BACKEND_ROOT / "server.py").read_text(encoding="utf-8")
 
     assert 'id="mediaBlockPicker"' in markup
     assert "data-add-media-block" in script
@@ -1162,12 +1384,12 @@ def test_prompt_output_imports_sync_the_task_panel_and_keep_standalone_fallback(
     assert 'localStorage.setItem(TASK_PROMPT_IMPORT_KEY' in import_prompt
     assert 'notifySubmitImport({ kind: "prompt" })' in import_prompt
     assert "任务提交面板" in import_prompt
-    assert 'if (!focusImport) window.location.href = "/"' in import_prompt
+    assert 'if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl()' in import_prompt
 
     import_media = script[script.index("function importMinimaxMediaToTask()"):script.index("function filenameFromPath")]
     assert 'window.localStorage.setItem(draftStorageKey, JSON.stringify(draft))' in import_media
     assert 'notifySubmitImport({ kind: "media", mediaCount: mediaAssets.length })' in import_media
-    assert 'if (!focusImport) window.location.href = "/"' in import_media
+    assert 'if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl()' in import_media
 
     app_script = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
     focus_script = (STATIC_ROOT / "focus.js").read_text(encoding="utf-8")

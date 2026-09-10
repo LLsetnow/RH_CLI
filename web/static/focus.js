@@ -154,7 +154,7 @@
   window.RHFocus.pageNavigationBlocked = true;
   window.RHFocus.focusPanel = focusPanel;
   window.RHFocus.exitToTaskSubmit = function () {
-    window.location.href = "/";
+    window.location.href = window.RHMotion.taskSubmitUrl();
   };
   window.RHFocus.importToSubmit = function (detail) {
     var payload = detail && typeof detail === "object" ? detail : {};

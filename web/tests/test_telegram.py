@@ -5,7 +5,7 @@ import threading
 import time
 from pathlib import Path
 
-from web.telegram import (
+from web.backend.telegram import (
     TelegramNotifier,
     TelegramRequestNotSentError,
     TelegramRequestOutcomeUnknownError,
@@ -78,8 +78,34 @@ def test_telegram_settings_never_exposes_bot_token():
     assert "123456:secret-token" not in str(settings)
 
 
+def test_telegram_settings_split_push_and_inbound_chat_ids():
+    store = FakeStore(
+        {
+            "telegram_bot_token": "123456:secret-token",
+            "telegram_push_chat_id": "5468961835",
+            "telegram_inbound_chat_id": "*, -1002",
+            "telegram_enabled": True,
+        }
+    )
+
+    settings = TelegramNotifier(store).settings()
+
+    assert settings["push_chat_id"] == "5468961835"
+    assert settings["push_chat_ids"] == ["5468961835"]
+    assert settings["inbound_chat_id"] == "*, -1002"
+    assert settings["inbound_chat_ids"] == ["*", "-1002"]
+    assert settings["inbound_any_chat"] is True
+    assert settings["push_configured"] is True
+    assert settings["inbound_configured"] is True
+
+
 def test_parse_chat_ids_trims_deduplicates_and_accepts_chinese_comma():
     assert TelegramNotifier.parse_chat_ids(" -1001，-1002, -1001, @channel ") == ["-1001", "-1002", "@channel"]
+
+
+def test_chat_id_allowed_accepts_wildcard_for_any_chat():
+    assert TelegramNotifier.chat_id_allowed("*", "-1009876543210") is True
+    assert TelegramNotifier.chat_id_allowed("5468961835", "-1009876543210") is False
 
 
 def test_notify_task_routes_media_and_deduplicates(tmp_path: Path):
@@ -124,6 +150,25 @@ def test_notify_task_sends_each_output_to_each_chat_and_deduplicates(tmp_path: P
     assert notifier.notify_task("task-1", saved) == {"status": "sent", "sent": 2, "failed": 0}
     assert notifier.notify_task("task-1", saved) == {"status": "sent", "sent": 0, "failed": 0}
     assert calls == ["-1001", "-1002"]
+
+
+def test_notify_task_can_target_a_selected_subset_of_configured_chats(tmp_path: Path):
+    output = tmp_path / "result.png"
+    output.write_bytes(b"png")
+    store = FakeStore(
+        {
+            "telegram_bot_token": "123456:secret-token",
+            "telegram_chat_id": "-1001, -1002, -1003",
+            "telegram_enabled": True,
+        }
+    )
+    notifier = TelegramNotifier(store)
+    calls: list[str] = []
+    notifier._api_call = lambda token, method, fields, file_field="", file_path=None: (calls.append(fields["chat_id"]) or {"ok": True})  # type: ignore[method-assign]
+    saved = [{"kind": "file", "path": str(output), "name": "result.png", "mime": "image/png"}]
+
+    assert notifier.notify_task("task-1", saved, force=True, chat_ids=["-1003", "-1001"]) == {"status": "sent", "sent": 2, "failed": 0}
+    assert calls == ["-1003", "-1001"]
 
 
 def test_test_connection_sends_to_each_configured_chat():
@@ -239,7 +284,7 @@ def test_concurrent_notifiers_claim_one_delivery_only(tmp_path: Path):
 
 
 def test_not_sent_request_is_retried_but_unknown_outcome_is_not(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr("web.telegram.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("web.backend.telegram.time.sleep", lambda _seconds: None)
     output = tmp_path / "result.png"
     output.write_bytes(b"png")
     saved = [{"kind": "file", "path": str(output), "name": "result.png", "mime": "image/png"}]

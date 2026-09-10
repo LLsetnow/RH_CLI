@@ -73,6 +73,30 @@ def test_output_cards_support_local_selection_and_media_shortcuts():
     assert "outline-offset: -4px" in styles
 
 
+def test_output_library_supports_multi_select_actions_and_purple_outline():
+    page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert 'id="toggleOutputMultiSelect"' in page
+    assert 'id="outputToolbarDefaultActions"' in page
+    assert 'id="outputToolbarMultiActions"' in page
+    assert 'id="cancelOutputMultiSelect"' in page
+    assert 'id="uploadSelectedOutputs"' in page
+    assert 'id="moveSelectedOutputs"' in page
+    assert 'id="deleteSelectedOutputs"' in page
+    assert 'href="/outputs/compare">内容对比</a>' in page
+    assert "outputMultiSelectMode" in script
+    assert "toggleMultiOutput" in script
+    assert "setOutputMultiSelectMode" in script
+    assert '"/api/outputs/selected"' in script
+    assert "output_keys: keys" in script
+    assert "openTelegramUpload(items" in script
+    assert "openOutputProjectMove(items)" in script
+    assert ".artifact-card.is-multi-selected" in styles
+    assert "outline: 2px solid var(--rating-purple)" in styles
+
+
 def test_output_render_selects_the_first_visible_card_when_selection_is_missing():
     script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
 
@@ -146,12 +170,22 @@ def test_output_file_cards_can_import_into_a_task_file_input():
 def test_output_telegram_upload_locks_one_artifact_until_request_finishes():
     page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
     script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
 
     assert "telegramUploadBusy" in script
     assert 'data-artifact-menu-action="upload"' in page
     assert 'uploadAction.textContent = uploadBusy ? "上传中" : "上传"' in script
     assert "delete telegramUploadBusy[key]" in script
     assert "telegramUploadBusy[key]" in script
+    assert 'id="telegramUploadModal"' in page
+    assert 'id="selectAllTelegramRecipients"' in page
+    assert 'id="clearTelegramRecipients"' in page
+    assert 'id="confirmTelegramUpload"' in page
+    assert "telegramRecipientEntries" in script
+    assert "chat_ids: selectedIds" in script
+    assert "/telegram" in script
+    assert ".telegram-upload-recipient" in styles
+    assert ".telegram-upload-toolbar" in styles
 
 
 def test_output_workflow_names_load_the_task_draft_and_open_submit_page():
@@ -159,11 +193,15 @@ def test_output_workflow_names_load_the_task_draft_and_open_submit_page():
     styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
 
     assert 'data-load-task-workflow="' in script
+    assert 'data.kind === "toolbox"' in script
+    assert '复现 · " + taskName' in script
+    assert 'rh-workflow-desk-toolbox-replay-v1' in script
+    assert 'window.location.href = "/?workspace="' in script
     assert "taskDraftFromLoadData" in script
     assert '/api/tasks/" + encodeURIComponent(taskId) + "/load' in script
     assert 'window.localStorage.setItem(draftStorageKey, JSON.stringify(draft))' in script
     assert 'notifySubmitImport({ kind: "workflow", source: "task" })' in script
-    assert 'window.location.href = "/"' in script
+    assert 'window.RHMotion.taskSubmitUrl()' in script
     assert ".finally(function ()" in script
     assert ".artifact-workflow-link" in styles
     assert "导入媒体" in script
@@ -310,6 +348,8 @@ def test_output_cards_support_star_ratings_and_rating_filters():
     assert "refreshRatedArtifact" in script
     assert "deleteOneStarOutputs" in script
     assert "/api/outputs/rating/1" in script
+    assert 'if (oneStarCountNode) oneStarCountNode.textContent = String(oneStarCount);' in script
+    assert 'if (caseCountNode) caseCountNode.textContent = String(caseCount);' in script
     assert "ratingNode.outerHTML" in script
     assert 'state.rating === "unrated"' in script
     assert "rating_counts.unrated" in script
@@ -382,6 +422,32 @@ def test_output_cards_support_case_tags_and_three_state_case_filter():
     assert "color: var(--accent)" in styles
     assert "color: var(--danger)" in styles
     assert "@media (max-width: 650px)" in styles
+
+
+def test_output_library_filters_the_four_submit_workspaces_with_feature_tags():
+    page = (STATIC_ROOT / "outputs.html").read_text(encoding="utf-8")
+    script = (STATIC_ROOT / "outputs.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "outputs.css").read_text(encoding="utf-8")
+
+    assert 'id="outputFeatureFilters"' in page
+    assert 'aria-label="按功能筛选"' in page
+    for key, label in (
+        ("workflow", "任务提交"),
+        ("codex", "Codex 图像生成"),
+        ("media", "深度与骨骼"),
+        ("tts", "角色语音"),
+    ):
+        assert f'data-output-feature="{key}"' in page
+        assert label in page
+    assert "OUTPUT_FEATURE_FILTERS" in script
+    assert "function outputFeatureKey(item)" in script
+    assert "outputFeatureFilterMatches(item)" in script
+    assert 'add("feature", state.feature)' in script
+    assert "feature_counts" in script
+    assert "artifact-feature-tag" in script
+    assert ".output-feature-filters" in styles
+    assert ".output-feature-filter" in styles
+    assert ".artifact-feature-tag" in styles
 
 
 def test_output_toolbar_can_export_all_case_media():
@@ -700,7 +766,8 @@ def test_prompt_library_images_open_copy_context_menu_and_write_binary_clipboard
     styles = (STATIC_ROOT / "prompt.css").read_text(encoding="utf-8")
 
     assert 'id="libraryImageContextMenu"' in page
-    assert 'data-library-image-menu-action="copy"' in page
+    assert 'data-library-context-actions' in page
+    assert 'data-library-image-menu-action="copy"' in script
     assert 'addEventListener("contextmenu"' in script
     assert "openLibraryImageContextMenu" in script
     assert "copyLibraryImageToClipboard" in script
@@ -708,6 +775,9 @@ def test_prompt_library_images_open_copy_context_menu_and_write_binary_clipboard
     assert "new ClipboardItem" in script
     assert "imageBlobAsPng" in script
     assert ".library-image-context-menu" in styles
+    assert "libraryContextResourceActions" in script
+    assert "openLibraryResourceFolder" in script
+    assert "deleteLibraryResource" in script
 
 
 def test_prompt_library_resource_cards_support_preview_tag_edit_and_contextual_creation():

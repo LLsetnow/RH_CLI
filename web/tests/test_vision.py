@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import threading
 
-from web.app import LocalStore
-from web.server import prompt_image_data_url
-from web.vision import AliyunVisionClient
+from web.backend.app import LocalStore
+from web.backend.server import prompt_image_data_url
+from web.backend.vision import AliyunVisionClient
 
 
 def test_aliyun_vision_client_sends_image_and_parses_card_fields(monkeypatch):
@@ -28,7 +28,7 @@ def test_aliyun_vision_client_sends_image_and_parses_card_fields(monkeypatch):
         captured.update(kwargs)
         return FakeResponse()
 
-    monkeypatch.setattr("web.vision.httpx.post", fake_post)
+    monkeypatch.setattr("web.backend.vision.httpx.post", fake_post)
     image = "data:image/png;base64," + ("a" * 24)
 
     result = AliyunVisionClient("sk-test-key").recognize(image, "action")

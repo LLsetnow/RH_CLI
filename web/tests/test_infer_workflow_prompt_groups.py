@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
-from web.infer_workflow_prompt_groups import infer_prompt_items
-from web.infer_workflow_prompt_groups import apply_plan, build_plan
-from web.prompt_store import PromptStore
+from web.backend.infer_workflow_prompt_groups import infer_prompt_items
+from web.backend.infer_workflow_prompt_groups import apply_plan, build_plan
+from web.backend.prompt_store import PromptStore
 
 
 def test_inference_prefers_complete_block_and_keeps_unmatched_text() -> None:

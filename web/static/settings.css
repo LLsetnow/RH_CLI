@@ -36,6 +36,16 @@
 .settings-inline-actions .secondary-button { min-width: 104px; }
 .settings-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 15px; }
 .settings-toggle-row { display: flex; align-items: center; gap: 18px; margin-top: 19px; padding-top: 16px; }
+.telegram-shared-token { margin-top: 15px; }
+.telegram-shared-token input { margin-top: 7px; }
+.telegram-function-block { margin-top: 15px; padding: 16px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-control-muted); }
+.telegram-function-block .field-group input { margin-top: 7px; }
+.telegram-function-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.telegram-function-heading h4 { margin: 0; color: var(--ink); font-size: 13px; }
+.telegram-function-heading p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.telegram-function-block .settings-toggle-row { margin-top: 14px; padding-top: 13px; }
+.telegram-push-block { border-color: var(--accent-fill); background: var(--accent-ghost); }
+.telegram-inbound-block { border-color: var(--accent-fill); background: var(--accent-ghost); }
 .settings-switch { position: relative; display: inline-flex; min-height: 24px; align-items: center; gap: 8px; flex: 0 0 auto; color: var(--muted); font-size: 10px; cursor: pointer; user-select: none; }
 .settings-toggle-row .settings-switch { width: 152px; }
 .settings-toggle-row .settings-switch-label { width: 102px; order: -1; white-space: nowrap; }
@@ -133,6 +143,7 @@
   .settings-hero-status { margin-top: 15px; }
   .settings-card { padding: 19px; border-radius: 15px; }
   .settings-form-grid.two-columns, .settings-path-row { grid-template-columns: 1fr; }
+  .telegram-function-block { padding: 13px; }
   .settings-inline-actions, .settings-inline-actions .secondary-button { width: 100%; }
   .settings-card-footer, .settings-toggle-row { align-items: flex-start; flex-direction: column; }
   .telegram-inbound-panel { grid-template-columns: 1fr; align-items: start; }

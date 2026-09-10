@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from web.action_store import ActionStore
-from web import server as web_server
-from web.reference_store import ReferenceStore
-from web.server import prepare_prompt_resource_body
+from web.backend.action_store import ActionStore
+from web.backend import server as web_server
+from web.backend.reference_store import ReferenceStore
+from web.backend.server import prepare_prompt_resource_body
 
 
 def _data_url(value: bytes, mime: str = "image/png") -> str:
@@ -65,6 +66,72 @@ def test_prepare_prompt_action_media_copies_paired_files_and_returns_relative_pa
     assert content["actions"][0]["color_image_path"] == "pose/color/walk.png"
     assert content["actions"][0]["depth_image_path"] == "pose/depth/walk_depth.png"
     assert content["actions"][0]["skeleton_image_path"] == "pose/skeleton/walk_skeleton.png"
+
+
+def test_prepare_prompt_action_video_media_copies_all_four_variants(tmp_path):
+    root = tmp_path / "ref"
+    root.mkdir()
+    roles = {
+        "video": "original.mp4",
+        "depth_video": "depth.mp4",
+        "skeleton_video": "skeleton.mp4",
+        "depth_skeleton_video": "overlay.mp4",
+    }
+
+    prepared = prepare_prompt_resource_body(
+        {
+            "title": "视频动作",
+            "text": "",
+            "media_type": "video",
+            "media": [
+                {"role": role, "name": name, "mime": "video/mp4", "data_url": _data_url(role.encode(), "video/mp4")}
+                for role, name in roles.items()
+            ],
+        },
+        "action",
+        root,
+    )
+
+    assert prepared["media_type"] == "video"
+    expected = {
+        "video_path": "pose/video/original.mp4",
+        "depth_video_path": "pose/video-depth/original_depth.mp4",
+        "skeleton_video_path": "pose/video-skeleton/original_skeleton.mp4",
+        "depth_skeleton_video_path": "pose/video-depth-skeleton/original_depth_skeleton.mp4",
+    }
+    for field, relative in expected.items():
+        assert prepared[field] == relative
+        assert (root / relative).read_bytes() == {
+            "video_path": b"video",
+            "depth_video_path": b"depth_video",
+            "skeleton_video_path": b"skeleton_video",
+            "depth_skeleton_video_path": b"depth_skeleton_video",
+        }[field]
+
+    action = ActionStore(tmp_path / "data", source_root=root).add_action(prepared)
+    assert action["media_type"] == "video"
+    assert action["depth_skeleton_video_path"] == expected["depth_skeleton_video_path"]
+
+
+def test_prepare_action_video_generation_body_saves_one_explicit_source_object(tmp_path):
+    root = tmp_path / "ref"
+    root.mkdir()
+    prepared = web_server.prepare_action_video_generation_body(
+        {
+            "title": "视频动作",
+            "text": "角色向前走。",
+            "media_type": "video",
+            "source": {"name": "walk.mp4", "mime": "video/mp4", "data": base64.b64encode(b"video").decode("ascii")},
+            "start_frame": "48",
+            "duration_seconds": "2.5",
+        },
+        root,
+    )
+
+    assert prepared["video_path"] == "pose/video/walk.mp4"
+    assert "source" not in prepared
+    assert "media" not in prepared
+    assert (root / prepared["video_path"]).read_bytes() == b"video"
 
 
 def test_prepare_prompt_reference_media_copies_into_kind_directory_and_updates_json(tmp_path):
@@ -177,3 +244,99 @@ def test_generate_prompt_skeleton_uses_dwpose_runtime_and_cleans_up_temp_files(t
         "/videomake/.runtime/pose_dwpose/checkpoints/dw-ll_ucoco_384.onnx",
     ]]
     assert not list((tmp_path / "data" / "prompt").glob("skeleton-generation-*"))
+
+
+def test_generate_prompt_video_stages_all_variants_with_24fps_controls(tmp_path, monkeypatch):
+    root = tmp_path / "ref"
+    source = tmp_path / "input.mov"
+    root.mkdir()
+    source.write_bytes(b"source-video")
+    calls = []
+
+    monkeypatch.setattr(web_server, "DATA_ROOT", tmp_path / "data")
+
+    def fake_process_media_variants(modes, input_path, output_dir, configured_root, **kwargs):
+        calls.append((set(modes), input_path, output_dir, configured_root, kwargs))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        result = {}
+        for mode in modes:
+            output = output_dir / f"{mode}.mp4"
+            output.write_bytes(mode.encode("ascii"))
+            result[mode] = output
+        return result
+
+    monkeypatch.setattr(web_server, "process_media_variants", fake_process_media_variants)
+    result = web_server.generate_prompt_video(
+        {
+            "source_path": str(source),
+            "title": "走路动作",
+            "resolution": "720p",
+            "start_frame": "48",
+            "duration_seconds": "2.5",
+        },
+        root,
+    )
+
+    assert result["fps"] == 24
+    assert result["resolution"] == "720p"
+    assert result["start_frame"] == 48
+    assert result["duration_seconds"] == 2.5
+    assert set(result["paths"]) == {
+        "video_path",
+        "depth_video_path",
+        "skeleton_video_path",
+        "depth_skeleton_video_path",
+    }
+    assert calls[0][0] == {"depth", "skeleton", "depth_skeleton"}
+    assert calls[0][1] == source.resolve()
+    assert calls[0][3] == root.resolve()
+    assert calls[0][4]["start_frame"] == 48
+    assert calls[0][4]["duration_seconds"] == 2.5
+    assert calls[0][4]["resolution"] == "720p"
+    for relative in result["paths"].values():
+        assert (root / relative).is_file()
+    assert (root / result["paths"]["video_path"]).read_bytes() == b"source-video"
+    assert not list((tmp_path / "data" / "prompt").glob("video-generation-*"))
+
+
+def test_background_action_video_generation_updates_saved_action_after_original_is_available(tmp_path, monkeypatch):
+    root = tmp_path / "ref"
+    original = root / "pose" / "video" / "walk.mp4"
+    original.parent.mkdir(parents=True)
+    original.write_bytes(b"original")
+    store = ActionStore(tmp_path / "data", source_root=root)
+    action = store.add_action({
+        "title": "走路动作",
+        "text": "角色向前走。",
+        "media_type": "video",
+        "video_path": "pose/video/walk.mp4",
+    })
+    monkeypatch.setattr(web_server, "DATA_ROOT", tmp_path / "data")
+    calls = []
+
+    def fake_process_media_variants(modes, input_path, output_dir, configured_root, **kwargs):
+        calls.append(kwargs)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        result = {}
+        for mode in modes:
+            output = output_dir / f"{mode}.mp4"
+            output.write_bytes(mode.encode("ascii"))
+            result[mode] = output
+        return result
+
+    monkeypatch.setattr(web_server, "process_media_variants", fake_process_media_variants)
+    manager = web_server.ToolboxManager.__new__(web_server.ToolboxManager)
+    manager._action_video_jobs = {
+        "job-1": {"id": "job-1", "action_id": action["id"], "status": "queued", "resolution": "480p"},
+    }
+    manager._action_video_jobs_lock = threading.Lock()
+    manager._run_action_video_generation("job-1", store, action["id"], original, 48, 2.5, "480p")
+
+    job = manager.action_video_job("job-1")
+    public = store.public_actions()[0]
+    assert job["status"] == "completed"
+    assert public["pair_status"] == "video_ready"
+    assert public["depth_video_available"] is True
+    assert public["skeleton_video_available"] is True
+    assert public["depth_skeleton_video_available"] is True
+    assert calls[0]["resolution"] == "480p"

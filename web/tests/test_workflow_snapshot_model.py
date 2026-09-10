@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-import web.app as web_app
+import web.backend.app as web_app
 from web.tests.test_app import _configure_web_paths
 
 

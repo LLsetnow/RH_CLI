@@ -36,7 +36,7 @@ function loadOutputs() {
     updateFilterSlider = function () {};
     this.api = { state, caseMediaOutputs, oneStarOutputs, scopedOutputSummary, renderSummary,
       exportCaseOutputs, deleteOneStarOutputs, restoreOutputViewState, saveOutputViewState,
-      outputViewStateKey, readOutputContext, formatVideoDuration, artifactDurationMarkup };
+      outputViewStateKey, readOutputContext, formatVideoDuration, artifactDurationMarkup, filteredOutputs };
   `.replace("this.api", "globalThis.api")), context);
   context.api.state.outputs = [
     { id: "a", project_id: "项目 A", kind: "file", display_type: "video", rating: 1, tags: ["案例"] },
@@ -54,6 +54,7 @@ test("output view state restores folder, filters, search and selection", () => {
     projectId: "项目 A",
     type: "video",
     rating: 4,
+    feature: "tts",
     tagFilters: { "案例": "include", H: "exclude" },
     workflowFilter: "流程甲",
     search: "目标片段",
@@ -65,6 +66,7 @@ test("output view state restores folder, filters, search and selection", () => {
   assert.equal(api.state.projectId, "项目 A");
   assert.equal(api.state.type, "video");
   assert.equal(api.state.rating, 4);
+  assert.equal(api.state.feature, "tts");
   assert.deepEqual(JSON.parse(JSON.stringify(api.state.tagFilters)), { "案例": "include", H: "exclude" });
   assert.equal(api.state.workflowFilter, "流程甲");
   assert.equal(api.state.search, "目标片段");
@@ -138,6 +140,7 @@ test("media and rating summaries follow the opened folder", () => {
     text: 0,
     rating_counts: { unrated: 0, "1": 1, "2": 1, "3": 0, "4": 0, "5": 0 },
     tag_counts: { "案例": 0, "H": 0 },
+    feature_counts: { workflow: 2 },
   });
 
   api.state.projectId = "项目 B";
@@ -156,6 +159,7 @@ test("bulk action counts follow the active folder and filters", () => {
   api.state.type = "video";
   api.state.rating = 1;
   api.state.tagFilters["案例"] = "include";
+  api.state.feature = "workflow";
   api.state.outputs[0].task_name = "流程甲";
   api.state.workflowFilter = "流程甲";
   api.renderSummary();
@@ -163,6 +167,20 @@ test("bulk action counts follow the active folder and filters", () => {
   assert.equal(elements.get("caseOutputCount").textContent, "1");
   assert.equal(elements.get("deleteOneStarOutputs").disabled, false);
   assert.equal(elements.get("exportCaseOutputs").disabled, false);
+});
+
+test("feature tags isolate the four submit workspaces", () => {
+  const { api } = loadOutputs();
+  api.state.outputs = [
+    { id: "workflow", task_id: "task-workflow", kind: "file", display_type: "video", feature: "workflow" },
+    { id: "codex", task_id: "task-codex", kind: "file", display_type: "image", feature: "codex" },
+    { id: "media", task_id: "task-media", kind: "file", display_type: "video", feature: "media" },
+    { id: "tts", task_id: "task-tts", kind: "file", display_type: "audio", feature: "tts" },
+  ];
+  api.state.feature = "media";
+  assert.deepEqual(api.filteredOutputs().map(item => item.id), ["media"]);
+  api.state.feature = "";
+  assert.equal(api.filteredOutputs().length, 4);
 });
 
 test("export sends the selected folder and every active filter", () => {
@@ -176,10 +194,12 @@ test("export sends the selected folder and every active filter", () => {
   api.state.tagFilters["案例"] = "include";
   api.state.tagFilters.H = "exclude";
   api.state.workflowFilter = "长流程";
+  api.state.feature = "codex";
+  api.state.outputs[0].feature = "codex";
   api.exportCaseOutputs();
   assert.equal(context.window.location.href, "/api/outputs/export/case?project_id=" + encodeURIComponent("项目 A") +
     "&search=" + encodeURIComponent("目标") + "&type=video&rating=1&workflow=" + encodeURIComponent("长流程") +
-    "&tag_case=include&tag_h=exclude");
+    "&feature=codex&tag_case=include&tag_h=exclude");
 });
 
 test("deletion keeps other folders when navigation changes during the request", async () => {

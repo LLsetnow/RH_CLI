@@ -436,7 +436,8 @@
     if (visionStatus) { visionStatus.textContent = vision.configured ? "已配置 · " + (vision.source === "environment" ? "环境变量" : "本机") : "未配置"; visionStatus.classList.toggle("ready", Boolean(vision.configured)); }
     var telegram = state.settings.telegram || {};
     setValue("telegramBotToken", "");
-    setValue("telegramChatId", telegram.chat_id || "");
+    setValue("telegramPushChatId", telegram.push_chat_id || telegram.chat_id || "");
+    setValue("telegramInboundChatId", telegram.inbound_chat_id || telegram.chat_id || "");
     setChecked("telegramEnabled", telegram.enabled);
     setChecked("telegramInboundEnabled", telegram.inbound_enabled);
     setChecked("telegramVideoInboundEnabled", telegram.video_inbound_enabled);
@@ -491,7 +492,8 @@
     if (state.clearingTelegram) {
       body.telegram_clear = true;
     } else {
-      body.telegram_chat_id = value("telegramChatId");
+      body.telegram_push_chat_id = value("telegramPushChatId");
+      body.telegram_inbound_chat_id = value("telegramInboundChatId");
       body.telegram_enabled = Boolean($("telegramEnabled") && $("telegramEnabled").checked);
       body.telegram_inbound_enabled = Boolean($("telegramInboundEnabled") && $("telegramInboundEnabled").checked);
       body.telegram_inbound_mode = value("telegramInboundMode") || "fixed";
@@ -653,7 +655,7 @@
       }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; button.textContent = original; });
     });
     $("testTelegram").addEventListener("click", function () { if (state.dirty) return showToast("请先保存配置，再测试 Telegram", true); var button = this; button.disabled = true; jsonRequest("/api/telegram/test", "POST", {}).then(function (data) { showToast(data.message || "Telegram 测试消息已发送"); }).catch(function (error) { showToast(error.message, true); }).finally(function () { button.disabled = false; }); });
-    $("clearTelegram").addEventListener("click", function () { if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？点击右下角保存后生效。")) return; state.clearingTelegram = true; setValue("telegramBotToken", ""); setValue("telegramChatId", ""); setChecked("telegramEnabled", false); setChecked("telegramInboundEnabled", false); setChecked("telegramVideoInboundEnabled", false); setValue("telegramInboundMode", "fixed"); setValue("telegramInboundWorkflow", ""); setValue("telegramInboundFolder", ""); setValue("telegramVideoInboundWorkflow", ""); updateTelegramInboundControls(); updateTelegramVideoInboundControls(); markDirty(); showToast("已准备清除 Telegram 配置，请保存"); });
+    $("clearTelegram").addEventListener("click", function () { if (!window.confirm("清除本机保存的 Telegram Bot 配置吗？点击右下角保存后生效。")) return; state.clearingTelegram = true; setValue("telegramBotToken", ""); setValue("telegramPushChatId", ""); setValue("telegramInboundChatId", ""); setChecked("telegramEnabled", false); setChecked("telegramInboundEnabled", false); setChecked("telegramVideoInboundEnabled", false); setValue("telegramInboundMode", "fixed"); setValue("telegramInboundWorkflow", ""); setValue("telegramInboundFolder", ""); setValue("telegramVideoInboundWorkflow", ""); updateTelegramInboundControls(); updateTelegramVideoInboundControls(); markDirty(); showToast("已准备清除 Telegram 配置，请保存"); });
     $("credentialList").addEventListener("click", handleCredentialClick);
     $("accountList").addEventListener("click", handleAccountClick);
     $("accountList").addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); handleAccountClick(event); } });

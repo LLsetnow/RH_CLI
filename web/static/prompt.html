@@ -21,7 +21,7 @@
   <body>
     <div class="app-shell prompt-shell">
       <header class="topbar">
-        <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
+        <a class="brand-lockup brand-home-link" href="/?workspace=submit" aria-label="返回 RH Workflow Desk">
           <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
           <span>
             <span class="brand-name">RH Workflow Desk</span>
@@ -54,7 +54,7 @@
             <span class="top-nav-label">提示词工坊</span>
           </span>
         </a>
-        <a class="top-nav-link" href="/">
+        <a class="top-nav-link" href="/?workspace=submit">
           <span class="top-nav-content">
             <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>
             <span class="top-nav-label">任务提交</span>
@@ -150,18 +150,8 @@
                   <div><strong id="stageCount">0 个积木</strong><span class="stage-toolbar-helper">按顺序以空行连接</span></div>
                   <div class="stage-toolbar-actions">
                     <button id="generateSubjectDefinitions" class="secondary-button button-compact subject-definitions-button" type="button" disabled>插入对象定义</button>
-                    <button id="addTextStage" class="secondary-button button-compact text-block-add" type="button"><span>文本积木</span></button>
                     <button id="clearStage" class="text-button" type="button">清空组装台</button>
                   </div>
-                </div>
-                <div class="group-create-panel">
-                  <div class="group-create-copy"><span class="group-kicker">PROMPT GROUP</span><strong>保存当前组装台</strong><span>提示词组会作为工作流包的内部配置随“保存到工作流库”一起保存。</span></div>
-                  <form id="groupForm" class="group-save-row">
-                    <label class="sr-only" for="groupName">新建提示词组名称</label>
-                    <input id="groupName" type="text" maxlength="48" placeholder="输入新建提示词组名称" />
-                    <button id="newGroup" class="text-button" type="button">另存为新组</button>
-                    <button id="saveGroup" class="secondary-button button-compact" type="submit">新建提示词组</button>
-                  </form>
                 </div>
                 <div id="stageList" class="stage-list" aria-live="polite">
                   <div class="page-loading-state compact" role="status"><span class="page-loading-mark" aria-hidden="true"></span><strong>正在恢复组装台</strong></div>
@@ -181,7 +171,7 @@
               <div class="output-actions">
                 <button id="copyPrompt" class="secondary-button button-compact" type="button">复制文本</button>
                 <button id="importPrompt" class="secondary-button button-compact import-prompt-button" type="button">导入提示词</button>
-                <button id="importMedia" class="secondary-button button-compact import-media-button" type="button" hidden>导入媒体</button>
+                <button id="importMedia" class="secondary-button button-compact import-media-button" type="button" disabled title="请先导入包含 MiniMax H3 节点的工作流">导入媒体</button>
                 <button id="downloadPrompt" class="primary-button button-compact" type="button">导出 TXT</button>
               </div>
               <div class="output-preview-wrap">
@@ -231,10 +221,43 @@
             <input id="customBlockTags" type="text" placeholder="例如：光线，风格" maxlength="80" />
           </label>
           <div id="resourceMediaFields" class="resource-media-fields" hidden>
+            <div id="resourceMediaTypeControl" class="resource-media-type-control" hidden>
+              <span class="field-label">动作媒体类型</span>
+              <div class="resource-media-type-tabs" role="tablist" aria-label="动作媒体类型">
+                <button type="button" class="resource-media-type-tab active" data-resource-media-type="image" role="tab" aria-selected="true">图片动作</button>
+                <button type="button" class="resource-media-type-tab" data-resource-media-type="video" role="tab" aria-selected="false">视频动作</button>
+              </div>
+            </div>
+            <div id="actionVideoGenerationOptions" class="action-video-generation-options" hidden>
+              <div class="action-video-generation-heading"><span class="field-label">自动生成参数</span><span class="field-hint">视频统一按 24 FPS 读取</span></div>
+              <div class="action-video-generation-grid">
+                <label class="field-group">
+                  <span class="field-label">分辨率</span>
+                  <select id="resourceVideoResolution">
+                    <option value="480p">480p</option>
+                    <option value="720p">720p</option>
+                    <option value="1080p">1080p</option>
+                    <option value="original" selected>原始</option>
+                  </select>
+                </label>
+                <label class="field-group">
+                  <span class="field-label">起始帧 <span class="field-hint inline-hint">从 0 开始</span></span>
+                  <input id="resourceVideoStartFrame" type="number" min="0" step="1" value="0" inputmode="numeric" />
+                </label>
+                <label class="field-group">
+                  <span class="field-label">处理时长 <span class="field-hint inline-hint">秒，留空为全片</span></span>
+                  <input id="resourceVideoDuration" type="number" min="0.001" step="0.001" placeholder="全片" inputmode="decimal" />
+                </label>
+              </div>
+            </div>
             <div id="resourceMediaSlots" class="resource-media-slots"></div>
             <input id="resourceImagePath" type="hidden" />
             <input id="resourceDepthPath" type="hidden" />
             <input id="resourceSkeletonPath" type="hidden" />
+            <input id="resourceVideoPath" type="hidden" />
+            <input id="resourceDepthVideoPath" type="hidden" />
+            <input id="resourceSkeletonVideoPath" type="hidden" />
+            <input id="resourceDepthSkeletonVideoPath" type="hidden" />
             <input id="resourceAudioPath" type="hidden" />
             <input id="resourceMediaPicker" class="resource-media-picker" type="file" hidden />
             <div class="resource-media-tools"><span id="resourceMediaHint" class="field-hint">选择文件、拖入素材，或在素材槽位中按 ⌘V / Ctrl+V；保存时会自动复制到 ref 对应目录。</span><button id="resourceVisionButton" class="resource-ai-button" type="button" hidden>AI 识图填充</button></div>
@@ -251,8 +274,9 @@
         <img id="imagePreviewImage" src="data:," alt="" />
       </button>
     </div>
-    <div id="libraryImageContextMenu" class="library-image-context-menu" role="menu" aria-label="图片操作" hidden>
-      <button type="button" role="menuitem" data-library-image-menu-action="copy">复制</button>
+    <div id="libraryImageContextMenu" class="library-image-context-menu" role="menu" aria-label="媒体库操作" hidden>
+      <strong class="library-context-menu-title" data-library-context-title></strong>
+      <div class="library-context-menu-actions" data-library-context-actions></div>
     </div>
     <div id="textPreviewModal" class="modal-backdrop" hidden>
       <section class="text-preview-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="textPreviewTitle">

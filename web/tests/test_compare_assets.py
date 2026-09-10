@@ -47,6 +47,10 @@ def test_compare_runtime_supports_local_files_output_assets_and_drop_zones():
     assert 'event.target.closest(".compare-divider")' in script
     assert 'handleVideoShortcut' in script
     assert 'ArrowRight' in script and 'ArrowLeft' in script
+    assert 'document.addEventListener("keydown", handleVideoShortcut, true)' in script
+    assert 'event.code === "KeyD"' in script and 'event.code === "KeyF"' in script
+    assert 'isTypingTarget(event.target)' not in script
+    assert 'controlTarget' not in script
     assert '1 / 24' in script
     assert 'D 后退一帧 · F 前进一帧' in script
     assert 'video.play()' in script

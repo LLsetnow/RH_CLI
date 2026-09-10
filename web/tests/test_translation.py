@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from web.app import LocalStore
-from web.translation import AliyunTranslationClient
+from web.backend.app import LocalStore
+from web.backend.translation import AliyunTranslationClient
 
 
 def test_aliyun_translation_client_signs_json_request_and_reads_result(monkeypatch):
@@ -20,7 +20,7 @@ def test_aliyun_translation_client_signs_json_request_and_reads_result(monkeypat
         captured.update(kwargs)
         return FakeResponse()
 
-    monkeypatch.setattr("web.translation.httpx.post", fake_post)
+    monkeypatch.setattr("web.backend.translation.httpx.post", fake_post)
 
     result = AliyunTranslationClient("test-access-key", "test-access-secret").translate("一个电影感镜头")
 

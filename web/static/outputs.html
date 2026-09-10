@@ -21,7 +21,7 @@
   <body>
     <div class="app-shell outputs-shell">
       <header class="topbar">
-        <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
+        <a class="brand-lockup brand-home-link" href="/?workspace=submit" aria-label="返回 RH Workflow Desk">
           <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
           <span>
             <span class="brand-name">RH Workflow Desk</span>
@@ -54,7 +54,7 @@
             <span class="top-nav-label">提示词工坊</span>
           </span>
         </a>
-        <a class="top-nav-link" href="/">
+        <a class="top-nav-link" href="/?workspace=submit">
           <span class="top-nav-content">
             <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>
             <span class="top-nav-label">任务提交</span>
@@ -119,10 +119,19 @@
               <h2>成片库 <span id="outputCount" class="outputs-count">0</span></h2>
             </div>
             <div class="outputs-toolbar-actions">
-              <button id="exportCaseOutputs" class="secondary-button button-compact case-export-button" type="button" disabled aria-label="导出所有案例" title="没有带“案例”标签的媒体文件可导出"><span aria-hidden="true">⇩</span> 导出所有案例 <span id="caseOutputCount">0</span></button>
-              <button id="deleteOneStarOutputs" class="secondary-button button-compact danger-button" type="button" disabled aria-label="删除一星成片" title="没有一星成片可删除"><span aria-hidden="true">⌫</span> 删除一星成片 <span id="oneStarOutputCount">0</span></button>
-              <a class="secondary-button button-compact tool-entry-link" href="/outputs/compare">内容对比</a>
-              <button id="refreshOutputs" class="secondary-button button-compact" type="button"><span aria-hidden="true">↻</span> 刷新</button>
+              <div id="outputToolbarDefaultActions" class="output-toolbar-action-group">
+                <button id="exportCaseOutputs" class="secondary-button button-compact case-export-button" type="button" disabled aria-label="导出所有案例" title="没有带“案例”标签的媒体文件可导出"><span aria-hidden="true">⇩</span> 导出所有案例 <span id="caseOutputCount">0</span></button>
+                <button id="deleteOneStarOutputs" class="secondary-button button-compact danger-button" type="button" disabled aria-label="删除一星成片" title="没有一星成片可删除"><span aria-hidden="true">⌫</span> 删除一星成片 <span id="oneStarOutputCount">0</span></button>
+                <a class="secondary-button button-compact tool-entry-link" href="/outputs/compare">内容对比</a>
+                <button id="toggleOutputMultiSelect" class="secondary-button button-compact" type="button">多选</button>
+                <button id="refreshOutputs" class="secondary-button button-compact" type="button"><span aria-hidden="true">↻</span> 刷新</button>
+              </div>
+              <div id="outputToolbarMultiActions" class="output-toolbar-action-group" hidden>
+                <button id="cancelOutputMultiSelect" class="secondary-button button-compact" type="button">取消</button>
+                <button id="uploadSelectedOutputs" class="secondary-button button-compact" type="button" disabled>上传</button>
+                <button id="moveSelectedOutputs" class="secondary-button button-compact" type="button" disabled>移动到项目</button>
+                <button id="deleteSelectedOutputs" class="secondary-button button-compact danger-button" type="button" disabled>删除</button>
+              </div>
             </div>
           </div>
           <div class="outputs-toolbar-controls">
@@ -171,6 +180,16 @@
                 </span>
               </span>
             </div>
+            <div id="outputFeatureFilters" class="output-feature-filters" role="group" aria-label="按功能筛选">
+              <span class="output-feature-filter-label">功能</span>
+              <span class="output-feature-filter-options">
+                <button class="output-feature-filter active" type="button" data-output-feature="" aria-pressed="true">全部 <span data-feature-count>全部</span></button>
+                <button class="output-feature-filter" type="button" data-output-feature="workflow" aria-pressed="false">任务提交 <span data-feature-count>0</span></button>
+                <button class="output-feature-filter" type="button" data-output-feature="codex" aria-pressed="false">Codex 图像生成 <span data-feature-count>0</span></button>
+                <button class="output-feature-filter" type="button" data-output-feature="media" aria-pressed="false">深度与骨骼 <span data-feature-count>0</span></button>
+                <button class="output-feature-filter" type="button" data-output-feature="tts" aria-pressed="false">角色语音 <span data-feature-count>0</span></button>
+              </span>
+            </div>
           </div>
           <div id="outputWorkflowFilters" class="output-workflow-filters" role="group" aria-label="按工作流筛选" hidden></div>
         </section>
@@ -211,6 +230,30 @@
         <div class="output-import-actions">
           <button id="cancelOutputImport" class="secondary-button" type="button">取消</button>
           <button id="confirmOutputImport" class="primary-button" type="button" disabled>导入媒体</button>
+        </div>
+      </section>
+    </div>
+    <div id="telegramUploadModal" class="modal-backdrop" hidden>
+      <section class="telegram-upload-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="telegramUploadTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">TELEGRAM DELIVERY</div>
+            <h2 id="telegramUploadTitle">选择推送用户</h2>
+          </div>
+          <button id="closeTelegramUpload" class="close-button" type="button" aria-label="关闭选择推送用户">×</button>
+        </div>
+        <p id="telegramUploadDescription" class="modal-description">选择接收这份成片的 Telegram 推送用户，可多选或全选。</p>
+        <div class="telegram-upload-toolbar">
+          <strong id="telegramUploadSelectionSummary">已选择 0 / 0 个推送用户</strong>
+          <div class="telegram-upload-toolbar-actions">
+            <button id="selectAllTelegramRecipients" class="text-button" type="button">全选</button>
+            <button id="clearTelegramRecipients" class="text-button" type="button">清空</button>
+          </div>
+        </div>
+        <div id="telegramUploadRecipients" class="telegram-upload-recipients" role="group" aria-label="Telegram 推送用户"></div>
+        <div class="output-import-actions">
+          <button id="cancelTelegramUpload" class="secondary-button" type="button">取消</button>
+          <button id="confirmTelegramUpload" class="primary-button" type="button" disabled>上传到所选用户</button>
         </div>
       </section>
     </div>

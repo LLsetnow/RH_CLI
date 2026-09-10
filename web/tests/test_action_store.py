@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from web.action_store import ActionStore
+from web.backend.action_store import ActionStore
 
 
 RESOURCES = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.json")
@@ -24,7 +24,7 @@ def test_action_store_reads_pose_json_and_local_images(tmp_path):
     actions = store.actions()
     public_actions = store.public_actions()
 
-    assert len(actions) == 57
+    assert len(actions) >= 57
     assert len(public_actions) == len(actions)
     assert actions[0]["title"]
     assert actions[0]["text"]
@@ -33,11 +33,13 @@ def test_action_store_reads_pose_json_and_local_images(tmp_path):
     assert actions[3]["category"] == "站立"
     assert actions[4]["category"] == "坐姿"
     assert all(action["category"] not in action["tags"] for action in actions)
-    assert all(item["depth_image_available"] for item in public_actions)
-    assert all(item["image_available"] == item["color_image_available"] for item in public_actions)
+    image_actions = [item for item in public_actions if item["media_type"] == "image"]
+    assert len(image_actions) == 57
+    assert all(item["depth_image_available"] for item in image_actions)
+    assert all(item["image_available"] == item["color_image_available"] for item in image_actions)
     assert all(item["image_url"].startswith("/api/prompt/actions/") for item in public_actions if item["color_image_available"])
-    assert all(item["pair_status"] == "paired" for item in public_actions)
-    assert all(item["depth_image_url"].endswith("/depth") for item in public_actions)
+    assert all(item["pair_status"] == "paired" for item in image_actions)
+    assert all(item["depth_image_url"].endswith("/depth") for item in image_actions)
 
 
 def test_action_store_uses_json_source_without_a_derived_cache(tmp_path):
@@ -225,3 +227,115 @@ def test_action_store_does_not_overwrite_existing_target_pair(tmp_path):
     assert (depth_root / "old-name_depth.png").read_bytes() == b"old-depth"
     assert (color_root / "新动作.jpg").read_bytes() == b"existing-color"
     assert (depth_root / "新动作_depth.png").read_bytes() == b"existing-depth"
+
+
+def test_action_store_supports_video_variants_and_safe_video_paths(tmp_path):
+    root = tmp_path / "ref"
+    video_dirs = {
+        "video": root / "pose" / "video",
+        "depth_video": root / "pose" / "video-depth",
+        "skeleton_video": root / "pose" / "video-skeleton",
+        "depth_skeleton_video": root / "pose" / "video-depth-skeleton",
+    }
+    for directory in video_dirs.values():
+        directory.mkdir(parents=True)
+    paths = {
+        "video_path": "pose/video/walk.mp4",
+        "depth_video_path": "pose/video-depth/walk_depth.mp4",
+        "skeleton_video_path": "pose/video-skeleton/walk_skeleton.mp4",
+        "depth_skeleton_video_path": "pose/video-depth-skeleton/walk_depth_skeleton.mp4",
+    }
+    for field, relative in paths.items():
+        (root / relative).write_bytes(field.encode())
+    source = root / "pose" / "pose.json"
+    _write_actions(source, [{
+        "id": "pose-video", "category": "站立", "title": "walk", "text": "Walk.", "media_type": "video", **paths,
+    }])
+
+    store = ActionStore(tmp_path / "data", source_root=root)
+    public = store.public_actions()[0]
+
+    assert public["media_type"] == "video"
+    assert public["pair_status"] == "video_ready"
+    assert public["pair_message"] == "原视频、深度视频、骨骼视频和叠加视频已配齐"
+    for kind in ("video", "depth_video", "skeleton_video", "depth_skeleton_video"):
+        assert public[f"{kind}_available"] is True
+        assert public[f"{kind}_url"].endswith("/" + kind.replace("_", "-"))
+        assert store.video_path("pose-video", kind).is_file()
+    assert store.video_path("pose-video", "video",) == root / paths["video_path"]
+    assert store.video_path("pose-video", "../video") is None
+
+
+def test_action_store_delete_removes_all_media_variants_and_index_entry(tmp_path):
+    root = tmp_path / "ref"
+    media_paths = {
+        "color_image_path": "pose/color/walk.jpg",
+        "depth_image_path": "pose/depth/walk_depth.png",
+        "skeleton_image_path": "pose/skeleton/walk_skeleton.png",
+        "video_path": "pose/video/walk.mp4",
+        "depth_video_path": "pose/video-depth/walk_depth.mp4",
+        "skeleton_video_path": "pose/video-skeleton/walk_skeleton.mp4",
+        "depth_skeleton_video_path": "pose/video-depth-skeleton/walk_depth_skeleton.mp4",
+    }
+    for relative in media_paths.values():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(relative.encode())
+    source = root / "pose" / "pose.json"
+    _write_actions(source, [{
+        "id": "pose-delete",
+        "category": "站立",
+        "title": "walk",
+        "text": "Walk.",
+        "media_type": "video",
+        **media_paths,
+    }])
+
+    store = ActionStore(tmp_path / "data", source_root=root)
+    assert store.media_folder("pose-delete") == (root / "pose" / "color")
+
+    store.delete_action("pose-delete")
+
+    assert store.actions() == []
+    assert json.loads(source.read_text(encoding="utf-8"))["actions"] == []
+    assert all(not (root / relative).exists() for relative in media_paths.values())
+
+
+def test_action_store_video_paths_override_stale_image_media_type(tmp_path):
+    root = tmp_path / "ref"
+    video_root = root / "pose" / "video"
+    video_root.mkdir(parents=True)
+    (video_root / "walk.mp4").write_bytes(b"video")
+    source = root / "pose" / "pose.json"
+    _write_actions(source, [{
+        "id": "pose-video-stale-type",
+        "category": "站立",
+        "title": "walk",
+        "text": "Walk.",
+        "media_type": "image",
+        "video_path": "pose/video/walk.mp4",
+    }])
+
+    public = ActionStore(tmp_path / "data", source_root=root).public_actions()[0]
+
+    assert public["media_type"] == "video"
+    assert public["pair_status"] == "video_partial"
+
+
+def test_action_store_allows_media_only_action_without_text(tmp_path):
+    root = tmp_path / "ref"
+    video_path = root / "pose" / "video" / "walk.mp4"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+
+    store = ActionStore(tmp_path / "data", source_root=root)
+    action = store.add_action({
+        "title": "无文本动作",
+        "text": "",
+        "media_type": "video",
+        "video_path": "pose/video/walk.mp4",
+    })
+
+    assert action["text"] == ""
+    assert action["media_type"] == "video"
+    assert action["video_path"] == "pose/video/walk.mp4"

@@ -10,8 +10,10 @@ from urllib.parse import urlencode
 
 import pytest
 
-from web import app as web_app
-from web import server as web_server
+from web.backend import app as web_app
+from web.backend import server as web_server
+from web.backend.action_store import ActionStore
+from web.backend.reference_store import ReferenceStore
 
 
 def _configure_web_paths(tmp_path, monkeypatch):
@@ -80,6 +82,52 @@ def test_bulk_output_actions_are_scoped_to_project_over_http(tmp_path, monkeypat
             assert case_path.exists() == (name not in expected)
             assert keep_path.exists()
             assert len(server.store.task(name)["outputs"]) == (1 if name in expected else 2)
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_selected_output_delete_only_removes_requested_outputs_over_http(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    server = web_server.AppServer(("127.0.0.1", 0))
+    task_id = "selected-delete"
+    task_folder = tmp_path / "outputs" / task_id
+    task_folder.mkdir(parents=True)
+    paths = [task_folder / f"clip-{index}.mp4" for index in range(3)]
+    for path in paths:
+        path.write_bytes(b"video")
+    server.store.create_task({
+        "id": task_id,
+        "created_at": 1,
+        "workflow_path": str(tmp_path / "workflow.json"),
+        "workflow_name": "workflow.json",
+        "files": {},
+        "prompts": {},
+        "output_dir": str(tmp_path / "outputs"),
+    })
+    server.store.update_task(task_id, outputs_json=json.dumps([
+        {"kind": "file", "path": str(path), "mime": "video/mp4"} for path in paths
+    ]))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        body = json.dumps({"output_keys": [
+            {"task_id": task_id, "output_index": 0},
+            {"task_id": task_id, "output_index": 2},
+        ]})
+        connection.request("DELETE", "/api/outputs/selected", body=body, headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["deleted"] == 2
+        assert not paths[0].exists()
+        assert paths[1].exists()
+        assert not paths[2].exists()
+        assert [item["path"] for item in server.store.task(task_id)["outputs"]] == [str(paths[1])]
     finally:
         connection.close()
         server.shutdown()
@@ -183,6 +231,7 @@ def test_task_submission_project_selection_over_http(tmp_path, monkeypatch, sele
         body = {
             "workflow": {"1": {"class_type": "SaveImage", "inputs": {}}},
             "workflow_name": "project-selector.json", "remote_workflow_id": "123456",
+            "output_prefix": "千夏展示片",
             "output_dir": str(tmp_path / "projects" / "自动项目" / "output"),
             "project": {"existing": {"id": project["id"]}, "unclassified": {}, "automatic": None, "deleted": {"id": "missing"}}[selection],
         }
@@ -200,6 +249,7 @@ def test_task_submission_project_selection_over_http(tmp_path, monkeypatch, sele
         assert task["project_name"] == expected_name
         if selection == "existing":
             assert task["project_id"] == project["id"]
+        assert task["output_prefix"] == body["output_prefix"]
         assert task["output_dir"] == body["output_dir"]
         manifest = json.loads(Path(task["manifest_path"]).read_text())
         assert manifest["project"]["name"] == expected_name
@@ -331,6 +381,82 @@ def test_input_file_folder_can_be_opened_over_http(tmp_path, monkeypatch):
         assert response.status == 200
         assert payload == {"opened": True, "message": "已打开文件所在文件夹"}
         assert opened == [source.parent.resolve()]
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_prompt_resource_folder_and_delete_actions_are_scoped_to_library_media(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    root = tmp_path / "ref"
+    action_media = root / "pose" / "video" / "walk.mp4"
+    action_depth = root / "pose" / "video-depth" / "walk_depth.mp4"
+    action_skeleton = root / "pose" / "video-skeleton" / "walk_skeleton.mp4"
+    action_overlay = root / "pose" / "video-depth-skeleton" / "walk_depth_skeleton.mp4"
+    for path in (action_media, action_depth, action_skeleton, action_overlay):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(path.name.encode())
+    action_source = root / "pose" / "pose.json"
+    action_source.write_text(json.dumps({"actions": [{
+        "id": "pose-http-delete",
+        "category": "站立",
+        "title": "walk",
+        "text": "Walk.",
+        "media_type": "video",
+        "video_path": "pose/video/walk.mp4",
+        "depth_video_path": "pose/video-depth/walk_depth.mp4",
+        "skeleton_video_path": "pose/video-skeleton/walk_skeleton.mp4",
+        "depth_skeleton_video_path": "pose/video-depth-skeleton/walk_depth_skeleton.mp4",
+    }]}), encoding="utf-8")
+    reference_media = root / "character" / "hero.png"
+    reference_media.parent.mkdir(parents=True, exist_ok=True)
+    reference_media.write_bytes(b"png")
+    reference_source = root / "character" / "character.json"
+    reference_source.write_text(json.dumps({"references": [{
+        "id": "character-http-delete",
+        "category": "二次元",
+        "tags": ["人物"],
+        "title": "主角",
+        "text": "主角参考。",
+        "image_path": "hero.png",
+    }]}), encoding="utf-8")
+    opened = []
+    monkeypatch.setattr(web_server, "open_local_directory", lambda path: opened.append(path) or True)
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    server.action_store = ActionStore(tmp_path / "data", source_root=root)
+    server.reference_store = ReferenceStore(tmp_path / "data", source_root=root)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        connection.request("POST", "/api/prompt/actions/pose-http-delete/open-folder", body=b"{}", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())["opened"] is True
+        assert opened == [action_media.parent.resolve()]
+
+        connection.request("POST", "/api/prompt/references/character-http-delete/open-folder", body=b"{}", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())["opened"] is True
+        assert opened[-1] == reference_media.parent.resolve()
+
+        connection.request("DELETE", "/api/prompt/actions/pose-http-delete")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {"ok": True}
+        assert all(not path.exists() for path in (action_media, action_depth, action_skeleton, action_overlay))
+        assert json.loads(action_source.read_text(encoding="utf-8"))["actions"] == []
+
+        connection.request("DELETE", "/api/prompt/references/character-http-delete")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {"ok": True}
+        assert not reference_media.exists()
+        assert json.loads(reference_source.read_text(encoding="utf-8"))["references"] == []
     finally:
         connection.close()
         server.shutdown()
@@ -537,6 +663,65 @@ def test_action_api_exposes_both_paired_assets(tmp_path, monkeypatch):
         assert depth_response.status == 200
         assert depth_response.getheader("Content-Type", "").startswith("image/")
         assert depth_response.read()
+    finally:
+        connection.close()
+        server.shutdown()
+        thread.join(timeout=1)
+        server.server_close()
+
+
+def test_action_api_streams_all_video_variants_with_ranges(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    root = tmp_path / "ref"
+    paths = {
+        "video_path": root / "pose" / "video" / "walk.mp4",
+        "depth_video_path": root / "pose" / "video-depth" / "walk_depth.mp4",
+        "skeleton_video_path": root / "pose" / "video-skeleton" / "walk_skeleton.mp4",
+        "depth_skeleton_video_path": root / "pose" / "video-depth-skeleton" / "walk_depth_skeleton.mp4",
+    }
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"0123456789")
+    source = root / "pose" / "pose.json"
+    source.write_text(json.dumps({
+        "version": 7,
+        "actions": [{
+            "id": "video-action", "category": "站立", "title": "视频动作", "text": "Walk.", "media_type": "video",
+            **{field: str(path.relative_to(root)) for field, path in paths.items()},
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("RH_PROMPT_RESOURCES_PATH", str(source))
+
+    server = web_server.AppServer(("127.0.0.1", 0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1])
+    try:
+        connection.request("GET", "/api/prompt/actions")
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 200
+        assert payload["source_status"]["paired_count"] == 1
+        action = payload["actions"][0]
+        assert action["media_type"] == "video"
+        assert action["pair_status"] == "video_ready"
+        for kind in ("video", "depth_video", "skeleton_video", "depth_skeleton_video"):
+            assert action[f"{kind}_available"] is True
+            assert action[f"{kind}_url"].endswith("/" + kind.replace("_", "-"))
+
+        video_url = action["depth_skeleton_video_url"]
+        connection.request("GET", video_url, headers={"Range": "bytes=2-5"})
+        video_response = connection.getresponse()
+        assert video_response.status == 206
+        assert video_response.getheader("Content-Type") == "video/mp4"
+        assert video_response.getheader("Content-Range") == "bytes 2-5/10"
+        assert video_response.read() == b"2345"
+
+        connection.request("GET", video_url.replace("/depth-skeleton-video", "/depth-skeleton-video-path"))
+        path_response = connection.getresponse()
+        path_payload = json.loads(path_response.read())
+        assert path_response.status == 200
+        assert Path(path_payload["path"]).is_file()
     finally:
         connection.close()
         server.shutdown()

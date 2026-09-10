@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import os
 import shlex
@@ -20,6 +21,9 @@ VIDEO_SUFFIXES = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv
 IMAGE_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
 TOOLBOX_MODES = {"depth", "skeleton", "depth_skeleton"}
 SUPPORTED_OUTPUT_SUFFIXES = VIDEO_SUFFIXES | IMAGE_SUFFIXES
+MEDIA_RESOLUTIONS = {"original", "480p", "720p", "1080p"}
+MEDIA_RESOLUTION_SHORT_EDGES = {"480p": 480, "720p": 720, "1080p": 1080}
+MEDIA_PROCESS_FPS = 24
 CODEX_IMAGE_RESOLUTIONS = {"1k", "2k", "4k"}
 CODEX_IMAGE_SIZES = {
     "auto",
@@ -56,6 +60,39 @@ def normalize_toolbox_mode(value: Any) -> str:
     if mode not in TOOLBOX_MODES:
         raise RhCliError("TOOLBOX_MODE_INVALID", "处理类型只能是深度图、骨骼图或深度+骨骼图。")
     return mode
+
+
+def normalize_media_resolution(value: Any) -> str:
+    resolution = str(value or "original").strip().lower()
+    if resolution not in MEDIA_RESOLUTIONS:
+        raise RhCliError("TOOLBOX_MEDIA_RESOLUTION_INVALID", "媒体分辨率只能是原始、480p、720p 或 1080p。")
+    return resolution
+
+
+def normalize_media_duration(value: Any) -> float | None:
+    """Normalize the optional video prefix duration, expressed in seconds."""
+    if value is None or not str(value).strip():
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RhCliError("TOOLBOX_MEDIA_DURATION_INVALID", "处理时长必须是大于 0 的秒数。") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise RhCliError("TOOLBOX_MEDIA_DURATION_INVALID", "处理时长必须是大于 0 的秒数。")
+    return round(duration, 3)
+
+
+def normalize_media_start_frame(value: Any) -> int:
+    """Normalize the video start frame on the fixed 24fps processing timeline."""
+    if value is None or not str(value).strip():
+        return 0
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RhCliError("TOOLBOX_MEDIA_START_FRAME_INVALID", "读取的起始帧必须是大于等于 0 的整数。") from exc
+    if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
+        raise RhCliError("TOOLBOX_MEDIA_START_FRAME_INVALID", "读取的起始帧必须是大于等于 0 的整数。")
+    return int(numeric)
 
 
 def normalize_codex_image_resolution(value: Any) -> str:
@@ -345,6 +382,25 @@ def _probe_fps(path: Path) -> float:
     return min(120.0, max(1.0, fps))
 
 
+def _probe_duration(path: Path) -> float | None:
+    """Return the input media duration when ffprobe can read it."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        value = (result.stdout or "").strip()
+        duration = float(value)
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return None
+    if not math.isfinite(duration) or duration <= 0:
+        return None
+    return duration
+
+
 def _format_video_eta(seconds: float | None) -> str:
     if seconds is None:
         return "计算中"
@@ -367,6 +423,132 @@ def _video_progress_message(stage: str, completed: int, total: int, elapsed: flo
     speed_label = f"{speed:.2f} 帧/秒" if speed is not None else "计算中"
     eta_label = "完成" if total and completed >= total else _format_video_eta(eta)
     return f"{stage}（{completed}/{total} 帧） · 速度 {speed_label} · 预计剩余 {eta_label}"
+
+
+def _resize_filter_for_short_edge(short_edge: int) -> str:
+    # Keep the aspect ratio and make the scaled edge even for video codecs.
+    return f"scale='if(gt(iw,ih),-2,{short_edge})':'if(gt(iw,ih),{short_edge},-2)':flags=lanczos"
+
+
+def _prepare_processing_source(
+    source: Path,
+    output_dir: Path,
+    resolution: str,
+    progress: Callable[[str], None] | None = None,
+    duration_seconds: float | None = None,
+    start_frame: int = 0,
+) -> Path:
+    """Create the fixed-24fps, resized and frame-trimmed inference source."""
+    normalized_resolution = normalize_media_resolution(resolution)
+    normalized_duration = normalize_media_duration(duration_seconds)
+    normalized_start_frame = normalize_media_start_frame(start_frame)
+    short_edge = MEDIA_RESOLUTION_SHORT_EDGES.get(normalized_resolution)
+    video = is_video_path(source)
+    if not video and short_edge is None:
+        return source
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RhCliError("FFMPEG_UNAVAILABLE", "找不到 ffmpeg，无法预处理媒体。")
+
+    effective_duration = normalized_duration
+    total_frames: int | None = None
+    end_frame: int | None = None
+    if video:
+        actual_duration = _probe_duration(source)
+        if actual_duration is not None:
+            total_frames = max(1, int(math.ceil(actual_duration * MEDIA_PROCESS_FPS - 1e-9)))
+            if normalized_start_frame >= total_frames:
+                raise RhCliError(
+                    "TOOLBOX_MEDIA_START_FRAME_INVALID",
+                    f"读取的起始帧超出视频范围（视频约有 {total_frames} 帧，起始帧从 0 开始）。",
+                )
+            if normalized_duration is not None:
+                requested_frames = max(1, int(round(normalized_duration * MEDIA_PROCESS_FPS)))
+                end_frame = min(normalized_start_frame + requested_frames, total_frames)
+                effective_duration = round((end_frame - normalized_start_frame) / MEDIA_PROCESS_FPS, 3)
+            elif normalized_start_frame:
+                end_frame = total_frames
+                effective_duration = round((end_frame - normalized_start_frame) / MEDIA_PROCESS_FPS, 3)
+        elif normalized_duration is not None:
+            requested_frames = max(1, int(round(normalized_duration * MEDIA_PROCESS_FPS)))
+            end_frame = normalized_start_frame + requested_frames
+
+    if progress and video:
+        if short_edge is not None:
+            progress(f"正在先缩放输入到 {normalized_resolution}…")
+        elif normalized_start_frame or normalized_duration is not None:
+            duration_label = f"，处理 {effective_duration:g} 秒" if effective_duration is not None else ""
+            progress(f"正在准备视频第 {normalized_start_frame} 帧起{duration_label}（统一 {MEDIA_PROCESS_FPS} 帧/秒）…")
+        else:
+            progress(f"正在将视频统一为 {MEDIA_PROCESS_FPS} 帧/秒…")
+    elif progress and short_edge is not None:
+        progress(f"正在先缩放输入到 {normalized_resolution}…")
+
+    if video:
+        working_copy = output_dir / f"processing_input_{normalized_resolution}_24fps.mp4"
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+        ]
+        command.extend(["-map", "0:v:0"])
+        filters = [f"fps={MEDIA_PROCESS_FPS}"]
+        if short_edge is not None:
+            filters.append(_resize_filter_for_short_edge(short_edge))
+        if normalized_start_frame or end_frame is not None:
+            trim = f"trim=start_frame={normalized_start_frame}"
+            if end_frame is not None:
+                trim += f":end_frame={end_frame}"
+            filters.extend([trim, "setpts=PTS-STARTPTS"])
+        command.extend(["-vf", ",".join(filters)])
+        command.extend([
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(working_copy),
+        ])
+        label = "输入视频预处理"
+        if short_edge is not None:
+            label += f"并缩放到 {normalized_resolution}"
+        label += f"并统一为 {MEDIA_PROCESS_FPS} 帧/秒"
+        if normalized_start_frame or end_frame is not None:
+            label += f"（第 {normalized_start_frame} 帧起"
+            if effective_duration is not None:
+                label += f"，{effective_duration:g} 秒"
+            label += "）"
+        _run_checked(command, label=label, timeout=7200)
+        return working_copy
+
+    working_copy = output_dir / f"processing_input_{normalized_resolution}.png"
+    _run_checked(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-vf",
+            _resize_filter_for_short_edge(short_edge),
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+            str(working_copy),
+        ],
+        label=f"输入图片缩放到 {normalized_resolution}",
+        timeout=600,
+    )
+    return working_copy
 
 
 def _count_video_outputs(directory: Path, pattern: str) -> int:
@@ -438,10 +620,23 @@ def _run_video_processor(
     root: Path,
     progress: Callable[[str], None] | None = None,
 ) -> Path:
+    return _run_video_processors({mode}, source, output_dir, root, progress)[mode]
+
+
+def _run_video_processors(
+    modes: set[str],
+    source: Path,
+    output_dir: Path,
+    root: Path,
+    progress: Callable[[str], None] | None = None,
+) -> dict[str, Path]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RhCliError("FFMPEG_UNAVAILABLE", "找不到 ffmpeg，无法处理视频。")
-    fps = _probe_fps(source)
+    normalized_modes = {normalize_toolbox_mode(mode) for mode in modes}
+    if not normalized_modes:
+        raise RhCliError("TOOLBOX_MODE_INVALID", "至少需要一种视频处理类型。")
+    fps = float(MEDIA_PROCESS_FPS)
     work_dir = Path(tempfile.mkdtemp(prefix="toolbox-frames-", dir=str(output_dir)))
     frames_dir = work_dir / "source"
     depth_dir = work_dir / "depth"
@@ -459,7 +654,7 @@ def _run_video_processor(
         total_frames = len(frames)
         if progress:
             progress(f"视频帧提取完成 · 共 {total_frames} 帧")
-        if mode in {"depth", "depth_skeleton"}:
+        if normalized_modes & {"depth", "depth_skeleton"}:
             python, _, batch_script = _depth_runtime_paths(root)
             _run_video_stage(
                 [str(python), str(batch_script), *map(str, frames), "--output-dir", str(depth_dir)],
@@ -469,7 +664,7 @@ def _run_video_processor(
                 total_frames=total_frames,
                 progress=progress,
             )
-        if mode in {"skeleton", "depth_skeleton"}:
+        if normalized_modes & {"skeleton", "depth_skeleton"}:
             python, script, model = _skeleton_runtime_paths(root)
             _run_video_stage(
                 [str(python), str(script), *map(str, frames), "--output-dir", str(skeleton_dir), "--model", str(model)],
@@ -480,7 +675,8 @@ def _run_video_processor(
                 progress=progress,
             )
 
-        if mode == "depth_skeleton":
+        output_paths: dict[str, Path] = {}
+        if "depth_skeleton" in normalized_modes:
             combine_started = time.monotonic()
             last_combine_emit = 0.0
             for index, frame in enumerate(frames, start=1):
@@ -493,21 +689,23 @@ def _run_video_processor(
                 if progress and (index == 1 or index == total_frames or now - last_combine_emit >= 0.75):
                     progress(_video_progress_message("正在合成深度+骨骼视频", index, total_frames, now - combine_started))
                     last_combine_emit = now
-            input_pattern = combined_dir / "frame_%06d.png"
-            output_name = "depth_skeleton.mp4"
-        elif mode == "depth":
-            input_pattern = depth_dir / "frame_%06d.png"
-            output_name = "depth.mp4"
-        else:
-            input_pattern = skeleton_dir / "frame_%06d_skeleton.png"
-            output_name = "skeleton.mp4"
-        if progress:
-            progress("正在编码结果视频…")
-        output_path = output_dir / output_name
-        partial_path = output_dir / (output_path.stem + ".part.mp4")
-        _run_checked([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", f"{fps:.6f}", "-i", str(input_pattern), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(partial_path)], label="结果视频编码", timeout=7200)
-        partial_path.replace(output_path)
-        return output_path
+        input_patterns = {
+            "depth": (depth_dir / "frame_%06d.png", "depth.mp4"),
+            "skeleton": (skeleton_dir / "frame_%06d_skeleton.png", "skeleton.mp4"),
+            "depth_skeleton": (combined_dir / "frame_%06d.png", "depth_skeleton.mp4"),
+        }
+        for mode in ("depth", "skeleton", "depth_skeleton"):
+            if mode not in normalized_modes:
+                continue
+            input_pattern, output_name = input_patterns[mode]
+            if progress:
+                progress(f"正在编码{ {'depth': '深度', 'skeleton': '骨骼', 'depth_skeleton': '深度+骨骼'}[mode] }结果视频…")
+            output_path = output_dir / output_name
+            partial_path = output_dir / (output_path.stem + ".part.mp4")
+            _run_checked([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-framerate", f"{fps:.6f}", "-i", str(input_pattern), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(partial_path)], label="结果视频编码", timeout=7200)
+            partial_path.replace(output_path)
+            output_paths[mode] = output_path
+        return output_paths
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -518,11 +716,61 @@ def process_media(
     output_dir: Path,
     configured_root: str | Path | None,
     progress: Callable[[str], None] | None = None,
+    resolution: str = "original",
+    duration_seconds: float | None = None,
+    start_frame: int = 0,
 ) -> Path:
     normalized_mode = normalize_toolbox_mode(mode)
+    normalized_resolution = normalize_media_resolution(resolution)
+    normalized_duration = normalize_media_duration(duration_seconds)
+    normalized_start_frame = normalize_media_start_frame(start_frame)
     source = validate_local_file(source, label="媒体文件", suffixes=IMAGE_SUFFIXES | VIDEO_SUFFIXES)
     output_dir.mkdir(parents=True, exist_ok=True)
     root = _runtime_root(configured_root)
-    if is_video_path(source):
-        return _run_video_processor(normalized_mode, source, output_dir, root, progress)
-    return _run_image_processor(normalized_mode, source, output_dir, root)
+    processing_source = _prepare_processing_source(
+        source,
+        output_dir,
+        normalized_resolution,
+        progress,
+        duration_seconds=normalized_duration,
+        start_frame=normalized_start_frame,
+    )
+    if is_video_path(processing_source):
+        return _run_video_processor(normalized_mode, processing_source, output_dir, root, progress)
+    return _run_image_processor(normalized_mode, processing_source, output_dir, root)
+
+
+def process_media_variants(
+    modes: set[str] | list[str] | tuple[str, ...],
+    source: Path,
+    output_dir: Path,
+    configured_root: str | Path | None,
+    progress: Callable[[str], None] | None = None,
+    resolution: str = "original",
+    duration_seconds: float | None = None,
+    start_frame: int = 0,
+) -> dict[str, Path]:
+    """Generate several derived media variants from one shared 24fps source."""
+    normalized_modes = {normalize_toolbox_mode(mode) for mode in modes}
+    if not normalized_modes:
+        raise RhCliError("TOOLBOX_MODE_INVALID", "至少需要一种媒体处理类型。")
+    normalized_resolution = normalize_media_resolution(resolution)
+    normalized_duration = normalize_media_duration(duration_seconds)
+    normalized_start_frame = normalize_media_start_frame(start_frame)
+    source = validate_local_file(source, label="媒体文件", suffixes=IMAGE_SUFFIXES | VIDEO_SUFFIXES)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    root = _runtime_root(configured_root)
+    processing_source = _prepare_processing_source(
+        source,
+        output_dir,
+        normalized_resolution,
+        progress,
+        duration_seconds=normalized_duration,
+        start_frame=normalized_start_frame,
+    )
+    if is_video_path(processing_source):
+        return _run_video_processors(normalized_modes, processing_source, output_dir, root, progress)
+    return {
+        mode: _run_image_processor(mode, processing_source, output_dir / mode, root)
+        for mode in normalized_modes
+    }

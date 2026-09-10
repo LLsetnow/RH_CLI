@@ -7,7 +7,7 @@ const path = require("node:path");
 
 const webRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(webRoot, "..");
-const serverScript = path.join(webRoot, "start.sh");
+const serverScript = path.join(webRoot, "scripts", "start.sh");
 const packagedBackend = path.join(process.resourcesPath, "rh-workflow-desk-server");
 const healthTimeoutMs = 15000;
 

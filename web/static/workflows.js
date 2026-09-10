@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var state = { workflows: [], folders: [], accounts: [], promptGroups: [], promptGroupFolders: [], telegram: {}, activeFolderId: "", editingFolderId: "", folderSavingId: "", activePromptGroupFolderId: "", editingPromptGroupFolderId: "", promptGroupFolderSavingId: "", contextFolderId: "", contextWorkflowId: "", contextPromptGroupFolderId: "", contextPromptGroupId: "", selectedWorkflowId: "", loadingWorkflowId: "", editor: null, configEditor: null };
+  var state = { workflows: [], folders: [], accounts: [], promptGroups: [], promptGroupFolders: [], telegram: {}, activeFolderId: "", editingFolderId: "", folderSavingId: "", activePromptGroupFolderId: "", editingPromptGroupFolderId: "", promptGroupFolderSavingId: "", contextFolderId: "", contextWorkflowId: "", contextPromptGroupFolderId: "", contextPromptGroupId: "", selectedWorkflowId: "", loadingWorkflowId: "", draggingWorkflowId: "", draggingWorkflowFolderId: "", workflowDragDidReorder: false, workflowDragDropHandled: false, workflowOrderSaving: false, editor: null, configEditor: null };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
   var pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1";
 
@@ -81,7 +81,7 @@
       return "<span>" + esc(item[0]) + " <strong>" + esc(item[1]) + "</strong></span>";
     }).join("");
     var status = record.analysis_error ? "JSON 异常" : (bound ? "已绑定账号" : "待绑定账号");
-    return '<article class="workflow-card' + (bound ? "" : " is-unbound") + (selected ? " is-selected" : "") + '" draggable="true" data-workflow-drag-id="' + esc(record.id) + '">' +
+    return '<article class="workflow-card' + (bound ? "" : " is-unbound") + (selected ? " is-selected" : "") + '" draggable="true" data-workflow-drag-id="' + esc(record.id) + '" data-workflow-folder-id="' + esc(record.folder_id || "") + '">' +
       '<div class="workflow-card-top"><button class="workflow-card-title workflow-card-title-button" type="button" data-action="edit-workflow" data-workflow-id="' + esc(record.id) + '" aria-label="编辑工作流：' + esc(record.name) + '" title="编辑工作流"><strong title="' + esc(record.name) + '">' + esc(record.name) + '</strong><small title="' + esc(record.id) + '">' + esc(record.id) + '</small></button><span class="workflow-status' + (bound ? "" : " unbound") + '">' + status + '</span></div>' +
       '<button class="workflow-card-body" type="button" data-action="select-workflow" data-workflow-id="' + esc(record.id) + '" aria-pressed="' + (selected ? "true" : "false") + '" aria-busy="' + (loading ? "true" : "false") + '"' + (loading ? " disabled" : "") + ' aria-label="加载工作流快照：' + esc(record.name) + '" title="加载到任务提交页和提示词工坊：复制到临时工作流快照">' +
       '<div class="workflow-card-meta">' +
@@ -120,7 +120,7 @@
   function workflowCollection(title, subtitle, records, dropId, emptyMessage) {
     var dropAttribute = dropId == null ? "" : ' data-folder-drop-id="' + esc(dropId) + '"';
     var collectionClass = dropId === "" ? " workflow-unclassified-collection" : "";
-    var cards = records.length ? '<div class="workflow-group-cards">' + records.map(workflowCard).join("") + '</div>' : '<div class="workflow-empty"><strong>' + esc(emptyMessage) + '</strong><span>将工作流拖到这里即可归类。</span></div>';
+    var cards = records.length ? '<div class="workflow-group-cards" data-workflow-folder-id="' + esc(dropId || "") + '">' + records.map(workflowCard).join("") + '</div>' : '<div class="workflow-empty"><strong>' + esc(emptyMessage) + '</strong><span>将工作流拖到这里即可归类。</span></div>';
     return '<section class="workflow-group workflow-folder-collection' + collectionClass + '"' + dropAttribute + '><div class="workflow-group-heading"><div><strong>' + esc(title) + '</strong><span>' + esc(subtitle) + '</span></div><code>' + records.length + ' 个工作流</code></div>' + cards + '</section>';
   }
   function workflowUnclassifiedDropzone() {
@@ -133,7 +133,7 @@
     $("workflowTotal").textContent = String(state.workflows.length);
     $("workflowBound").textContent = String(state.workflows.filter(function (item) { return Boolean(item.account_id); }).length);
     $("accountTotal").textContent = String(state.accounts.length);
-    var folderHeader = activeFolder ? '<div class="workflow-folder-breadcrumb"><button class="workflow-folder-back" type="button" data-action="back-to-folders">文件夹</button><span aria-hidden="true">/</span><strong>' + esc(activeFolder.name) + '</strong></div>' : '<div class="workflow-folder-browser-title"><strong>文件夹</strong><span>可将 API JSON 直接拖到本区域添加，卡片可拖入文件夹</span></div>';
+    var folderHeader = activeFolder ? '<div class="workflow-folder-breadcrumb"><button class="workflow-folder-back" type="button" data-action="back-to-folders">文件夹</button><span aria-hidden="true">/</span><strong>' + esc(activeFolder.name) + '</strong></div>' : '<div class="workflow-folder-browser-title"><strong>文件夹</strong><span>可将 API JSON 直接拖到本区域添加，卡片之间可调整顺序，也可拖入文件夹</span></div>';
     var folderHeaderActions = activeFolder ? "" : '<div class="workflow-folder-header-actions"><span class="workflow-folder-count">' + state.folders.length + ' 个文件夹</span><button id="createWorkflowFolder" class="secondary-button button-compact workflow-folder-create-button" type="button"><span aria-hidden="true">＋</span> 新建文件夹</button></div>';
     var folderCards = state.folders.length ? state.folders.map(workflowFolderCard).join("") : '<div class="workflow-folder-empty">还没有文件夹。点击“新建文件夹”开始整理。</div>';
     if (activeFolder) {
@@ -253,12 +253,14 @@
       inputDefaults: imported && Array.isArray(imported.inputDefaults) ? imported.inputDefaults : [],
       promptGroup: imported && imported.promptGroup ? imported.promptGroup : null
     };
-    $("workflowEditorTitle").textContent = record ? "编辑临时工作流快照" : "导入工作流快照";
-    $("workflowEditorHint").textContent = record ? "这是从工作流库复制出的临时快照。保存时会创建新的工作流库条目并迁移活动引用。" : "导入内容只存在于临时快照；保存到工作流库后才会创建库条目。";
+    state.configEditor = createConfigEditor(record, imported && imported.analysis, state.editor.inputConfig);
+    $("workflowEditorTitle").textContent = record ? "编辑工作流库条目" : "导入工作流快照";
+    $("workflowEditorHint").textContent = record ? "这里编辑的是工作流库条目的临时快照；可同时调整任务提交输入，保存时会生成新的工作流包并迁移活动引用。" : "导入内容只存在于临时快照；保存到工作流库后才会创建库条目。";
     $("workflowRecordName").value = record ? record.name : imported.filename;
     $("workflowRecordRemoteId").value = record ? (record.remote_workflow_id || "") : (imported.remoteWorkflowId || "");
     $("workflowEditorJson").value = content;
     renderAccountOptions(record ? record.account_id : "");
+    renderConfigBuilder();
     window.RHMotion.openModal("workflowEditorModal", "workflowRecordName");
   }
   function importWorkflowFile(file) {
@@ -274,7 +276,19 @@
         } catch (error) {}
       }
       var metadata = workflow.__rh_meta__ && typeof workflow.__rh_meta__ === "object" ? workflow.__rh_meta__ : {};
-      openEditor(null, { content: content, filename: file.name, sourceDir: sourceDir, remoteWorkflowId: metadata.workflowId || metadata.workflow_id || "" });
+      return jsonRequest("/api/workflows/analyze", "POST", {
+        filename: file.name,
+        content: content,
+        source_dir: sourceDir
+      }).then(function (analysisData) {
+        openEditor(null, {
+          content: content,
+          filename: file.name,
+          sourceDir: sourceDir,
+          analysis: analysisData.analysis || {},
+          remoteWorkflowId: metadata.workflowId || metadata.workflow_id || ""
+        });
+      });
     }).catch(function (error) { showToast("读取工作流失败：" + error.message, true); });
   }
   function readEditorJson() {
@@ -318,14 +332,17 @@
     var parsed = readEditorJson();
     if (!parsed) return;
     button.disabled = true;
+    var editor = state.configEditor || { mode: "auto" };
+    var inputConfig = editorInputConfig();
     var payload = {
       name: name,
+      filename: name,
       account_id: $("workflowRecordAccount").value,
       remote_workflow_id: $("workflowRecordRemoteId").value.trim(),
       prompt_group_id: $("workflowRecordPromptGroup").value,
       content: parsed.content,
-      input_config: state.editor.inputConfig,
-      input_defaults: state.editor.inputDefaults || [],
+      input_config: inputConfig,
+      input_defaults: editor.mode === "manual" ? editorInputDefaults(inputConfig) : [],
       prompt_group: state.editor.promptGroup && typeof state.editor.promptGroup === "object" ? state.editor.promptGroup : null,
       include_current_prompt_group: !state.editor.promptGroup
     };
@@ -333,13 +350,12 @@
     if (state.editor.sourceWorkflowId) {
       promise = jsonRequest("/api/workflows/" + encodeURIComponent(state.editor.sourceWorkflowId) + "/replace", "PATCH", payload);
     } else {
-      payload.filename = name;
       payload.source_dir = state.editor.sourceDir;
       promise = jsonRequest("/api/workflows", "POST", payload);
     }
     promise.then(function () {
       window.RHMotion.closeModal("workflowEditorModal");
-      showToast(state.editor.sourceWorkflowId ? "已创建新工作流包并迁移活动引用" : "已保存到工作流库");
+      showToast(state.editor.sourceWorkflowId ? "工作流已更新，并迁移活动引用" : "已保存到工作流库");
       state.editor = null;
       return refreshWorkflows();
     }).catch(function (error) {
@@ -424,7 +440,7 @@
         showToast(focusImport
           ? promptLabel + "，任务提交面板已同步"
           : promptLabel + "，正在打开任务提交页");
-        if (!focusImport) window.location.href = "/";
+        if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl();
       });
     }).catch(function (error) {
       showToast("加载工作流失败：" + error.message, true);
@@ -459,38 +475,30 @@
       return ["file", "prompt", "resolution", "random_noise"].indexOf(String(item.kind || "")) !== -1;
     }).map(configItemFromCatalog);
   }
+  function createConfigEditor(record, analysis, inputConfig) {
+    var catalog = analysis && Array.isArray(analysis.input_catalog) ? analysis.input_catalog : [];
+    var saved = inputConfig && inputConfig.mode === "manual" ? inputConfig : null;
+    return {
+      id: record ? record.id : "",
+      record: record || {},
+      catalog: catalog,
+      mode: saved ? "manual" : "auto",
+      items: saved && Array.isArray(saved.items) ? saved.items.map(function (item) {
+        var catalogItem = catalog.find(function (entry) { return entry.id === item.id; });
+        var merged = Object.assign({}, catalogItem || {}, item);
+        if (catalogItem && Object.prototype.hasOwnProperty.call(catalogItem, "default_value")) merged.default_value = catalogItem.default_value;
+        if (catalogItem && Object.prototype.hasOwnProperty.call(catalogItem, "default")) merged.default = catalogItem.default;
+        return configItemFromCatalog(merged);
+      }) : defaultConfigItems(catalog)
+    };
+  }
   function openConfig(id) {
     fetchWorkflow(id).then(function (data) {
-      var record = data.record || {};
-      var catalog = data.analysis && Array.isArray(data.analysis.input_catalog) ? data.analysis.input_catalog : [];
-      var saved = record.input_config && record.input_config.mode === "manual" ? record.input_config : null;
-      state.editor = {
-        mode: "snapshot",
-        sourceWorkflowId: id,
+      openEditor(data.record || {}, {
         content: JSON.stringify(data.workflow || {}, null, 2),
-        savedContent: JSON.stringify(data.workflow || {}, null, 2),
-        sourceDir: record.source_dir || "",
-        inputConfig: record.input_config && typeof record.input_config === "object" ? JSON.parse(JSON.stringify(record.input_config)) : null,
-        inputDefaults: [],
+        analysis: data.analysis || {},
         promptGroup: data.prompt_group || null
-      };
-      $("workflowRecordName").value = record.name || "workflow.json";
-      $("workflowRecordRemoteId").value = record.remote_workflow_id || "";
-      renderAccountOptions(record.account_id || "");
-      state.configEditor = {
-        id: id, record: record, catalog: catalog, mode: saved ? "manual" : "auto", snapshot: state.editor,
-        items: saved ? saved.items.map(function (item) {
-          var catalogItem = catalog.find(function (entry) { return entry.id === item.id; });
-          var merged = Object.assign({}, catalogItem || {}, item);
-          if (catalogItem && Object.prototype.hasOwnProperty.call(catalogItem, "default_value")) merged.default_value = catalogItem.default_value;
-          if (catalogItem && Object.prototype.hasOwnProperty.call(catalogItem, "default")) merged.default = catalogItem.default;
-          return configItemFromCatalog(merged);
-        }) : defaultConfigItems(catalog)
-      };
-      $("workflowConfigTitle").textContent = "配置输入节点 · " + (record.name || "工作流");
-      $("workflowConfigHint").textContent = "自动识别模式只读取工作流原始输入；切换到手动选择后，已添加的节点可编辑默认值。";
-      renderConfigBuilder();
-      window.RHMotion.openModal("workflowConfigModal", "workflowConfigMode");
+      });
     }).catch(function (error) { showToast("读取输入配置失败：" + error.message, true); });
   }
   function renderConfigBuilder() {
@@ -551,31 +559,19 @@
     editor.items.push(configItemFromCatalog(item));
     renderConfigBuilder();
   }
-  function saveWorkflowConfig() {
+  function editorInputConfig() {
     var editor = state.configEditor;
-    if (!editor) return;
-    var button = $("saveWorkflowConfig");
-    button.disabled = true;
+    if (!editor) return state.editor && state.editor.inputConfig && typeof state.editor.inputConfig === "object" ? state.editor.inputConfig : null;
     var items = editor.items.map(function (item, index) {
       return Object.assign({}, item, { order: index });
     });
-    var inputConfig = { mode: editor.mode, items: editor.mode === "manual" ? items : [] };
-    var inputDefaults = editor.mode === "manual" ? items.filter(function (item) { return !item.virtual && item.field; }).map(function (item) {
-        return { node_id: item.node_id, field: item.field, default: item.default_value };
-      }) : [];
-    var packageCompatibility = { input_defaults: editor.mode === "manual" ? inputDefaults : [] };
-    if (state.editor) {
-      state.editor.inputConfig = inputConfig;
-      state.editor.inputDefaults = inputDefaults;
-    }
-    window.RHMotion.closeModal("workflowConfigModal");
-    state.configEditor = null;
-    if (state.editor) {
-      $("workflowEditorJson").value = state.editor.content;
-      window.RHMotion.openModal("workflowEditorModal", "workflowRecordName");
-    }
-    showToast(editor.mode === "manual" ? "输入配置已应用到临时快照，请继续保存到工作流库" : "已恢复自动识别，并应用到临时快照");
-    button.disabled = false;
+    return { mode: editor.mode, items: editor.mode === "manual" ? items : [] };
+  }
+  function editorInputDefaults(inputConfig) {
+    if (!inputConfig || inputConfig.mode !== "manual" || !Array.isArray(inputConfig.items)) return [];
+    return inputConfig.items.filter(function (item) { return !item.virtual && item.field; }).map(function (item) {
+      return { node_id: item.node_id, field: item.field, default: item.default_value };
+    });
   }
   function updateConfigDefault(target, index, editor) {
     if (!editor.items[index]) return;
@@ -1011,6 +1007,84 @@
     if (transfer.files && transfer.files.length) return true;
     return Boolean(transfer.types && Array.prototype.indexOf.call(transfer.types, "Files") !== -1);
   }
+  function hasWorkflowCardDrag(event) {
+    if (state.draggingWorkflowId) return true;
+    var transfer = event && event.dataTransfer;
+    return Boolean(transfer && transfer.types && Array.prototype.indexOf.call(transfer.types, "text/x-rh-workflow-card") !== -1);
+  }
+  function clearWorkflowSortState() {
+    var container = $("workflowGroups");
+    if (!container) return;
+    container.querySelectorAll(".is-sort-target").forEach(function (element) {
+      element.classList.remove("is-sort-target");
+    });
+  }
+  function workflowCardCollection(card) {
+    return card && card.closest(".workflow-group-cards");
+  }
+  function animateWorkflowCollection(collection, mutate) {
+    if (!collection) return mutate();
+    var cards = Array.prototype.slice.call(collection.querySelectorAll("[data-workflow-drag-id]"));
+    var firstRects = new Map(cards.map(function (card) { return [card.dataset.workflowDragId, card.getBoundingClientRect()]; }));
+    mutate();
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    cards.forEach(function (card) {
+      var first = firstRects.get(card.dataset.workflowDragId);
+      var last = card.getBoundingClientRect();
+      if (!first || (Math.abs(first.left - last.left) < 1 && Math.abs(first.top - last.top) < 1)) return;
+      var token = String(Date.now()) + Math.random();
+      card.dataset.workflowFlipToken = token;
+      card.style.transition = "none";
+      card.style.transform = "translate3d(" + (first.left - last.left) + "px, " + (first.top - last.top) + "px, 0)";
+      window.requestAnimationFrame(function () {
+        if (card.dataset.workflowFlipToken !== token) return;
+        card.style.transition = "transform var(--motion-interaction) var(--ease-out)";
+        card.style.transform = "";
+        window.setTimeout(function () {
+          if (card.dataset.workflowFlipToken !== token) return;
+          card.style.transition = "";
+          card.style.transform = "";
+          delete card.dataset.workflowFlipToken;
+        }, 220);
+      });
+    });
+  }
+  function workflowIdsFromCollection(collection) {
+    return collection ? Array.prototype.map.call(collection.querySelectorAll("[data-workflow-drag-id]"), function (card) {
+      return card.dataset.workflowDragId || "";
+    }).filter(Boolean) : [];
+  }
+  function syncLocalWorkflowOrder(workflowIds) {
+    var positions = {};
+    workflowIds.forEach(function (workflowId, index) { positions[workflowId] = index; });
+    var currentPositions = {};
+    state.workflows.forEach(function (record, index) { currentPositions[record.id] = index; });
+    state.workflows.sort(function (left, right) {
+      var leftPosition = Object.prototype.hasOwnProperty.call(positions, left.id) ? positions[left.id] : Number.MAX_SAFE_INTEGER;
+      var rightPosition = Object.prototype.hasOwnProperty.call(positions, right.id) ? positions[right.id] : Number.MAX_SAFE_INTEGER;
+      if (leftPosition !== rightPosition) return leftPosition - rightPosition;
+      return currentPositions[left.id] - currentPositions[right.id];
+    });
+  }
+  function persistWorkflowOrder(folderId, workflowIds) {
+    if (state.workflowOrderSaving || !workflowIds.length) return;
+    state.workflowOrderSaving = true;
+    jsonRequest("/api/workflows/reorder", "PATCH", { folder_id: folderId || "", workflow_ids: workflowIds }).then(function (data) {
+      var saved = data && Array.isArray(data.workflows) ? data.workflows : [];
+      var savedById = {};
+      saved.forEach(function (record) { savedById[record.id] = record; });
+      state.workflows.forEach(function (record) {
+        if (savedById[record.id]) record.sort_order = savedById[record.id].sort_order;
+      });
+      syncLocalWorkflowOrder(workflowIds);
+      showToast("工作流顺序已保存");
+    }).catch(function (error) {
+      renderWorkflows();
+      showToast("保存工作流顺序失败：" + error.message, true);
+    }).finally(function () {
+      state.workflowOrderSaving = false;
+    });
+  }
   function workflowFileFromTransfer(transfer) {
     var files = transfer && transfer.files ? transfer.files : [];
     for (var index = 0; index < files.length; index += 1) {
@@ -1021,8 +1095,13 @@
   }
   function handleWorkflowDragStart(event) {
     var card = event.target.closest("[data-workflow-drag-id]");
-    if (!card) return;
+    if (!card || state.workflowOrderSaving) return;
+    state.draggingWorkflowId = card.dataset.workflowDragId || "";
+    state.draggingWorkflowFolderId = card.dataset.workflowFolderId || "";
+    state.workflowDragDidReorder = false;
+    state.workflowDragDropHandled = false;
     event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/x-rh-workflow-card", state.draggingWorkflowId);
     event.dataTransfer.setData("text/plain", card.dataset.workflowDragId || "");
     card.classList.add("is-dragging");
   }
@@ -1031,6 +1110,41 @@
       element.classList.remove("is-dragging");
     });
     clearFolderDropState();
+    clearWorkflowSortState();
+    if (state.workflowDragDidReorder && !state.workflowDragDropHandled) renderWorkflows();
+    state.draggingWorkflowId = "";
+    state.draggingWorkflowFolderId = "";
+    state.workflowDragDidReorder = false;
+    state.workflowDragDropHandled = false;
+  }
+  function handleWorkflowCardDragOver(event) {
+    if (!hasWorkflowCardDrag(event)) return false;
+    var targetCard = event.target.closest("[data-workflow-drag-id]");
+    if (!targetCard || !$("workflowGroups").contains(targetCard)) return false;
+    var draggedId = state.draggingWorkflowId || event.dataTransfer.getData("text/x-rh-workflow-card") || event.dataTransfer.getData("text/plain");
+    var draggedCard = Array.prototype.find.call($("workflowGroups").querySelectorAll("[data-workflow-drag-id]"), function (card) {
+      return card.dataset.workflowDragId === draggedId;
+    });
+    if (!draggedCard) return false;
+    var sourceCollection = workflowCardCollection(draggedCard);
+    var targetCollection = workflowCardCollection(targetCard);
+    if (!sourceCollection || sourceCollection !== targetCollection) return false;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    clearFolderDropState();
+    clearWorkflowSortState();
+    targetCard.classList.add("is-sort-target");
+    if (targetCard === draggedCard) return true;
+    var rect = targetCard.getBoundingClientRect();
+    var insertBefore = event.clientY < rect.top + rect.height / 2;
+    var reference = insertBefore ? targetCard : targetCard.nextElementSibling;
+    if (reference === draggedCard) reference = draggedCard.nextElementSibling;
+    if (reference === draggedCard || (!reference && draggedCard === targetCollection.lastElementChild)) return true;
+    animateWorkflowCollection(targetCollection, function () {
+      targetCollection.insertBefore(draggedCard, reference || null);
+    });
+    state.workflowDragDidReorder = true;
+    return true;
   }
   function handleFolderDragOver(event) {
     if (event.dataTransfer.types && Array.prototype.indexOf.call(event.dataTransfer.types, "text/x-rh-prompt-group") !== -1) return;
@@ -1049,6 +1163,7 @@
       $("workflowGroups").classList.add("is-external-file-drop-target");
       return;
     }
+    if (handleWorkflowCardDragOver(event)) return;
     handleFolderDragOver(event);
   }
   function handleFolderDragLeave(event) {
@@ -1060,6 +1175,7 @@
     var container = $("workflowGroups");
     if (!event.relatedTarget || !container.contains(event.relatedTarget)) clearWorkflowLibraryFileDropState();
     handleFolderDragLeave(event);
+    if (!event.relatedTarget || !container.contains(event.relatedTarget)) clearWorkflowSortState();
   }
   function handleFolderDrop(event) {
     if (event.dataTransfer.types && Array.prototype.indexOf.call(event.dataTransfer.types, "text/x-rh-prompt-group") !== -1) return;
@@ -1083,6 +1199,21 @@
       }
       importWorkflowFile(file);
       return;
+    }
+    if (hasWorkflowCardDrag(event)) {
+      var target = dropTargetFromEvent(event);
+      var draggedCard = $("workflowGroups").querySelector(".is-dragging");
+      var targetCollection = target && target.querySelector(".workflow-group-cards");
+      var sourceFolderId = state.draggingWorkflowFolderId || (draggedCard && draggedCard.dataset.workflowFolderId) || "";
+      var targetFolderId = target ? (target.dataset.folderDropId || "") : "";
+      if (state.workflowDragDidReorder && targetCollection && targetFolderId === sourceFolderId) {
+        event.preventDefault();
+        state.workflowDragDropHandled = true;
+        clearFolderDropState();
+        clearWorkflowSortState();
+        persistWorkflowOrder(sourceFolderId, workflowIdsFromCollection(targetCollection));
+        return;
+      }
     }
     handleFolderDrop(event);
   }
@@ -1193,7 +1324,11 @@
     if (action === "export-workflow") exportWorkflow(id);
     if (action === "edit-workflow") {
       fetchWorkflow(id).then(function (data) {
-          openEditor(data.record, { content: JSON.stringify(data.workflow, null, 2), promptGroup: data.prompt_group || null });
+          openEditor(data.record, {
+            content: JSON.stringify(data.workflow, null, 2),
+            analysis: data.analysis || {},
+            promptGroup: data.prompt_group || null
+          });
       }).catch(function (error) { showToast("打开编辑失败：" + error.message, true); });
     }
     if (action === "delete-workflow") {
@@ -1256,11 +1391,7 @@
     });
     $("workflowConfigNode").addEventListener("change", renderConfigFieldOptions);
     $("addWorkflowConfigItem").addEventListener("click", addConfigItem);
-    $("saveWorkflowConfig").addEventListener("click", saveWorkflowConfig);
-    $("closeWorkflowConfig").addEventListener("click", function () { state.configEditor = null; window.RHMotion.closeModal("workflowConfigModal"); });
-    $("cancelWorkflowConfig").addEventListener("click", function () { state.configEditor = null; window.RHMotion.closeModal("workflowConfigModal"); });
-    $("workflowConfigModal").addEventListener("click", function (event) { if (event.target === this) { state.configEditor = null; window.RHMotion.closeModal("workflowConfigModal"); } });
-    $("workflowConfigModal").addEventListener("input", function (event) {
+    $("workflowEditorModal").addEventListener("input", function (event) {
       var index = Number(event.target.dataset.configIndex);
       var editor = state.configEditor;
       var action = event.target.dataset.configAction;
@@ -1269,7 +1400,7 @@
       if (action === "options") editor.items[index].options = event.target.value.split(/[\n,]/).map(function (value) { return value.trim(); }).filter(Boolean);
       if (action === "default") updateConfigDefault(event.target, index, editor);
     });
-    $("workflowConfigModal").addEventListener("change", function (event) {
+    $("workflowEditorModal").addEventListener("change", function (event) {
       var index = Number(event.target.dataset.configIndex);
       var editor = state.configEditor;
       var action = event.target.dataset.configAction;
@@ -1298,7 +1429,6 @@
       if (event.key !== "Escape") return;
       closeContextMenus();
       window.RHMotion.closeModal("workflowEditorModal");
-      window.RHMotion.closeModal("workflowConfigModal");
     });
     document.addEventListener("click", function (event) {
       if (!event.target.closest("#workflowFolderContextMenu, #workflowCardContextMenu, #promptGroupFolderContextMenu, #promptGroupCardContextMenu")) closeContextMenus();

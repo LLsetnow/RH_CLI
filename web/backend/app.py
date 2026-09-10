@@ -43,7 +43,7 @@ from .telegram import TelegramDeliveryError, TelegramNotifier
 from .video_downloader import extract_social_video_url, social_video_platform, download_social_video
 
 
-WEB_ROOT = Path(__file__).resolve().parent
+WEB_ROOT = Path(__file__).resolve().parents[1]
 _DATA_ROOT_OVERRIDE = os.environ.get("RH_WORKFLOW_DESK_DATA_ROOT", "").strip()
 DATA_ROOT = Path(_DATA_ROOT_OVERRIDE).expanduser().resolve() if _DATA_ROOT_OVERRIDE else WEB_ROOT / "data"
 # A library workflow is a directory package.  Keep the singular directory
@@ -57,6 +57,7 @@ ACCOUNTS_PATH = DATA_ROOT / "accounts.json"
 DB_PATH = DATA_ROOT / "tasks.sqlite3"
 DEFAULT_RESOURCE_INDEX_PATH = Path.home() / "Documents" / "VideoMake" / "ref" / "Resources.json"
 WORKFLOW_REGISTRY_FORMAT_VERSION = 2
+WORKFLOW_SORT_ORDER_KEY = "sort_order"
 
 FILE_FIELDS = {
     "image",
@@ -105,6 +106,9 @@ WORKFLOW_PACKAGE_MANIFEST_FILENAME = "manifest.json"
 GENERAL_ACCOUNT_ID = "__general__"
 UNBOUND_ACCOUNT_ID = "__unbound__"
 TELEGRAM_PROJECT_NAME = "Telegrame"
+TELEGRAM_VIDEO_MAX_DURATION_SECONDS = 15.0
+TELEGRAM_VIDEO_LANDSCAPE_ASPECT_RATIO = "16:9 (Widescreen)"
+TELEGRAM_VIDEO_PORTRAIT_ASPECT_RATIO = "9:16 (Portrait Widescreen)"
 INSTANCE_TYPES = {"default", "plus", "ultra"}
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 VIDEO_OUTPUT_SUFFIXES = {
@@ -118,6 +122,23 @@ VIDEO_OUTPUT_SUFFIXES = {
     ".mpg",
     ".webm",
     ".wmv",
+}
+VIDEO_TRANSCODE_SUBDIR = "input-transcoded"
+VIDEO_TRANSCODE_TIMEOUT_SECONDS = 600
+
+TOOLBOX_WORKFLOW_IDS = {
+    "codex": "toolbox.codex-image",
+    "tts": "toolbox.tts",
+    "media_processor:depth": "toolbox.depth",
+    "media_processor:skeleton": "toolbox.skeleton",
+    "media_processor:depth_skeleton": "toolbox.depth-skeleton",
+}
+
+TASK_FEATURES = {
+    "workflow": {"id": "workflow", "name": "任务提交"},
+    "codex": {"id": "codex", "name": "Codex 图像生成"},
+    "media": {"id": "media", "name": "深度与骨骼"},
+    "tts": {"id": "tts", "name": "角色语音"},
 }
 
 
@@ -337,6 +358,58 @@ def public_workflow_name(value: object) -> str:
     if name == "本地 Codex 图像生成":
         return "Codex 图像生成"
     return name
+
+
+def toolbox_workflow_id(tool: object = "", mode: object = "") -> str:
+    """Return the stable local workflow ID used by a toolbox task."""
+    tool_name = str(tool or "").strip().lower()
+    mode_name = str(mode or "").strip().lower()
+    known = TOOLBOX_WORKFLOW_IDS.get(f"{tool_name}:{mode_name}")
+    if known:
+        return known
+    known = TOOLBOX_WORKFLOW_IDS.get(tool_name)
+    if known:
+        return known
+    return "toolbox.local"
+
+
+def task_feature(
+    *,
+    task_type: object = "workflow",
+    tool: object = "",
+    mode: object = "",
+    local_workflow_id: object = "",
+) -> dict[str, str]:
+    """Return the stable user-facing feature descriptor stored in manifests."""
+    if str(task_type or "workflow").strip().lower() != "toolbox":
+        return dict(TASK_FEATURES["workflow"])
+    tool_name = str(tool or "").strip().lower()
+    if tool_name == "codex":
+        return dict(TASK_FEATURES["codex"])
+    if tool_name == "tts":
+        return dict(TASK_FEATURES["tts"])
+    if tool_name == "media_processor":
+        return dict(TASK_FEATURES["media"])
+    if str(mode or "").strip().lower() in {"depth", "skeleton", "depth_skeleton"}:
+        return dict(TASK_FEATURES["media"])
+    workflow_id = str(local_workflow_id or "").strip().lower()
+    if workflow_id == "toolbox.codex-image":
+        return dict(TASK_FEATURES["codex"])
+    if workflow_id == "toolbox.tts":
+        return dict(TASK_FEATURES["tts"])
+    if workflow_id.startswith("toolbox.depth") or workflow_id.startswith("toolbox.skeleton"):
+        return dict(TASK_FEATURES["media"])
+    return dict(TASK_FEATURES["workflow"])
+
+
+def task_feature_for_task(task: dict[str, Any]) -> dict[str, str]:
+    custom = task.get("custom_inputs") if isinstance(task.get("custom_inputs"), dict) else {}
+    return task_feature(
+        task_type=task.get("task_type"),
+        tool=custom.get("tool"),
+        mode=custom.get("mode"),
+        local_workflow_id=task.get("local_workflow_id"),
+    )
 
 
 def workflow_name_from_path(path: Path, workflow_id: str) -> str:
@@ -1295,6 +1368,8 @@ class LocalStore:
         self._backfill_project_registry()
         self._backfill_telegram_projects()
         self._backfill_task_replay_snapshots()
+        self._backfill_toolbox_manifests()
+        self._backfill_manifest_features()
         self._migrate_legacy_workflow_files()
         self._backfill_registered_workflow_source_paths()
         self._backfill_usage_records()
@@ -1993,21 +2068,32 @@ class LocalStore:
     def telegram_settings(self) -> dict[str, Any]:
         return TelegramNotifier(self).settings()
 
-    def set_telegram_settings(self, bot_token: str, chat_id: str, enabled: Any) -> dict[str, Any]:
+    def set_telegram_settings(
+        self,
+        bot_token: str,
+        chat_id: str = "",
+        enabled: Any = False,
+        *,
+        push_chat_id: str | None = None,
+        inbound_chat_id: str | None = None,
+    ) -> dict[str, Any]:
         data = self._read_json_file()
         bot_token = str(bot_token or "").strip()
-        chat_id = str(chat_id or "").strip()
+        legacy_chat_id = str(chat_id or "").strip()
+        push_chat_id = legacy_chat_id if push_chat_id is None else str(push_chat_id or "").strip()
+        inbound_chat_id = legacy_chat_id if inbound_chat_id is None else str(inbound_chat_id or "").strip()
         if bot_token:
             data["telegram_bot_token"] = bot_token
-        if chat_id:
-            data["telegram_chat_id"] = chat_id
+        data["telegram_push_chat_id"] = push_chat_id
+        data["telegram_inbound_chat_id"] = inbound_chat_id
+        data.pop("telegram_chat_id", None)
         effective_token = str(data.get("telegram_bot_token") or os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
-        effective_chat_id = str(data.get("telegram_chat_id") or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
+        effective_push_chat_id = TelegramNotifier.chat_id_setting(data, "telegram_push_chat_id", "RH_TELEGRAM_PUSH_CHAT_ID")
         enabled_value = str(enabled or "").strip().lower() in {"1", "true", "yes", "on"} if isinstance(enabled, str) else bool(enabled)
         if enabled_value and not effective_token:
             raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用 Telegram 前请填写 Bot Token。")
-        if enabled_value and not TelegramNotifier.parse_chat_ids(effective_chat_id):
-            raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用 Telegram 前请填写 Chat ID。")
+        if enabled_value and not TelegramNotifier.parse_chat_ids(effective_push_chat_id):
+            raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用 Telegram 推送前请填写推送 Chat ID。")
         data["telegram_enabled"] = enabled_value
         self._write_json_file(data)
         return self.telegram_settings()
@@ -2031,9 +2117,9 @@ class LocalStore:
             folder_id = self._validate_workflow_folder_id(folder_id)
         if enabled_value:
             token = str(data.get("telegram_bot_token") or os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
-            chat_id = str(data.get("telegram_chat_id") or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
-            if not token or not TelegramNotifier.parse_chat_ids(chat_id):
-                raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用图片入站前请先配置 Bot Token 和 Chat ID。")
+            inbound_chat_id = TelegramNotifier.chat_id_setting(data, "telegram_inbound_chat_id", "RH_TELEGRAM_INBOUND_CHAT_ID")
+            if not token or not TelegramNotifier.parse_chat_ids(inbound_chat_id):
+                raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用图片入站前请先配置 Bot Token 和入站 Chat ID。")
             if mode_value == "fixed":
                 if not workflow_id:
                     raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "请先选择 Telegram 入站工作流。")
@@ -2077,9 +2163,9 @@ class LocalStore:
         data = self._read_json_file()
         if enabled_value:
             token = str(data.get("telegram_bot_token") or os.environ.get("RH_TELEGRAM_BOT_TOKEN") or "").strip()
-            chat_id = str(data.get("telegram_chat_id") or os.environ.get("RH_TELEGRAM_CHAT_ID") or "").strip()
-            if not token or not TelegramNotifier.parse_chat_ids(chat_id):
-                raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用视频链接入站前请先配置 Bot Token 和 Chat ID。")
+            inbound_chat_id = TelegramNotifier.chat_id_setting(data, "telegram_inbound_chat_id", "RH_TELEGRAM_INBOUND_CHAT_ID")
+            if not token or not TelegramNotifier.parse_chat_ids(inbound_chat_id):
+                raise RhCliError("INVALID_TELEGRAM_SETTINGS", "启用视频链接入站前请先配置 Bot Token 和入站 Chat ID。")
             if not workflow_id:
                 raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "请先选择 Telegram 视频入站工作流。")
             candidate = next(
@@ -2103,6 +2189,8 @@ class LocalStore:
         data = self._read_json_file()
         data.pop("telegram_bot_token", None)
         data.pop("telegram_chat_id", None)
+        data.pop("telegram_push_chat_id", None)
+        data.pop("telegram_inbound_chat_id", None)
         data["telegram_enabled"] = False
         data.pop("telegram_inbound_workflow_id", None)
         data.pop("telegram_inbound_folder_id", None)
@@ -2708,16 +2796,87 @@ class LocalStore:
         record = self.workflow_record(workflow_id)
         folder_id = self._validate_workflow_folder_id(folder_id)
         records = self._read_workflow_registry()
+        records = self._normalise_workflow_sort_orders(records)
         target = next((item for item in records if str(item.get("id") or "") == str(record["id"])), None)
         if target is None:
             raise RhCliError("WORKFLOW_NOT_FOUND", f"找不到工作流：{workflow_id}")
+        previous_folder_id = str(target.get("folder_id") or "").strip()
         if folder_id:
             target["folder_id"] = folder_id
         else:
             target.pop("folder_id", None)
-        target["updated_at"] = now_ms()
+        if folder_id != previous_folder_id:
+            siblings = [
+                item for item in records
+                if str(item.get("id") or "") != str(target.get("id") or "")
+                and str(item.get("folder_id") or "").strip() == folder_id
+            ]
+            target[WORKFLOW_SORT_ORDER_KEY] = max(
+                [int(item.get(WORKFLOW_SORT_ORDER_KEY) or 0) for item in siblings] + [-1]
+            ) + 1
         self._write_workflow_registry(records)
         return self.workflow_record(workflow_id)
+
+    @staticmethod
+    def _workflow_sort_order(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            result = int(value)
+        except (TypeError, ValueError):
+            return None
+        return result if result >= 0 else None
+
+    @classmethod
+    def _normalise_workflow_sort_orders(cls, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Give older registry entries a stable order before the first reorder."""
+        valid = [item for item in records if cls._workflow_sort_order(item.get(WORKFLOW_SORT_ORDER_KEY)) is not None]
+        missing = [item for item in records if cls._workflow_sort_order(item.get(WORKFLOW_SORT_ORDER_KEY)) is None]
+        if not missing:
+            return sorted(
+                records,
+                key=lambda item: (
+                    cls._workflow_sort_order(item.get(WORKFLOW_SORT_ORDER_KEY)) or 0,
+                    str(item.get("id") or ""),
+                ),
+            )
+        valid.sort(key=lambda item: (cls._workflow_sort_order(item.get(WORKFLOW_SORT_ORDER_KEY)) or 0, str(item.get("id") or "")))
+        missing.sort(
+            key=lambda item: (
+                -int(item.get("updated_at") or 0),
+                str(item.get("name") or ""),
+                str(item.get("id") or ""),
+            )
+        )
+        ordered = valid + missing
+        for index, item in enumerate(ordered):
+            item[WORKFLOW_SORT_ORDER_KEY] = index
+        return ordered
+
+    def reorder_workflows(self, folder_id: Any, workflow_ids: Any) -> list[dict[str, Any]]:
+        """Persist the visible card order for one folder or the unclassified group."""
+        folder_id = self._validate_workflow_folder_id(folder_id)
+        if not isinstance(workflow_ids, list):
+            raise RhCliError("INVALID_WORKFLOW_ORDER", "工作流顺序必须是数组。")
+        ordered_ids = [str(item or "").strip() for item in workflow_ids]
+        if not ordered_ids or any(not item for item in ordered_ids) or len(set(ordered_ids)) != len(ordered_ids):
+            raise RhCliError("INVALID_WORKFLOW_ORDER", "工作流顺序包含无效或重复的 ID。")
+        records = self._normalise_workflow_sort_orders(self._read_workflow_registry())
+        candidates = {
+            str(item.get("id") or "")
+            for item in records
+            if str(item.get("source") or "") == "library"
+            and str(item.get("folder_id") or "").strip() == folder_id
+        }
+        if set(ordered_ids) != candidates:
+            raise RhCliError("INVALID_WORKFLOW_ORDER", "工作流顺序与当前文件夹内容不匹配。")
+        positions = {workflow_id: index for index, workflow_id in enumerate(ordered_ids)}
+        for item in records:
+            workflow_id = str(item.get("id") or "")
+            if workflow_id in positions:
+                item[WORKFLOW_SORT_ORDER_KEY] = positions[workflow_id]
+        self._write_workflow_registry(records)
+        return self.workflows()
 
     @staticmethod
     def _workflow_local_id_from_path(path: Path) -> str:
@@ -2725,8 +2884,19 @@ class LocalStore:
         return match.group(1) if match else path.stem
 
     def _upsert_workflow_registry(self, record: dict[str, Any]) -> None:
-        records = self._read_workflow_registry()
+        records = self._normalise_workflow_sort_orders(self._read_workflow_registry())
+        existing = next(
+            (item for item in records if str(item.get("id") or "") == str(record.get("id") or "")),
+            None,
+        )
         records = [item for item in records if str(item.get("id") or "") != str(record.get("id") or "")]
+        requested_order = self._workflow_sort_order(record.get(WORKFLOW_SORT_ORDER_KEY))
+        if requested_order is None and existing is not None:
+            requested_order = self._workflow_sort_order(existing.get(WORKFLOW_SORT_ORDER_KEY))
+        if requested_order is None:
+            requested_order = max(
+                [int(item.get(WORKFLOW_SORT_ORDER_KEY) or 0) for item in records] + [-1]
+            ) + 1
         saved = {
             "id": str(record.get("id") or ""),
             "name": str(record.get("name") or "workflow.json"),
@@ -2738,6 +2908,7 @@ class LocalStore:
             "source": "library",
             "created_at": int(record.get("created_at") or now_ms()),
             "updated_at": int(record.get("updated_at") or now_ms()),
+            WORKFLOW_SORT_ORDER_KEY: requested_order,
         }
         if str(record.get("folder_id") or "").strip():
             saved["folder_id"] = str(record.get("folder_id")).strip()
@@ -2829,6 +3000,7 @@ class LocalStore:
         input_config: dict[str, Any] | None = None,
         input_defaults: list[dict[str, Any]] | None = None,
         prompt_group: dict[str, Any] | None = None,
+        sort_order: int | None = None,
         register: bool = True,
     ) -> tuple[str, Path, dict[str, Any]]:
         try:
@@ -2893,6 +3065,8 @@ class LocalStore:
                 "input_config": normalized_input_config,
                 "_package_prompt_group": True,
             }
+            if self._workflow_sort_order(sort_order) is not None:
+                record[WORKFLOW_SORT_ORDER_KEY] = self._workflow_sort_order(sort_order)
             if normalized_prompt_group:
                 record["prompt_group_id"] = normalized_prompt_group["id"]
                 record["prompt_group_name"] = normalized_prompt_group["name"]
@@ -2913,9 +3087,17 @@ class LocalStore:
 
     def workflows(self) -> list[dict[str, Any]]:
         """Return local workflow library records without exposing workflow JSON."""
+        registry_records = self._read_workflow_registry()
+        if any(
+            str(item.get("source") or "") == "library"
+            and self._workflow_sort_order(item.get(WORKFLOW_SORT_ORDER_KEY)) is None
+            for item in registry_records
+        ):
+            registry_records = self._normalise_workflow_sort_orders(registry_records)
+            self._write_workflow_registry(registry_records)
         registry = {
             str(item.get("id")): item
-            for item in self._read_workflow_registry()
+            for item in registry_records
             if str(item.get("source") or "") == "library"
         }
         accounts = {str(item.get("id")): item for item in self.accounts()}
@@ -2973,6 +3155,7 @@ class LocalStore:
                     "prompt_group_name": prompt_group_name,
                     "created_at": created_at,
                     "updated_at": updated_at,
+                    WORKFLOW_SORT_ORDER_KEY: self._workflow_sort_order(registered.get(WORKFLOW_SORT_ORDER_KEY)),
                     "file_size": int(stat.st_size if stat else 0),
                     "file_count": int(analysis.get("file_count") or 0),
                     "prompt_count": int(analysis.get("prompt_count") or 0),
@@ -2982,7 +3165,14 @@ class LocalStore:
                     "analysis_error": analysis_error,
                 }
             )
-        return sorted(result, key=lambda item: (int(item.get("updated_at") or 0), str(item.get("name") or "")), reverse=True)
+        return sorted(
+            result,
+            key=lambda item: (
+                self._workflow_sort_order(item.get(WORKFLOW_SORT_ORDER_KEY)) or 0,
+                str(item.get("name") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
 
     def workflow_record(self, workflow_id: str) -> dict[str, Any]:
         workflow_id = str(workflow_id or "").strip()
@@ -3332,6 +3522,7 @@ class LocalStore:
             input_config=effective_input_config,
             input_defaults=input_defaults,
             prompt_group=prompt_group,
+            sort_order=self._workflow_sort_order(old_record.get(WORKFLOW_SORT_ORDER_KEY)),
         )
         try:
             package = self.workflow_detail(workflow_id)
@@ -3466,8 +3657,9 @@ class LocalStore:
     def task_prompt_group_snapshot_path(self, task: dict[str, Any]) -> Path:
         return self.task_output_path(task) / PROMPT_GROUP_SNAPSHOT_FILENAME
 
-    def task_manifest_path(self, task: dict[str, Any]) -> Path:
-        return self.task_output_path(task) / TASK_MANIFEST_FILENAME
+    @staticmethod
+    def task_manifest_path(task: dict[str, Any]) -> Path:
+        return LocalStore.task_output_path(task) / TASK_MANIFEST_FILENAME
 
     def save_task_prompt_group_snapshot(self, task: dict[str, Any], group: dict[str, Any]) -> Path:
         if not isinstance(group, dict) or not isinstance(group.get("items"), list):
@@ -3550,6 +3742,54 @@ class LocalStore:
 
             if changes:
                 self.update_task(task_id, **changes)
+
+    def _backfill_toolbox_manifests(self) -> None:
+        """Give older local Codex/media tasks the same replay manifest contract."""
+        for task in self.tasks():
+            if str(task.get("task_type") or "").strip().lower() != "toolbox":
+                continue
+            task_id = str(task.get("id") or "").strip()
+            if not task_id:
+                continue
+            custom = task.get("custom_inputs") if isinstance(task.get("custom_inputs"), dict) else {}
+            local_id = str(task.get("local_workflow_id") or "").strip() or toolbox_workflow_id(
+                custom.get("tool"), custom.get("mode")
+            )
+            manifest_path = self.task_manifest_path(task)
+            changes: dict[str, str] = {}
+            if str(task.get("local_workflow_id") or "").strip() != local_id:
+                changes["local_workflow_id"] = local_id
+            if str(task.get("manifest_path") or "").strip() != str(manifest_path):
+                changes["manifest_path"] = str(manifest_path)
+            if changes:
+                self.update_task(task_id, **changes)
+                task = self.task(task_id) or {**task, **changes}
+            if not manifest_path.is_file():
+                self.save_toolbox_manifest(task)
+
+    def _backfill_manifest_features(self) -> None:
+        """Add the uniform feature descriptor to existing task manifests."""
+        for task in self.tasks():
+            manifest_path = self.task_manifest_path(task)
+            if not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(manifest, dict):
+                continue
+            feature = task_feature_for_task(task)
+            if manifest.get("feature") == feature:
+                continue
+            manifest["feature"] = feature
+            temporary = manifest_path.with_suffix(".json.tmp")
+            try:
+                temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                temporary.replace(manifest_path)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
 
     def _backfill_task_projects(self) -> None:
         """Infer project metadata for legacy tasks from their existing paths."""
@@ -3753,6 +3993,55 @@ class LocalStore:
             if temporary.exists():
                 temporary.unlink()
 
+    def save_toolbox_manifest(self, task: dict[str, Any]) -> Path:
+        """Save a path-only manifest for a local Codex or media-processing task."""
+        manifest_path = self.task_manifest_path(task)
+        if not manifest_path.parent.name or not manifest_path.parent.parent:
+            raise RhCliError("INVALID_OUTPUT_DIR", "任务输出目录无效，无法保存工具箱复现清单。")
+        custom = task.get("custom_inputs") if isinstance(task.get("custom_inputs"), dict) else {}
+        local_id = str(task.get("local_workflow_id") or "").strip() or toolbox_workflow_id(
+            custom.get("tool"), custom.get("mode")
+        )
+        feature = task_feature_for_task(task)
+        document = {
+            "version": 1,
+            "kind": "rh-toolbox-task",
+            "task_id": str(task.get("id") or "").strip(),
+            "created_at": int(task.get("created_at") or now_ms()),
+            "task_type": "toolbox",
+            "feature": feature,
+            "workflow_id": local_id,
+            "workflow": {
+                "id": local_id,
+                "name": str(task.get("workflow_name") or "本地处理").strip() or "本地处理",
+                "type": "toolbox",
+            },
+            "execution": {
+                "tool": str(custom.get("tool") or "").strip(),
+                "mode": str(custom.get("mode") or "").strip(),
+                "resolution": str(custom.get("resolution") or "").strip(),
+                "duration_seconds": "" if custom.get("duration_seconds") is None else str(custom.get("duration_seconds")).strip(),
+                "start_frame": "" if custom.get("start_frame") is None else str(custom.get("start_frame")).strip(),
+                "aspect_ratio": str(custom.get("aspect_ratio") or "").strip(),
+                "input_type": str(custom.get("input_type") or "").strip(),
+            },
+            "inputs": {
+                "files": task.get("files") if isinstance(task.get("files"), dict) else {},
+                "prompts": task.get("prompts") if isinstance(task.get("prompts"), dict) else {},
+                "custom": custom,
+                "policy": "paths-only",
+            },
+        }
+        temporary = manifest_path.with_suffix(".json.tmp")
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(manifest_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return manifest_path
+
     def rename_project_folder(self, project_id: str, name: str) -> dict[str, Any]:
         project_id = str(project_id or "").strip()
         clean_name = self._clean_project_folder_name(name)
@@ -3812,13 +4101,15 @@ class LocalStore:
         manifest_path = self.task_manifest_path(task)
         if not manifest_path.parent.name or not manifest_path.parent.parent:
             raise RhCliError("INVALID_OUTPUT_DIR", "任务输出目录无效，无法保存复现清单。")
+        task_type = str(task.get("task_type") or "workflow").strip().lower() or "workflow"
         document = {
             "version": 1,
             "kind": "rh-workflow-task",
             "task_id": str(task.get("id") or "").strip(),
             "created_at": int(task.get("created_at") or now_ms()),
             "submission_source": str(task.get("submission_source") or "local").strip() or "local",
-            "task_type": str(task.get("task_type") or "workflow").strip().lower() or "workflow",
+            "task_type": task_type,
+            "feature": task_feature_for_task(task),
             "workflow": {
                 "name": str(task.get("workflow_name") or "").strip(),
                 "registered_workflow_id": str(task.get("registered_workflow_id") or "").strip(),
@@ -3861,6 +4152,49 @@ class LocalStore:
             if temporary.exists():
                 temporary.unlink()
         return manifest_path
+
+    def load_task_replay(self, task_id: str) -> dict[str, Any]:
+        """Load either a workflow replay package or a toolbox replay manifest."""
+        task = self.task(task_id)
+        if not task:
+            raise RhCliError("TASK_NOT_FOUND", "找不到这个任务。")
+        if str(task.get("task_type") or "").strip().lower() != "toolbox":
+            return self.load_task_workflow(task_id)
+
+        custom = task.get("custom_inputs") if isinstance(task.get("custom_inputs"), dict) else {}
+        local_id = str(task.get("local_workflow_id") or "").strip() or toolbox_workflow_id(
+            custom.get("tool"), custom.get("mode")
+        )
+        manifest_path = self.task_manifest_path(task)
+        changes: dict[str, str] = {}
+        if str(task.get("local_workflow_id") or "").strip() != local_id:
+            changes["local_workflow_id"] = local_id
+        if str(task.get("manifest_path") or "").strip() != str(manifest_path):
+            changes["manifest_path"] = str(manifest_path)
+        if changes:
+            self.update_task(task_id, **changes)
+            task = self.task(task_id) or {**task, **changes}
+        if not manifest_path.is_file():
+            self.save_toolbox_manifest(task)
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RhCliError("INVALID_TASK_MANIFEST", f"无法读取工具箱任务清单：{manifest_path}") from exc
+        return {
+            "kind": "toolbox",
+            "workflow_id": local_id,
+            "filename": task.get("workflow_name") or "本地处理",
+            "manifest_path": str(manifest_path),
+            "manifest": manifest,
+            "task": task,
+            "toolbox": {
+                "tool": str(custom.get("tool") or "").strip(),
+                "mode": str(custom.get("mode") or "").strip(),
+                "files": task.get("files") if isinstance(task.get("files"), dict) else {},
+                "prompts": task.get("prompts") if isinstance(task.get("prompts"), dict) else {},
+                "custom_inputs": custom,
+            },
+        }
 
     def task_workflow_path(self, task: dict[str, Any]) -> Path:
         snapshot_path = self.task_snapshot_path(task)
@@ -4003,7 +4337,7 @@ class LocalStore:
     def update_task(self, task_id: str, **changes: Any) -> None:
         allowed = {
             "status", "progress", "updated_at", "started_at", "completed_at", "key_id", "account_id", "instance_type", "dispatch_key_name", "dispatch_key_site", "dispatch_key_api_type", "remote_task_id", "remote_workflow_id",
-            "outputs_json", "error", "error_detail", "stage_logs_json", "cost_type", "cost", "duration", "output_dir", "workflow_snapshot_path",
+            "local_workflow_id", "outputs_json", "error", "error_detail", "stage_logs_json", "cost_type", "cost", "duration", "output_dir", "workflow_snapshot_path",
             "prompt_group_snapshot_path", "manifest_path", "project_id", "project_name", "project_path", "project_inference_disabled",
         }
         changes = {key: value for key, value in changes.items() if key in allowed}
@@ -4397,6 +4731,63 @@ class LocalStore:
         # records what the task generated, even after library cleanup.
         return {"deleted": deleted_count, "tasks_updated": len(updates)}
 
+    def delete_outputs_by_keys(self, output_keys: set[tuple[str, int]]) -> dict[str, int]:
+        """Delete exactly the selected outputs, preserving tasks and other outputs."""
+        normalized_keys = {(str(task_id or ""), int(output_index)) for task_id, output_index in output_keys}
+        if not normalized_keys:
+            raise RhCliError("OUTPUT_SELECTION_EMPTY", "请选择要删除的成片。")
+
+        files_to_delete: set[Path] = set()
+        updates: list[tuple[str, int, str]] = []
+        deleted_count = 0
+        with self._lock:
+            rows = self._db.execute("SELECT id, output_dir, outputs_json FROM tasks").fetchall()
+            for row in rows:
+                try:
+                    outputs = json.loads(row["outputs_json"] or "[]")
+                except (TypeError, ValueError) as exc:
+                    raise RhCliError("OUTPUT_NOT_FOUND", "任务产物记录无效。") from exc
+                if not isinstance(outputs, list):
+                    continue
+                kept_outputs: list[dict[str, Any]] = []
+                removed_from_task = 0
+                task_id = str(row["id"] or "")
+                task_folder = (Path(str(row["output_dir"] or "")).expanduser() / task_id).resolve()
+                for output_index, output in enumerate(outputs):
+                    if not isinstance(output, dict) or (task_id, output_index) not in normalized_keys:
+                        kept_outputs.append(output)
+                        continue
+                    if str(output.get("kind") or "file") == "file":
+                        raw_path = str(output.get("path") or "").strip()
+                        if raw_path:
+                            file_path = Path(raw_path).expanduser()
+                            if file_path.is_symlink():
+                                raise RhCliError("OUTPUT_DELETE_FAILED", "产物文件是符号链接，拒绝删除。")
+                            resolved_path = file_path.resolve()
+                            if task_folder == resolved_path or task_folder not in resolved_path.parents:
+                                raise RhCliError("OUTPUT_DELETE_FAILED", "产物路径不在任务输出目录内，拒绝删除。")
+                            files_to_delete.add(resolved_path)
+                    removed_from_task += 1
+                if removed_from_task:
+                    deleted_count += removed_from_task
+                    updates.append((json.dumps(kept_outputs, ensure_ascii=False), now_ms(), task_id))
+
+            try:
+                for file_path in files_to_delete:
+                    if file_path.is_file():
+                        file_path.unlink()
+                for outputs_json, updated_at, task_id in updates:
+                    self._db.execute(
+                        "UPDATE tasks SET outputs_json=?, updated_at=? WHERE id=?",
+                        (outputs_json, updated_at, task_id),
+                    )
+                self._db.commit()
+            except OSError as exc:
+                self._db.rollback()
+                raise RhCliError("OUTPUT_DELETE_FAILED", "删除所选产物文件失败。") from exc
+
+        return {"deleted": deleted_count, "tasks_updated": len(updates)}
+
     def append_stage_log(
         self,
         task_id: str,
@@ -4495,6 +4886,7 @@ class LocalStore:
                 task[public_name] = json.loads(task.pop(field))
             except (ValueError, TypeError):
                 task[public_name] = {} if public_name in {"error_detail", "custom_inputs", "input_config"} else []
+        task["workflow_id"] = str(task.get("remote_workflow_id") or task.get("local_workflow_id") or "").strip()
         return task
 
     def task(self, task_id: str) -> dict[str, Any] | None:
@@ -5166,13 +5558,31 @@ class TaskManager:
         except Exception as exc:  # pragma: no cover - background safety net
             self._log_stage(task_id, "telegram", f"Telegram 推送异常：{exc}", level="warning")
 
-    def upload_task_to_telegram(self, task_id: str, output_index: Any) -> dict[str, Any]:
+    def upload_task_to_telegram(
+        self,
+        task_id: str,
+        output_index: Any,
+        chat_ids: Any = None,
+    ) -> dict[str, Any]:
         task = self.store.task(task_id)
         if not task:
             raise RhCliError("TASK_NOT_FOUND", "找不到任务。")
         settings = self._telegram_notifier.settings()
-        if not settings.get("configured"):
-            raise RhCliError("TELEGRAM_NOT_CONFIGURED", "请先配置 Telegram Bot Token 和 Chat ID。")
+        if not settings.get("push_configured", settings.get("configured")):
+            raise RhCliError("TELEGRAM_NOT_CONFIGURED", "请先配置 Telegram 推送 Bot Token 和 Chat ID。")
+        selected_chat_ids: list[str] | None = None
+        if chat_ids is not None:
+            if not isinstance(chat_ids, list):
+                raise RhCliError("TELEGRAM_RECIPIENTS_INVALID", "推送用户必须是已配置 Chat ID 的数组。")
+            selected_chat_ids = TelegramNotifier.parse_chat_ids(",".join(str(value) for value in chat_ids))
+            configured_chat_ids = settings.get("push_chat_ids")
+            if not isinstance(configured_chat_ids, list):
+                configured_chat_ids = TelegramNotifier.parse_chat_ids(
+                    settings.get("push_chat_id") or settings.get("chat_id") or ""
+                )
+            configured_chat_ids = [str(value).strip() for value in configured_chat_ids if str(value).strip()]
+            if not selected_chat_ids or any(value not in configured_chat_ids for value in selected_chat_ids):
+                raise RhCliError("TELEGRAM_RECIPIENTS_INVALID", "请选择已配置的 Telegram 推送用户。")
         try:
             index = int(output_index)
         except (TypeError, ValueError) as exc:
@@ -5188,12 +5598,14 @@ class TaskManager:
                 raise RhCliError("TELEGRAM_UPLOAD_IN_PROGRESS", "该成片正在上传，请稍候。")
             self._telegram_uploading.add(upload_key)
         try:
+            notify_kwargs: dict[str, Any] = {"force": True, "output_indices": [index]}
+            if selected_chat_ids is not None:
+                notify_kwargs["chat_ids"] = selected_chat_ids
             future = self._telegram_executor.submit(
                 self._telegram_notifier.notify_task,
                 task_id,
                 [output],
-                force=True,
-                output_indices=[index],
+                **notify_kwargs,
             )
             result = future.result()
             failed = int(result.get("failed") or 0)
@@ -5201,7 +5613,8 @@ class TaskManager:
                 self._log_stage(task_id, "telegram", f"Telegram 上传失败：{output_name}", level="warning")
                 raise RhCliError("TELEGRAM_DELIVERY_FAILED", f"「{output_name}」上传到 Telegram 失败，请重试。")
             self._log_stage(task_id, "telegram", f"Telegram 上传完成：{output_name}")
-            return {"status": "sent", "message": f"「{output_name}」已上传到 Telegram。"}
+            recipient_label = "全部已选用户" if selected_chat_ids is None else f"{len(selected_chat_ids)} 个已选用户"
+            return {"status": "sent", "message": f"「{output_name}」已上传到 Telegram（{recipient_label}）。"}
         except Exception as exc:
             if isinstance(exc, RhCliError) and exc.code == "TELEGRAM_DELIVERY_FAILED":
                 raise
@@ -5216,7 +5629,7 @@ class TaskManager:
         offset: int | None = None
         while not self._stop.is_set():
             settings = self._telegram_notifier.settings()
-            if not settings.get("configured"):
+            if not settings.get("inbound_configured", settings.get("configured")):
                 self._stop.wait(2)
                 continue
             try:
@@ -5233,7 +5646,7 @@ class TaskManager:
                     if not self.store.claim_telegram_inbound_update(update_id):
                         continue
                     current_settings = self._telegram_notifier.settings()
-                    if not current_settings.get("configured"):
+                    if not current_settings.get("inbound_configured", current_settings.get("configured")):
                         self.store.finish_telegram_inbound_update(update_id, "ignored", detail="Telegram 入站已关闭或未配置")
                         continue
                     task_id = ""
@@ -5251,7 +5664,7 @@ class TaskManager:
                 self._stop.wait(5)
 
     def _handle_telegram_video_update(
-        self, update: dict[str, Any], settings: dict[str, Any], video_url: str,
+        self, update: dict[str, Any], settings: dict[str, Any], video_url: str, chat_id: str = "",
     ) -> str:
         platform_labels = {"douyin": "抖音", "bilibili": "Bilibili", "x": "X"}
         platform_label = platform_labels.get(social_video_platform(video_url), "视频")
@@ -5269,6 +5682,7 @@ class TaskManager:
             target_path = download_social_video(video_url, DATA_ROOT)
             workflow_data = json.loads(json.dumps(detail["workflow"], ensure_ascii=False))
             input_duration = _apply_telegram_video_duration(workflow_data, Path(target_path))
+            input_aspect_ratio = _apply_telegram_video_aspect_ratio(workflow_data, Path(target_path))
             prompt_group = detail.get("prompt_group")
             if not isinstance(prompt_group, dict):
                 prompt_group = {
@@ -5299,16 +5713,24 @@ class TaskManager:
         except Exception as exc:
             message = exc.message if isinstance(exc, RhCliError) else "Telegram 视频任务提交失败，请查看本机任务日志。"
             try:
-                self._telegram_notifier.send_message(f"{platform_label}视频链接任务未提交：{message}")
+                self._telegram_notifier.send_message(
+                    f"{platform_label}视频链接任务未提交：{message}", chat_id or None
+                )
             except TelegramDeliveryError:
                 pass
             raise
         task_id = str(task.get("id") or "")
-        duration_suffix = f"，节点 14 时长已设为 {input_duration:.3f} 秒" if input_duration is not None else ""
-        self._log_stage(task_id, "telegram", f"已从 Telegram 接收{platform_label}视频链接并提交工作流{duration_suffix}")
+        changes = []
+        if input_duration is not None:
+            changes.append(f"节点 14 时长已设为 {input_duration:.3f} 秒")
+        if input_aspect_ratio is not None:
+            changes.append(f"画幅比例已设为 {input_aspect_ratio.split(' ', 1)[0]}")
+        change_suffix = f"，{'，'.join(changes)}" if changes else ""
+        self._log_stage(task_id, "telegram", f"已从 Telegram 接收{platform_label}视频链接并提交工作流{change_suffix}")
         try:
             self._telegram_notifier.send_message(
-                f"已收到{platform_label}视频链接，已下载并排队{duration_suffix}：{task.get('workflow_name') or record.get('name') or workflow_id}\n任务 ID：{task_id}"
+                f"已收到{platform_label}视频链接，已下载并排队{change_suffix}：{task.get('workflow_name') or record.get('name') or workflow_id}\n任务 ID：{task_id}",
+                chat_id or None,
             )
         except TelegramDeliveryError:
             self._log_stage(task_id, "telegram", "任务已提交，但 Telegram 回执发送失败", level="warning")
@@ -5321,7 +5743,9 @@ class TaskManager:
             return ""
         chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
         chat_id = str(chat.get("id") or "").strip()
-        if chat_id not in TelegramNotifier.parse_chat_ids(settings.get("chat_id")):
+        if not TelegramNotifier.chat_id_allowed(
+            settings.get("inbound_chat_id", settings.get("chat_id")), chat_id
+        ):
             return ""
         if isinstance(callback, dict):
             return self._handle_telegram_callback(update, settings, message, chat_id)
@@ -5333,7 +5757,7 @@ class TaskManager:
             if video_url:
                 if not str(settings.get("video_inbound_workflow_id") or "").strip():
                     return ""
-                return self._handle_telegram_video_update(update, settings, video_url)
+                return self._handle_telegram_video_update(update, settings, video_url, chat_id)
         if not settings.get("inbound_enabled"):
             return ""
         mode = str(settings.get("inbound_mode") or "fixed").strip().lower()
@@ -5387,7 +5811,7 @@ class TaskManager:
         except Exception as exc:
             message = exc.message if isinstance(exc, RhCliError) else "Telegram 图片任务提交失败，请查看本机任务日志。"
             try:
-                self._telegram_notifier.send_message(f"图片任务未提交：{message}")
+                self._telegram_notifier.send_message(f"图片任务未提交：{message}", chat_id or None)
             except TelegramDeliveryError:
                 pass
             raise
@@ -5395,7 +5819,8 @@ class TaskManager:
         self._log_stage(task_id, "telegram", "已从 Telegram 接收图片并提交工作流")
         try:
             self._telegram_notifier.send_message(
-                f"已收到图片，工作流已排队：{task.get('workflow_name') or record.get('name') or workflow_id}\n任务 ID：{task_id}"
+                f"已收到图片，工作流已排队：{task.get('workflow_name') or record.get('name') or workflow_id}\n任务 ID：{task_id}",
+                chat_id or None,
             )
         except TelegramDeliveryError:
             self._log_stage(task_id, "telegram", "任务已提交，但 Telegram 回执发送失败", level="warning")
@@ -5484,6 +5909,7 @@ class TaskManager:
             task["dispatch_credential_recorded"] = bool(snapshot_name)
             task["remote_task_id"] = task.get("remote_task_id") or ""
             task["remote_workflow_id"] = task.get("remote_workflow_id") or ""
+            task["workflow_id"] = task["remote_workflow_id"] or str(task.get("local_workflow_id") or "").strip()
             stored_instance_type = str(task.get("instance_type") or "default").strip().lower()
             task["instance_type"] = stored_instance_type if stored_instance_type in INSTANCE_TYPES else "default"
             task["elapsed_ms"] = task_elapsed_ms(task)
@@ -5889,6 +6315,7 @@ class TaskManager:
         apply_custom_input_values(snapshot_workflow, normalized_custom_inputs)
         apply_random_noise_inputs(snapshot_workflow, active_random_noise)
         apply_resolution_inputs(snapshot_workflow, active_resolution)
+        h3_length_clamp_nodes = _clamp_h3_reference_length(snapshot_workflow)
         if task.get("account_id") and task.get("account_id") != GENERAL_ACCOUNT_ID:
             metadata = snapshot_workflow.get(WORKFLOW_META_KEY)
             metadata = dict(metadata) if isinstance(metadata, dict) else {}
@@ -5903,6 +6330,12 @@ class TaskManager:
         manifest_path = self.store.save_task_manifest_snapshot(task, normalized_prompt_group)
         task["manifest_path"] = str(manifest_path)
         self.store.create_task(task)
+        if h3_length_clamp_nodes:
+            self._log_stage(
+                task_id,
+                "prepare",
+                f"已将 H3 参考帧数表达式上限钳制为 360（{len(h3_length_clamp_nodes)} 个节点）",
+            )
         self._wake.set()
         return self.store.task(task_id) or task
 
@@ -6154,6 +6587,76 @@ class TaskManager:
             for item in candidates
         )
 
+    @classmethod
+    def _remote_failed_reason(cls, exc: RhCliError) -> dict[str, Any] | None:
+        """Return RunningHub's nested failedReason when a remote task failed."""
+        if not cls._is_remote_805(exc):
+            return None
+        pending: list[Any] = [exc.detail]
+        seen: set[int] = set()
+        while pending:
+            value = pending.pop()
+            if not isinstance(value, dict) or id(value) in seen:
+                continue
+            seen.add(id(value))
+            failed_reason = value.get("failedReason")
+            if isinstance(failed_reason, dict):
+                return failed_reason
+            for key in ("detail", "data"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    pending.append(nested)
+        return None
+
+    @staticmethod
+    def _is_vhs_load_video_failure(failed_reason: dict[str, Any] | None) -> bool:
+        """Recognize the VideoHelperSuite OpenCV decode failure only."""
+        if not isinstance(failed_reason, dict):
+            return False
+        node_name = str(failed_reason.get("node_name") or "").strip().lower().replace("_", "")
+        exception_message = str(failed_reason.get("exception_message") or "").strip().lower()
+        return node_name == "vhsloadvideo" or "could not be loaded with cv" in exception_message
+
+    @staticmethod
+    def _video_input_files_for_failure(
+        task: dict[str, Any],
+        workflow: dict[str, Any],
+        failed_reason: dict[str, Any],
+        bypassed_nodes: set[str],
+    ) -> list[tuple[str, Path]]:
+        """Select local video inputs, preferring the node named by the failure."""
+        failed_node_id = str(failed_reason.get("node_id") or "").strip()
+        candidates: list[tuple[str, Path]] = []
+        for input_id, raw_path in (task.get("files") or {}).items():
+            input_id = str(input_id)
+            node_id, separator, field = input_id.partition(":")
+            if not separator or node_id in bypassed_nodes:
+                continue
+            if failed_node_id and node_id != failed_node_id:
+                continue
+            node = workflow.get(node_id)
+            class_type = str(node.get("class_type") or "").lower() if isinstance(node, dict) else ""
+            field_is_video = "video" in field.lower()
+            class_is_video = "loadvideo" in class_type or "vhs_load" in class_type
+            if not (field_is_video or class_is_video):
+                continue
+            candidates.append((input_id, Path(str(raw_path)).expanduser()))
+        if failed_node_id:
+            return candidates
+
+        # Older RunningHub responses may omit node_id. In that case, retry all
+        # explicit video inputs once so multi-reference workflows remain valid.
+        for input_id, raw_path in (task.get("files") or {}).items():
+            input_id = str(input_id)
+            node_id, separator, field = input_id.partition(":")
+            if not separator or node_id in bypassed_nodes or any(item[0] == input_id for item in candidates):
+                continue
+            node = workflow.get(node_id)
+            class_type = str(node.get("class_type") or "").lower() if isinstance(node, dict) else ""
+            if "video" in field.lower() or "loadvideo" in class_type or "vhs_load" in class_type:
+                candidates.append((input_id, Path(str(raw_path)).expanduser()))
+        return candidates
+
     @staticmethod
     def _instance_type_after_805(instance_type: str, retry_count: int) -> str | None:
         """Return the one allowed 805 retry machine, or None when exhausted."""
@@ -6239,6 +6742,7 @@ class TaskManager:
             task_output_dir.mkdir(parents=True, exist_ok=True)
             site_upload, site_create, site_outputs = _site_urls(key["site"])
             retry_805_count = 0
+            transcode_retry_count = 0
             submit_instance_type = normalize_instance_type(task.get("instance_type"))
 
             with RhHttpClient(key["api_key"], no_proxy_host="runninghub.ai" if key["site"] == "ai" else "") as client:
@@ -6336,6 +6840,55 @@ class TaskManager:
                             cancel_url=_site_cancel_url(key["site"]),
                         )
                     except RhCliError as exc:
+                        failed_reason = self._remote_failed_reason(exc)
+                        if (
+                            transcode_retry_count < 1
+                            and self._is_vhs_load_video_failure(failed_reason)
+                            and failed_reason is not None
+                        ):
+                            video_inputs = self._video_input_files_for_failure(
+                                task,
+                                workflow,
+                                failed_reason,
+                                bypassed_nodes,
+                            )
+                            if video_inputs:
+                                transcode_retry_count += 1
+                                converted_file_args: list[str] = []
+                                for input_id, source in video_inputs:
+                                    converted = _transcode_video_for_retry(
+                                        source,
+                                        task_output_dir,
+                                        label=input_id.split(":", 1)[0],
+                                    )
+                                    converted_file_args.append(f"{input_id}={converted}")
+                                clamped_nodes = _clamp_h3_reference_length(workflow)
+                                if clamped_nodes:
+                                    self._log_stage(
+                                        task_id,
+                                        "prepare",
+                                        f"自动重试将 H3 参考帧数上限钳制为 360（{len(clamped_nodes)} 个节点）",
+                                    )
+                                changes = _apply_file_args(
+                                    client,
+                                    workflow,
+                                    converted_file_args,
+                                    f"{get_site_config(key['site'])['api_host']}/task/openapi/upload",
+                                )
+                                self.store.update_task(
+                                    task_id,
+                                    remote_task_id=None,
+                                    status="submitting",
+                                    progress="VHS_LoadVideo 解码失败，已转码输入视频，准备重试（1/1）",
+                                )
+                                self._log_stage(
+                                    task_id,
+                                    "retry",
+                                    f"VHS_LoadVideo 解码失败，已将 {len(video_inputs)} 个视频转为 H.264/yuv420p 并重新上传重试（1/1）",
+                                    level="warning",
+                                    detail={"inputs": converted_file_args, "uploaded": len(changes)},
+                                )
+                                continue
                         next_instance_type = self._instance_type_after_805(
                             submit_instance_type,
                             retry_805_count,
@@ -6549,6 +7102,121 @@ def _is_video_output(output: dict[str, Any]) -> bool:
     return False
 
 
+def _transcode_video_for_retry(source: Path, task_output_dir: Path, *, label: str = "") -> Path:
+    """Create a local OpenCV-compatible H.264 retry input without touching source."""
+    source = source.expanduser().resolve()
+    if not source.is_file():
+        raise RhCliError("FILE_NOT_FOUND", f"自动转码找不到输入视频：{source}")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RhCliError("VIDEO_TRANSCODE_UNAVAILABLE", "自动转码需要本机安装 ffmpeg。")
+
+    destination_dir = task_output_dir / VIDEO_TRANSCODE_SUBDIR
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"_{safe_name(label, 'video')}" if str(label or "").strip() else ""
+    destination = destination_dir / f"{safe_name(source.stem, 'input')}{suffix}_h264.mp4"
+    temporary = destination_dir / f".{destination.stem}.{uuid.uuid4().hex}.tmp.mp4"
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ar",
+        "48000",
+        "-movflags",
+        "+faststart",
+        str(temporary),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=VIDEO_TRANSCODE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RhCliError("VIDEO_TRANSCODE_FAILED", f"自动转码启动失败：{source.name}") from exc
+    try:
+        if completed.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+            detail = (completed.stderr or "").strip()[-2000:]
+            raise RhCliError(
+                "VIDEO_TRANSCODE_FAILED",
+                f"自动转码失败：{source.name}",
+                detail={"source": str(source), "stderr": detail},
+            )
+        temporary.replace(destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+    # A successful encoder exit alone is not enough: validate that the output
+    # can be decoded frame-by-frame before spending another remote submission.
+    try:
+        validation = subprocess.run(
+            [ffmpeg, "-v", "error", "-i", str(destination), "-map", "0:v:0", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=VIDEO_TRANSCODE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RhCliError("VIDEO_TRANSCODE_FAILED", f"自动转码结果校验启动失败：{destination.name}") from exc
+    if validation.returncode != 0:
+        detail = (validation.stderr or "").strip()[-2000:]
+        raise RhCliError(
+            "VIDEO_TRANSCODE_FAILED",
+            f"自动转码结果无法完整解码：{destination.name}",
+            detail={"source": str(source), "output": str(destination), "stderr": detail},
+        )
+    return destination
+
+
+def _clamp_h3_reference_length(workflow: dict[str, Any]) -> list[str]:
+    """Keep the conventional 15-second H3 frame expression within 360 frames."""
+    changed: list[str] = []
+    nodes = workflow_nodes(workflow)
+    for h3_id, h3_node in nodes.items():
+        if not isinstance(h3_node, dict) or "minimaxh3" not in str(h3_node.get("class_type") or "").lower():
+            continue
+        h3_inputs = h3_node.get("inputs")
+        length_ref = h3_inputs.get("length") if isinstance(h3_inputs, dict) else None
+        if not isinstance(length_ref, list) or not length_ref:
+            continue
+        length_node_id = str(length_ref[0])
+        length_node = nodes.get(length_node_id)
+        length_inputs = length_node.get("inputs") if isinstance(length_node, dict) else None
+        expression = length_inputs.get("expression") if isinstance(length_inputs, dict) else None
+        if not isinstance(expression, str):
+            continue
+        if not re.search(r"round\s*\(\s*a\s*\*\s*24\s*\)", expression):
+            continue
+        if re.search(r"\bmin\s*\(\s*360\s*,", expression):
+            continue
+        length_inputs["expression"] = f"min(360, ({expression}))"
+        changed.append(f"{h3_id}.length←{length_node_id}")
+    return changed
+
+
 def _probe_video_duration(path: Path) -> float:
     """Read a local video's duration without making media parsing a hard dependency."""
     if not path.is_file() or shutil.which("ffprobe") is None:
@@ -6581,13 +7249,82 @@ def _probe_video_duration(path: Path) -> float:
     return 0.0
 
 
+def _probe_video_dimensions(path: Path) -> tuple[int, int] | None:
+    """Read a local video's first video stream dimensions."""
+    if not path.is_file() or shutil.which("ffprobe") is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0:s=x",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    for line in result.stdout.splitlines():
+        width_text, separator, height_text = line.strip().partition("x")
+        if not separator:
+            continue
+        try:
+            width = int(width_text)
+            height = int(height_text)
+        except (TypeError, ValueError):
+            continue
+        if width > 0 and height > 0:
+            return width, height
+    return None
+
+
+def _apply_telegram_video_aspect_ratio(workflow: dict[str, Any], video_path: Path) -> str | None:
+    """Set every ResolutionSelector to match the downloaded video's orientation."""
+    resolution_inputs: list[dict[str, Any]] = []
+    for node in workflow_nodes(workflow).values():
+        if not isinstance(node, dict) or str(node.get("class_type") or "").lower() != "resolutionselector":
+            continue
+        inputs = node.get("inputs")
+        if isinstance(inputs, dict):
+            resolution_inputs.append(inputs)
+    if not resolution_inputs:
+        return None
+
+    dimensions = _probe_video_dimensions(video_path)
+    if not dimensions:
+        raise RhCliError(
+            "TELEGRAM_VIDEO_DIMENSIONS_UNAVAILABLE",
+            f"无法读取下载视频的画面尺寸：{video_path.name}。请检查本机 ffprobe 是否可用。",
+        )
+    width, height = dimensions
+    aspect_ratio = (
+        TELEGRAM_VIDEO_LANDSCAPE_ASPECT_RATIO
+        if width >= height
+        else TELEGRAM_VIDEO_PORTRAIT_ASPECT_RATIO
+    )
+    for inputs in resolution_inputs:
+        inputs["aspect_ratio"] = aspect_ratio
+    return aspect_ratio
+
+
 def _apply_telegram_video_duration(workflow: dict[str, Any], video_path: Path) -> float | None:
-    """Apply a downloaded video's duration to the conventional H3 duration node.
+    """Apply a downloaded video's capped duration to the conventional H3 node.
 
     Telegram video intake supports general single-video workflows, so a
     workflow without node 14 remains unchanged. H3 workflows that expose the
     conventional ``PrimitiveFloat`` node 14 get the measured duration in the
-    task-local workflow copy; the library workflow itself is never modified.
+    task-local workflow copy, capped at 15 seconds; the library workflow
+    itself is never modified.
     """
     node = workflow.get("14") if isinstance(workflow, dict) else None
     inputs = node.get("inputs") if isinstance(node, dict) else None
@@ -6600,7 +7337,7 @@ def _apply_telegram_video_duration(workflow: dict[str, Any], video_path: Path) -
             "TELEGRAM_VIDEO_DURATION_UNAVAILABLE",
             f"无法读取下载视频的实际时长：{video_path.name}。请检查本机 ffprobe 是否可用。",
         )
-    measured = round(duration, 3)
+    measured = min(round(duration, 3), TELEGRAM_VIDEO_MAX_DURATION_SECONDS)
     inputs["value"] = measured
     return measured
 
@@ -6632,9 +7369,12 @@ def _format_metric(value: float, decimals: int = 2) -> str:
 
 
 def _usage_duration_seconds(record: dict[str, Any], current_time: int) -> float:
-    duration = _decimal_value(record.get("duration"))
-    if duration is not None and duration >= 0:
-        return duration
+    # RunningHub's taskCostTime (stored as ``duration``) is milliseconds.
+    # Keep the raw value in the ledger for compatibility, but expose seconds
+    # to the dashboard so a 19-second task is not counted as 19,000 seconds.
+    duration_ms = _decimal_value(record.get("duration"))
+    if duration_ms is not None and duration_ms >= 0:
+        return duration_ms / 1000
     created_at = int(record.get("created_at") or 0)
     completed_at = int(record.get("completed_at") or 0)
     if completed_at and created_at:
@@ -7101,6 +7841,29 @@ def _output_tags(value: Any) -> list[str]:
     return tags
 
 
+OUTPUT_FEATURE_TAGS = {key: value["name"] for key, value in TASK_FEATURES.items()}
+
+
+def output_feature_key(task: dict[str, Any]) -> str:
+    """Return the stable task-subfeature key shown by the output library."""
+    return task_feature_for_task(task)["id"]
+
+
+def output_feature_label(value: Any) -> str:
+    return OUTPUT_FEATURE_TAGS.get(str(value or "").strip(), OUTPUT_FEATURE_TAGS["workflow"])
+
+
+def output_item_feature_key(value: dict[str, Any]) -> str:
+    key = str(value.get("feature") or value.get("feature_key") or "").strip()
+    if key in OUTPUT_FEATURE_TAGS:
+        return key
+    label = str(value.get("feature_tag") or "").strip()
+    for feature_key, feature_label in OUTPUT_FEATURE_TAGS.items():
+        if label == feature_label:
+            return feature_key
+    return "workflow"
+
+
 def matches_public_output_filters(item: dict[str, Any], filters: dict[str, Any] | None = None) -> bool:
     """Apply the output-library folder and filter state to one public artifact."""
     filters = filters or {}
@@ -7144,6 +7907,10 @@ def matches_public_output_filters(item: dict[str, Any], filters: dict[str, Any] 
 
     workflow = str(filters.get("workflow") or "").strip()
     if workflow and str(item.get("task_name") or item.get("workflow_name") or "").strip() != workflow:
+        return False
+
+    feature = str(filters.get("feature") or "").strip()
+    if feature and output_item_feature_key(item) != feature:
         return False
 
     tags = set(_output_tags(item))
@@ -7242,6 +8009,8 @@ def public_output_media(
                 "project_id": str(task.get("project_id") or "").strip(),
                 "project_name": str(task.get("project_name") or "").strip(),
                 "task_name": str(task.get("workflow_name") or task_id),
+                "feature": output_feature_key(task),
+                "feature_tag": output_feature_label(output_feature_key(task)),
                 "task_created_at": int(task.get("created_at") or 0),
                 "rating": rating,
                 "tags": _output_tags(output),
@@ -7275,6 +8044,7 @@ def public_outputs(
     type_counts = {"image": 0, "video": 0, "audio": 0, "other": 0, "text": 0}
     rating_counts = {"unrated": 0, **{str(score): 0 for score in range(1, 6)}}
     tag_counts: dict[str, int] = {"案例": 0}
+    feature_counts: dict[str, int] = {key: 0 for key in OUTPUT_FEATURE_TAGS}
     registered_workflows = [
         item for item in store.workflows()
         if str(item.get("id") or "").strip()
@@ -7289,12 +8059,17 @@ def public_outputs(
         task_output_root = Path(str(task.get("output_dir") or "")).expanduser().resolve()
         task_workflow_path = Path(str(task.get("workflow_path") or "")).expanduser()
         task_snapshot_path = LocalStore.task_snapshot_path(task)
-        workflow_available = task_snapshot_path.is_file() or task_workflow_path.is_file()
+        task_manifest_path = LocalStore.task_manifest_path(task)
+        workflow_available = task_snapshot_path.is_file() or task_workflow_path.is_file() or task_manifest_path.is_file()
+        task_type = str(task.get("task_type") or "workflow").strip().lower()
+        task_workflow_id = str(task.get("workflow_id") or task.get("remote_workflow_id") or task.get("local_workflow_id") or "").strip()
         registered_workflow_id = _dashboard_registered_workflow_id(task, registered_workflows)
         account_id = str(task.get("account_id") or "").strip()
         project_id = str(task.get("project_id") or "").strip()
         project_name = str(task.get("project_name") or "").strip()
         project_path = str(task.get("project_path") or "").strip()
+        feature = output_feature_key(task)
+        feature_tag = output_feature_label(feature)
         for output_index, output in enumerate(task.get("outputs") or []):
             if not isinstance(output, dict):
                 continue
@@ -7323,6 +8098,8 @@ def public_outputs(
                         "node_id": str(output.get("node_id") or ""),
                         "task_id": task_id,
                         "registered_workflow_id": registered_workflow_id,
+                        "workflow_id": task_workflow_id,
+                        "task_type": task_type,
                         "account_id": account_id,
                         "project_id": project_id,
                         "project_name": project_name,
@@ -7332,6 +8109,8 @@ def public_outputs(
                         "rating": rating,
                         "tags": tags,
                         "task_name": str(task.get("workflow_name") or task_id),
+                        "feature": feature,
+                        "feature_tag": feature_tag,
                         "task_status": str(task.get("status") or ""),
                         "task_created_at": int(task.get("created_at") or 0),
                         "task_completed_at": int(task.get("completed_at") or 0),
@@ -7340,6 +8119,7 @@ def public_outputs(
                     }
                 )
                 rating_counts[str(rating) if rating else "unrated"] += 1
+                feature_counts[feature] += 1
                 continue
 
             if kind != "file":
@@ -7380,6 +8160,8 @@ def public_outputs(
                     "node_id": str(output.get("node_id") or ""),
                     "task_id": task_id,
                     "registered_workflow_id": registered_workflow_id,
+                    "workflow_id": task_workflow_id,
+                    "task_type": task_type,
                     "account_id": account_id,
                     "project_id": project_id,
                     "project_name": project_name,
@@ -7389,6 +8171,8 @@ def public_outputs(
                     "rating": rating,
                     "tags": tags,
                     "task_name": str(task.get("workflow_name") or task_id),
+                    "feature": feature,
+                    "feature_tag": feature_tag,
                     "task_status": str(task.get("status") or ""),
                     "task_created_at": int(task.get("created_at") or 0),
                     "task_completed_at": int(task.get("completed_at") or 0),
@@ -7400,6 +8184,7 @@ def public_outputs(
                 }
             )
             rating_counts[str(rating) if rating else "unrated"] += 1
+            feature_counts[feature] += 1
 
     artifacts.sort(key=lambda item: int(item.get("modified_at") or item.get("task_created_at") or 0), reverse=True)
     return {
@@ -7410,6 +8195,7 @@ def public_outputs(
             "tasks": len({item["task_id"] for item in artifacts}),
             "rating_counts": rating_counts,
             "tag_counts": tag_counts,
+            "feature_counts": feature_counts,
             **type_counts,
         },
     }

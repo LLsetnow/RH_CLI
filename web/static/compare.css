@@ -38,12 +38,13 @@
 .compare-workspace { min-width: 0; padding: 22px; }
 .compare-workspace-heading h2 { margin-top: 6px; }
 .compare-workspace-heading p { margin-top: 7px; color: var(--subtle); font-size: 10px; line-height: 1.55; }
-.compare-workspace-actions { display: flex; align-items: flex-start; gap: 8px; }
-.compare-mode-tabs { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-deep); }
-.compare-mode { min-height: 31px; padding: 0 10px; border: 0; border-radius: 7px; color: var(--subtle); background: transparent; font-size: 10px; transition: color var(--motion-interaction) ease, background var(--motion-interaction) ease, opacity var(--motion-interaction) ease; }
+.compare-workspace-actions { --compare-action-height: 36px; --compare-action-width: 64px; display: flex; align-items: flex-start; gap: 8px; }
+.compare-mode-tabs { display: inline-flex; align-items: center; gap: 3px; width: calc(var(--compare-action-width) * 2 + 3px + 8px); height: var(--compare-action-height); box-sizing: border-box; padding: 3px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-deep); }
+.compare-mode { display: inline-flex; flex: 0 0 var(--compare-action-width); align-items: center; justify-content: center; width: var(--compare-action-width); height: 28px; min-height: 0; box-sizing: border-box; padding: 0; border: 0; border-radius: 7px; color: var(--subtle); background: transparent; font-size: 10px; transition: color var(--motion-interaction) ease, background var(--motion-interaction) ease, opacity var(--motion-interaction) ease; }
 .compare-mode:hover, .compare-mode.active { color: var(--ink); background: var(--accent-soft); }
 .compare-mode.active { color: var(--accent); }
 .compare-mode:disabled { cursor: not-allowed; opacity: .38; }
+.compare-workspace-actions > .button-compact { width: var(--compare-action-width); height: var(--compare-action-height); min-height: 0; box-sizing: border-box; padding: 0; white-space: nowrap; }
 .compare-stage { position: relative; min-height: clamp(420px, 59vh, 690px); margin-top: 20px; overflow: hidden; border: 1px solid var(--border-stage); border-radius: 15px; background: var(--surface-media); box-shadow: inset 0 0 0 1px var(--light-ghost), 0 18px 42px var(--shadow-medium); outline: none; }
 .compare-stage.is-fullscreen { position: fixed; z-index: 30; inset: 0; width: 100vw; height: 100vh; min-height: 0; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
 .compare-fullscreen-close { position: fixed; z-index: 31; top: 18px; right: 18px; display: grid; width: 38px; height: 38px; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 11px; color: var(--ink); background: var(--surface-control); box-shadow: 0 12px 30px var(--shadow-medium); font-size: 24px; line-height: 1; cursor: pointer; }
@@ -145,9 +146,9 @@
   .compare-workspace { padding: 14px; }
   .compare-workspace-heading { flex-direction: column; }
   .compare-workspace-actions { width: 100%; flex-wrap: wrap; }
-  .compare-mode-tabs { flex: 1; }
-  .compare-mode { flex: 1; }
-  .compare-workspace-actions > .button-compact { flex: 0 0 auto; }
+  .compare-mode-tabs { width: auto; flex: 1; }
+  .compare-mode { width: auto; flex: 1; }
+  .compare-workspace-actions > .button-compact { width: auto; flex: 0 0 auto; }
   .compare-stage { min-height: 96vw; margin-top: 15px; }
   .compare-split-view { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
   .compare-pane-tag { top: 8px; left: 8px; }

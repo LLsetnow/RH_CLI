@@ -5,7 +5,7 @@
 在仓库根目录启动纯 Web 版：
 
 ```bash
-./web/start.sh --no-browser
+./web/scripts/start.sh --no-browser
 ```
 
 macOS Electron 开发版：
@@ -21,7 +21,7 @@ Electron 会启动本地 Python 服务并打开桌面窗口。输入文件通过
 ## 修改前的检查
 
 1. 先确认目标页面和已有的公共类名，避免在多个页面重复定义同一控件。
-2. 涉及任务字段时，检查前端草稿、`server.py` 请求处理和 `app.py` 持久化是否仍使用同一字段名。
+2. 涉及任务字段时，检查前端草稿、`backend/server.py` 请求处理和 `backend/app.py` 持久化是否仍使用同一字段名。
 3. 涉及文件输入时，区分“保存路径”“本地预览”和“远程上传”三个阶段，不要为普通输入文件增加项目内复制。
 4. 涉及任务历史时，保留现有的 API 快照、阶段日志、`error_detail` 和重启恢复逻辑。
 

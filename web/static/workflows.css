@@ -78,7 +78,9 @@
 .workflow-group-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(315px, 1fr)); gap: 10px; }
 .workflow-card { display: flex; min-width: 0; min-height: 204px; padding: 15px; flex-direction: column; border: 1px solid var(--line-soft); border-radius: 14px; background: var(--panel-glass); box-shadow: var(--shadow); cursor: grab; transition: border-color var(--motion-interaction) ease, background var(--motion-interaction) ease, transform var(--motion-interaction) ease, box-shadow var(--motion-interaction) ease; }
 .workflow-card:active { cursor: grabbing; }
-.workflow-card.is-dragging { opacity: .45; }
+.workflow-card.is-dragging { opacity: .45; transform: scale(.985); }
+.workflow-card.is-sort-target { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-ghost); }
+.workflow-card:focus-within { border-color: var(--accent); }
 .workflow-card:hover { border-color: var(--accent-strong); background: var(--surface-raised); transform: translateY(-2px); }
 .workflow-card.is-unbound { border-color: var(--warm-fill); }
 .workflow-card-body { display: block; width: 100%; min-width: 0; flex: 1 1 auto; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
@@ -104,6 +106,7 @@
 .workflow-node-summary span strong { color: var(--muted); font-weight: 700; }
 .workflow-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 9px; margin-top: auto; padding-top: 14px; }
 .workflow-card-time { color: var(--subtle); font-size: 9px; }
+.workflow-card[draggable="true"] { user-select: none; }
 .workflow-empty { padding: 50px 20px; border: 1px dashed var(--line); border-radius: 14px; color: var(--subtle); text-align: center; }
 .workflow-empty strong, .workflow-empty span { display: block; }
 .workflow-empty strong { color: var(--muted); font-size: 12px; }
@@ -181,6 +184,14 @@
   .workflow-config-add-grid button { width: 100%; }
   .workflow-config-required { min-height: 0; }
   .workflow-card-footer { align-items: flex-start; flex-direction: column; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-card,
+  .workflow-folder-card,
+  .workflow-import-dropzone,
+  .workflow-folder-collection,
+  .workflow-unclassified-drop { transition: none; }
 }
 
 :root[data-theme="light"] .workflow-hero-stat,

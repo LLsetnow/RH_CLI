@@ -15,11 +15,14 @@
   var editingResourceId = "";
   var pendingResourceMedia = {};
   var activeResourceMediaRole = "image";
+  var resourceMediaType = "image";
   var depthGenerationBusy = false;
   var skeletonGenerationBusy = false;
+  var videoGenerationBusy = false;
   var visionRecognitionBusy = false;
   var depthImportActionId = "";
   var workflowImportAsset = null;
+  var workflowImportMediaKind = "image";
   var poseMediaImportType = "depth";
   var GRID_SPLITTER_STORAGE_KEY = "rh-workflow-desk-prompt-library-width-v2";
   var gridSplitterDrag = null;
@@ -31,7 +34,7 @@
   var mediaPreviewRequests = {};
   var focusPromptUpdatePending = false;
   var libraryRatingBusy = {};
-  var libraryImageContext = { src: "", title: "" };
+  var libraryImageContext = { src: "", title: "", target: null };
   var libraryImageCopyBusy = false;
   var REFERENCE_SENTINEL_PREFIX = "__RH_REF_";
   var REFERENCE_MODES = ["character", "audio", "background", "clothes"];
@@ -48,6 +51,18 @@
     clothes: [{ role: "image", label: "服装图片", accept: "image/*", pathId: "resourceImagePath", paste: true }],
     audio: [{ role: "audio", label: "音频文件", accept: "audio/*", pathId: "resourceAudioPath", paste: false }],
   };
+  var ACTION_VIDEO_MEDIA_SLOTS = [
+    { role: "video", label: "原视频", accept: "video/*", pathId: "resourceVideoPath", paste: false },
+    { role: "depth_video", label: "深度视频", accept: "video/*", pathId: "resourceDepthVideoPath", paste: false },
+    { role: "skeleton_video", label: "骨骼视频", accept: "video/*", pathId: "resourceSkeletonVideoPath", paste: false },
+    { role: "depth_skeleton_video", label: "深度+骨骼视频", accept: "video/*", pathId: "resourceDepthSkeletonVideoPath", paste: false },
+  ];
+  var ACTION_VIDEO_IMPORT_SLOTS = [
+    { kind: "video", label: "原视频", endpoint: "video-path", availableKey: "video_available", urlKey: "video_url" },
+    { kind: "depth_video", label: "深度视频", endpoint: "depth-video-path", availableKey: "depth_video_available", urlKey: "depth_video_url" },
+    { kind: "skeleton_video", label: "骨骼视频", endpoint: "skeleton-video-path", availableKey: "skeleton_video_available", urlKey: "skeleton_video_url" },
+    { kind: "depth_skeleton_video", label: "深度+骨骼视频", endpoint: "depth-skeleton-video-path", availableKey: "depth_skeleton_video_available", urlKey: "depth_skeleton_video_url" },
+  ];
   var state = { libraryBlocks: [], actions: [], actionSource: null, references: [], referenceSource: null, libraryMode: "blocks", assemblyView: "stage", libraryExpanded: false, stage: [], groups: [], activeGroupId: "", categoryFilter: "全部", filter: "全部", search: "", draggedIndex: null, draggedLibraryId: "", dragPreviewIndex: null, dragPreviewFrames: [], pointerDrag: null };
 
   function $(id) { return document.getElementById(id); }
@@ -90,11 +105,21 @@
       color_image_path: candidate.colorImagePath || "",
       depth_image_path: candidate.depthImagePath || "",
       skeleton_image_path: candidate.skeletonImagePath || "",
+      media_type: candidate.mediaType || "",
+      video_path: candidate.videoPath || "",
+      depth_video_path: candidate.depthVideoPath || "",
+      skeleton_video_path: candidate.skeletonVideoPath || "",
+      depth_skeleton_video_path: candidate.depthSkeletonVideoPath || "",
       image_url: candidate.imageUrl || "",
       image_path: candidate.imagePath || "",
       audio_url: candidate.audioUrl || "",
       audio_path: candidate.audioPath || "",
       media_type: candidate.mediaType || "",
+      video_url: candidate.videoUrl || "",
+      depth_video_url: candidate.depthVideoUrl || "",
+      skeleton_video_url: candidate.skeletonVideoUrl || "",
+      depth_skeleton_video_url: candidate.depthSkeletonVideoUrl || "",
+      video_kind: candidate.videoKind || "",
       reference_kind: candidate.referenceKind || "",
     };
   }
@@ -109,7 +134,7 @@
     if (sourceType === "action") {
       var action = state.actions.find(function (item) { return String(item.id) === id; });
       if (!action) return null;
-      return { key: "action:" + id, sourceType: "action", sourceId: id, title: action.title, text: action.text || "", tags: action.tags || [], category: action.category || "未分类", colorImageUrl: action.color_image_url || action.image_url || "", depthImageUrl: action.depth_image_url || "", skeletonImageUrl: action.skeleton_image_url || "", colorImagePath: action.color_image_path || action.image_path || "", depthImagePath: action.depth_image_path || "", skeletonImagePath: action.skeleton_image_path || "", pairStatus: action.pair_status || "", sourceLabel: "动作库" };
+      return { key: "action:" + id, sourceType: "action", sourceId: id, title: action.title, text: action.text || "", tags: action.tags || [], category: action.category || "未分类", colorImageUrl: action.color_image_url || action.image_url || "", depthImageUrl: action.depth_image_url || "", skeletonImageUrl: action.skeleton_image_url || "", colorImagePath: action.color_image_path || action.image_path || "", depthImagePath: action.depth_image_path || "", skeletonImagePath: action.skeleton_image_path || "", mediaType: action.media_type || "", videoPath: action.video_path || "", depthVideoPath: action.depth_video_path || "", skeletonVideoPath: action.skeleton_video_path || "", depthSkeletonVideoPath: action.depth_skeleton_video_path || "", videoUrl: action.video_url || "", depthVideoUrl: action.depth_video_url || "", skeletonVideoUrl: action.skeleton_video_url || "", depthSkeletonVideoUrl: action.depth_skeleton_video_url || "", pairStatus: action.pair_status || "", sourceLabel: "动作库" };
     }
     var reference = state.references.find(function (item) { return String(item.id) === id; });
     if (!reference) return null;
@@ -166,6 +191,16 @@
       depthImagePath: segment.snapshot && segment.snapshot.depth_image_path || "",
       skeletonImagePath: segment.snapshot && segment.snapshot.skeleton_image_path || "",
       skeletonImageUrl: segment.snapshot && segment.snapshot.skeleton_image_url || "",
+      mediaType: segment.snapshot && segment.snapshot.media_type || "",
+      videoPath: segment.snapshot && segment.snapshot.video_path || "",
+      depthVideoPath: segment.snapshot && segment.snapshot.depth_video_path || "",
+      skeletonVideoPath: segment.snapshot && segment.snapshot.skeleton_video_path || "",
+      depthSkeletonVideoPath: segment.snapshot && segment.snapshot.depth_skeleton_video_path || "",
+      videoUrl: segment.snapshot && segment.snapshot.video_url || "",
+      depthVideoUrl: segment.snapshot && segment.snapshot.depth_video_url || "",
+      skeletonVideoUrl: segment.snapshot && segment.snapshot.skeleton_video_url || "",
+      depthSkeletonVideoUrl: segment.snapshot && segment.snapshot.depth_skeleton_video_url || "",
+      videoKind: segment.snapshot && segment.snapshot.video_kind || "",
       imageUrl: segment.snapshot && (segment.snapshot.image_url || segment.snapshot.color_image_url) || "",
       imagePath: segment.snapshot && segment.snapshot.image_path || "",
       audioUrl: segment.snapshot && segment.snapshot.audio_url || "",
@@ -464,6 +499,16 @@
         depth_image_path: item.depthImagePath || "",
         skeleton_image_url: item.skeletonImageUrl || "",
         skeleton_image_path: item.skeletonImagePath || "",
+        media_type: item.mediaType || "",
+        video_url: item.videoUrl || "",
+        video_path: item.videoPath || "",
+        depth_video_url: item.depthVideoUrl || "",
+        depth_video_path: item.depthVideoPath || "",
+        skeleton_video_url: item.skeletonVideoUrl || "",
+        skeleton_video_path: item.skeletonVideoPath || "",
+        depth_skeleton_video_url: item.depthSkeletonVideoUrl || "",
+        depth_skeleton_video_path: item.depthSkeletonVideoPath || "",
+        video_kind: item.videoKind || "",
         pair_status: item.pairStatus || "",
       };
     } else if (item.kind === "reference") {
@@ -548,11 +593,21 @@
       colorImageUrl: source ? (source.color_image_url || source.image_url || "") : (snapshot.color_image_url || ""),
       imagePath: source ? (source.color_image_path || source.image_path || "") : (snapshot.color_image_path || snapshot.image_path || ""),
       colorImagePath: source ? (source.color_image_path || source.image_path || "") : (snapshot.color_image_path || snapshot.image_path || ""),
-      depthImageUrl: source ? (source.depth_image_url || "") : (snapshot.depth_image_url || ""),
-      depthImagePath: source ? (source.depth_image_path || "") : (snapshot.depth_image_path || ""),
-      skeletonImageUrl: source ? (source.skeleton_image_url || "") : (snapshot.skeleton_image_url || ""),
-      skeletonImagePath: source ? (source.skeleton_image_path || "") : (snapshot.skeleton_image_path || ""),
-      pairStatus: source ? (source.pair_status || "") : (snapshot.pair_status || ""),
+        depthImageUrl: source ? (source.depth_image_url || "") : (snapshot.depth_image_url || ""),
+        depthImagePath: source ? (source.depth_image_path || "") : (snapshot.depth_image_path || ""),
+        skeletonImageUrl: source ? (source.skeleton_image_url || "") : (snapshot.skeleton_image_url || ""),
+        skeletonImagePath: source ? (source.skeleton_image_path || "") : (snapshot.skeleton_image_path || ""),
+        mediaType: source ? (source.media_type || "") : (snapshot.media_type || ""),
+        videoPath: source ? (source.video_path || "") : (snapshot.video_path || ""),
+        depthVideoPath: source ? (source.depth_video_path || "") : (snapshot.depth_video_path || ""),
+        skeletonVideoPath: source ? (source.skeleton_video_path || "") : (snapshot.skeleton_video_path || ""),
+        depthSkeletonVideoPath: source ? (source.depth_skeleton_video_path || "") : (snapshot.depth_skeleton_video_path || ""),
+        videoUrl: source ? (source.video_url || "") : (snapshot.video_url || ""),
+        depthVideoUrl: source ? (source.depth_video_url || "") : (snapshot.depth_video_url || ""),
+        skeletonVideoUrl: source ? (source.skeleton_video_url || "") : (snapshot.skeleton_video_url || ""),
+        depthSkeletonVideoUrl: source ? (source.depth_skeleton_video_url || "") : (snapshot.depth_skeleton_video_url || ""),
+        videoKind: snapshot.video_kind || "",
+        pairStatus: source ? (source.pair_status || "") : (snapshot.pair_status || ""),
       missing: !source,
     };
   }
@@ -835,7 +890,35 @@
     }
   }
   function actionMediaMarkup(action, extraClass) {
-    var title = action.title || "动作图片";
+    var title = action.title || (action.media_type === "video" ? "动作视频" : "动作图片");
+    var mediaType = String(action.media_type || "image").toLowerCase() === "video" ? "video" : "image";
+    if (mediaType === "video") {
+      var videoVariants = [
+        { kind: "video", label: "原视频", url: action.video_url || "", available: action.video_available },
+        { kind: "depth_video", label: "深度视频", url: action.depth_video_url || "", available: action.depth_video_available },
+        { kind: "skeleton_video", label: "骨骼视频", url: action.skeleton_video_url || "", available: action.skeleton_video_available },
+        { kind: "depth_skeleton_video", label: "深度+骨骼视频", url: action.depth_skeleton_video_url || "", available: action.depth_skeleton_video_available },
+      ];
+      var preferredKind = action.videoKind || action.video_kind || "";
+      var firstAvailable = videoVariants.find(function (variant) { return variant.kind === preferredKind && variant.available && variant.url; }) || videoVariants.find(function (variant) { return variant.available && variant.url; });
+      var videos = videoVariants.map(function (variant) {
+        var available = Boolean(variant.available && variant.url);
+        if (!available) return '<div class="action-media-missing action-media-video" data-action-media-video="' + esc(variant.kind) + '" hidden><span>' + esc(variant.label) + '缺失</span></div>';
+        var active = firstAvailable && firstAvailable.kind === variant.kind;
+        return '<video class="action-media-video' + (active ? " is-active" : "") + '" data-action-media-video="' + esc(variant.kind) + '" data-action-media-available="true"' + (active ? "" : " hidden") + ' autoplay muted loop playsinline preload="metadata" src="' + esc(variant.url) + '" aria-label="' + esc(title + " · " + variant.label) + '"></video>';
+      }).join("");
+      var availableCount = videoVariants.filter(function (variant) { return variant.available && variant.url; }).length;
+      var initialKind = firstAvailable ? firstAvailable.kind : "video";
+      var initialLabel = firstAvailable ? firstAvailable.label : "原视频";
+      var toggle = availableCount > 1
+        ? '<button class="action-media-toggle" type="button" data-action-media-toggle data-action-media-current="' + esc(initialKind) + '" aria-label="当前显示' + esc(initialLabel) + '，点击切换" title="当前：' + esc(initialLabel) + '；点击切换到下一个视频"></button>'
+        : "";
+      return '<div class="action-media-shell action-media-shell-video ' + (extraClass || "") + '" data-action-media>' +
+        '<div class="action-media-viewport">' + videos + '</div>' +
+        '<span class="action-media-caption" data-action-media-caption>' + esc(initialLabel) + '</span>' +
+        toggle +
+        '</div>';
+    }
     var colorUrl = action.color_image_url || action.image_url || "";
     var depthUrl = action.depth_image_url || "";
     var skeletonUrl = action.skeleton_image_url || "";
@@ -938,8 +1021,8 @@
     });
   }
   function actionMediaKinds(container) {
-    return ["color", "depth", "skeleton"].filter(function (kind) {
-      return Boolean(container && container.querySelector('[data-action-media-image="' + kind + '"][data-action-media-available="true"]'));
+    return ["color", "depth", "skeleton", "video", "depth_video", "skeleton_video", "depth_skeleton_video"].filter(function (kind) {
+      return Boolean(container && container.querySelector('[data-action-media-image="' + kind + '"][data-action-media-available="true"], [data-action-media-video="' + kind + '"][data-action-media-available="true"]'));
     });
   }
   function nextActionMediaKind(container, current) {
@@ -949,17 +1032,27 @@
     return kinds[(index + 1 + kinds.length) % kinds.length];
   }
   function setActionMediaView(container, kind) {
-    if (!container || ["color", "depth", "skeleton"].indexOf(kind) === -1) return;
-    var target = container.querySelector('[data-action-media-image="' + kind + '"][data-action-media-available="true"]');
+    if (!container || ["color", "depth", "skeleton", "video", "depth_video", "skeleton_video", "depth_skeleton_video"].indexOf(kind) === -1) return;
+    var target = container.querySelector('[data-action-media-image="' + kind + '"][data-action-media-available="true"], [data-action-media-video="' + kind + '"][data-action-media-available="true"]');
     if (!target) return;
-    container.querySelectorAll("[data-action-media-image]").forEach(function (image) {
-      image.hidden = image.dataset.actionMediaImage !== kind;
-      image.classList.toggle("is-active", image.dataset.actionMediaImage === kind);
+    container.querySelectorAll("[data-action-media-image], [data-action-media-video]").forEach(function (media) {
+      var mediaKind = media.dataset.actionMediaImage || media.dataset.actionMediaVideo;
+      var active = mediaKind === kind;
+      media.hidden = !active;
+      media.classList.toggle("is-active", active);
+      if (media.tagName === "VIDEO") {
+        if (active) {
+          var playResult = media.play();
+          if (playResult && typeof playResult.catch === "function") playResult.catch(function () {});
+        } else {
+          media.pause();
+        }
+      }
     });
     var toggle = container.querySelector("[data-action-media-toggle]");
     if (toggle) {
       var nextKind = nextActionMediaKind(container, kind);
-      var labels = { color: "原图", depth: "深度图", skeleton: "骨骼图" };
+      var labels = { color: "原图", depth: "深度图", skeleton: "骨骼图", video: "原视频", depth_video: "深度视频", skeleton_video: "骨骼视频", depth_skeleton_video: "深度+骨骼视频" };
       var currentLabel = labels[kind];
       var nextLabel = labels[nextKind];
       toggle.dataset.actionMediaCurrent = kind;
@@ -968,6 +1061,16 @@
       toggle.setAttribute("aria-label", "当前显示" + currentLabel + "，点击切换到" + nextLabel);
       toggle.title = "当前：" + currentLabel + "；点击切换到" + nextLabel;
     }
+    var caption = container.querySelector("[data-action-media-caption]");
+    if (caption) caption.textContent = ({ color: "原图", depth: "深度图", skeleton: "骨骼图", video: "原视频", depth_video: "深度视频", skeleton_video: "骨骼视频", depth_skeleton_video: "深度+骨骼视频" }[kind] || "媒体");
+    var stage = container.closest("[data-stage-index]");
+    if (stage && ACTION_VIDEO_IMPORT_SLOTS.some(function (slot) { return slot.kind === kind; })) {
+      var stageIndex = Number(stage.dataset.stageIndex);
+      if (Number.isInteger(stageIndex) && state.stage[stageIndex] && state.stage[stageIndex].kind === "action") {
+        state.stage[stageIndex].videoKind = kind;
+        saveState();
+      }
+    }
   }
   function actionPairLabel(action) {
     var labels = {
@@ -975,11 +1078,14 @@
       missing_color: "缺少原图",
       missing_both: "原图与深度图缺失",
       mismatched: "文件名未匹配",
+      missing_video: "缺少原视频",
+      video_partial: "视频变体不完整",
+      video_ready: "视频变体已配齐",
     };
     return labels[action.pair_status] || action.pair_message || "待检查配对";
   }
   function actionPairClass(action) {
-    return action.pair_status === "paired" ? "is-paired" : "is-warning";
+    return action.pair_status === "paired" || action.pair_status === "video_ready" ? "is-paired" : "is-warning";
   }
   function readTaskDraft() {
     try {
@@ -1030,6 +1136,38 @@
       endpoint: skeleton ? "skeleton-path" : "depth-path",
     };
   }
+  function camelCaseKey(value) {
+    return String(value || "").replace(/_([a-z])/g, function (_, letter) { return letter.toUpperCase(); });
+  }
+  function actionMediaProperty(action, snakeKey, fallback) {
+    if (!action) return "";
+    var camelKey = camelCaseKey(snakeKey);
+    if (action[snakeKey] != null && action[snakeKey] !== "") return action[snakeKey];
+    if (camelKey && action[camelKey] != null && action[camelKey] !== "") return action[camelKey];
+    return fallback == null ? "" : fallback;
+  }
+  function actionVideoImportInfos(action) {
+    return ACTION_VIDEO_IMPORT_SLOTS.map(function (slot) {
+      var url = actionMediaProperty(action, slot.urlKey);
+      var path = actionMediaProperty(action, slot.urlKey.replace(/_url$/, "_path"));
+      var availableValue = actionMediaProperty(action, slot.availableKey, url || path);
+      return {
+        kind: slot.kind,
+        label: slot.label,
+        endpoint: slot.endpoint,
+        available: Boolean(availableValue && (url || path)),
+        url: String(url || ""),
+        path: String(path || ""),
+      };
+    });
+  }
+  function actionWorkflowImportInfo(action, preferredKind) {
+    if (String(action && action.media_type || "").toLowerCase() === "video") {
+      var infos = actionVideoImportInfos(action);
+      return infos.find(function (item) { return item.kind === preferredKind && item.available; }) || infos.find(function (item) { return item.available; }) || infos[0];
+    }
+    return actionPoseImportInfo(action);
+  }
   function applySettingsSnapshot(snapshot) {
     var settings = snapshot && snapshot.settings && typeof snapshot.settings === "object" ? snapshot.settings : {};
     poseMediaImportType = normalizePoseMediaImportType(settings.pose_media_import_type);
@@ -1041,13 +1179,25 @@
       var mediaPath = String(candidate.mediaPath || candidate.path || "");
       var mediaKind = String(candidate.mediaKind || candidate.mediaType || "").toLowerCase();
       if (!mediaKind) mediaKind = mediaKindFromPath(mediaPath);
-      if (!mediaPath || ["image", "audio"].indexOf(mediaKind) === -1) return null;
+      if (!mediaPath || ["image", "audio", "video"].indexOf(mediaKind) === -1) return null;
       return { kind: mediaKind, path: mediaPath, endpoint: "", label: candidate.title || candidate.mediaName || "参考媒体", sourceType: "media", sourceId: sourceId || mediaPath };
     }
     var referenceKind = String(candidate.referenceKind || "").toLowerCase();
     var mediaType = String(candidate.mediaType || "").toLowerCase();
     var isAction = candidate.sourceType === "action";
     var isAudio = candidate.sourceType === "reference" && (referenceKind === "audio" || mediaType === "audio" || (!candidate.imagePath && candidate.audioPath));
+    var isVideo = (isAction && mediaType === "video") || (candidate.sourceType === "reference" && (mediaType === "video" || candidate.videoPath));
+    if (isVideo) {
+      var preferredVideoKind = String(candidate.videoKind || candidate.video_kind || "");
+      var videoInfos = actionVideoImportInfos(candidate);
+      var videoInfo = videoInfos.find(function (item) { return item.kind === preferredVideoKind && item.available; }) || videoInfos.find(function (item) { return item.available; });
+      var videoPath = String((videoInfo && videoInfo.path) || candidate.videoPath || "");
+      var videoEndpoint = "";
+      if (candidate.sourceType === "action" && sourceId && videoInfo) videoEndpoint = "/api/prompt/actions/" + encodeURIComponent(sourceId) + "/" + videoInfo.endpoint;
+      else if (candidate.sourceType === "reference" && sourceId) videoEndpoint = "/api/prompt/references/" + encodeURIComponent(sourceId) + "/video-path";
+      if (!videoPath && !videoEndpoint) return null;
+      return { kind: "video", path: videoPath, endpoint: videoEndpoint, label: candidate.title || "参考视频", sourceType: candidate.sourceType, sourceId: sourceId, videoKind: videoInfo ? videoInfo.kind : preferredVideoKind };
+    }
     var poseImportInfo = isAction ? actionPoseImportInfo(candidate) : null;
     if (isAction && !poseImportInfo.available) return null;
     var kind = isAudio ? "audio" : "image";
@@ -1065,7 +1215,12 @@
     if (!path && !endpoint) return null;
     return { kind: kind, path: path, endpoint: endpoint, label: candidate.title || "参考媒体", sourceType: candidate.sourceType, sourceId: sourceId };
   }
-  function stageReferenceCandidate(item) {
+  function stageActionMediaKind(index, fallback) {
+    var stage = index == null ? null : document.querySelector('[data-stage-index="' + String(index) + '"]');
+    var toggle = stage && stage.querySelector("[data-action-media-toggle]");
+    return (toggle && toggle.dataset.actionMediaCurrent) || String(fallback || "");
+  }
+  function stageReferenceCandidate(item, index) {
     if (item && item.kind === "media") {
       return {
         sourceType: "media",
@@ -1077,7 +1232,7 @@
       };
     }
     if (!item || (item.kind !== "action" && item.kind !== "reference")) return null;
-    return referenceCandidate(item.kind, item.sourceId) || {
+    var candidate = referenceCandidate(item.kind, item.sourceId) || {
       sourceType: item.kind,
       sourceId: item.sourceId || "",
       referenceKind: item.referenceKind || "",
@@ -1087,7 +1242,19 @@
       colorImagePath: item.colorImagePath || item.imagePath || "",
       audioPath: item.audioPath || "",
       mediaType: item.mediaType || "",
+      videoPath: item.videoPath || "",
+      depthVideoPath: item.depthVideoPath || "",
+      skeletonVideoPath: item.skeletonVideoPath || "",
+      depthSkeletonVideoPath: item.depthSkeletonVideoPath || "",
+      videoUrl: item.videoUrl || "",
+      depthVideoUrl: item.depthVideoUrl || "",
+      skeletonVideoUrl: item.skeletonVideoUrl || "",
+      depthSkeletonVideoUrl: item.depthSkeletonVideoUrl || "",
     };
+    if (item.kind === "action" && String(candidate.mediaType || item.mediaType || "").toLowerCase() === "video") {
+      candidate.videoKind = stageActionMediaKind(index, item.videoKind || candidate.videoKind || "video");
+    }
+    return candidate;
   }
   function stageTextEditorSegments(item, index) {
     var editor = document.querySelector('[data-stage-text="' + index + '"]');
@@ -1109,7 +1276,7 @@
     }
     state.stage.forEach(function (item, index) {
       // A media card can be present directly or referenced from a free-text card with @.
-      add(stageReferenceCandidate(item));
+      add(stageReferenceCandidate(item, index));
       if (item.kind === "text") stageTextEditorSegments(item, index).forEach(function (segment) { add(segmentCandidate(segment)); });
     });
     return result;
@@ -1125,7 +1292,7 @@
     button.textContent = "插入对象定义";
     button.title = count
       ? "按当前工作台顺序插入 " + count + " 个媒体对象定义，不调用翻译或大模型"
-      : "请先在工作台加入至少一个图片或音频素材";
+      : "请先在工作台加入至少一个图片、音频或视频素材";
   }
   function subjectDefinitionRole(entry) {
     var media = entry.media || {};
@@ -1135,6 +1302,10 @@
       if (referenceKind === "character") return "the character's voice";
       if (referenceKind === "audio") return "the background music or environmental sound";
       return "the reference audio";
+    }
+    if (media.kind === "video") {
+      if (media.sourceType === "action" || referenceKind === "action") return "the action, timing, and temporal structure";
+      return "the reference video's motion, timing, and camera structure";
     }
     if (media.sourceType === "media") return "the target video's first frame";
     if (media.sourceType === "action" || referenceKind === "action") return "the character's pose";
@@ -1149,6 +1320,10 @@
     if (media.kind === "audio") {
       counters.audio += 1;
       return { key: media.sourceType + ":" + media.sourceId + ":" + media.kind, line: "<Audio " + counters.audio + "> is a reference for " + role + "." };
+    }
+    if (media.kind === "video") {
+      counters.video += 1;
+      return { key: media.sourceType + ":" + media.sourceId + ":" + media.kind, line: "<Video " + counters.video + "> is a reference for " + role + "." };
     }
     counters.image += 1;
     if (media.sourceType === "media") {
@@ -1189,7 +1364,7 @@
     };
   }
   function insertSubjectDefinitions(entries) {
-    var counters = { image: 0, audio: 0 };
+    var counters = { image: 0, audio: 0, video: 0 };
     var definitions = entries.map(function (entry) { return subjectDefinitionLine(entry, counters); });
     var definitionsByKey = {};
     definitions.forEach(function (definition, index) {
@@ -1232,7 +1407,7 @@
   }
   function generateSubjectDefinitions() {
     var entries = subjectDefinitionMedia();
-    if (!entries.length) return showToast("请先在工作台加入至少一个图片或音频素材", true);
+    if (!entries.length) return showToast("请先在工作台加入至少一个图片、音频或视频素材", true);
     insertSubjectDefinitions(entries);
     showToast("已按媒体顺序插入对象定义（纯算法）");
   }
@@ -1305,7 +1480,7 @@
       var node = workflow[String(nodeId)];
       if (!node || !node.inputs || typeof node.inputs !== "object") return;
       Object.keys(node.inputs).forEach(function (field) {
-        if (!/^(ref_images\.ref_image_|ref_audios\.ref_audio_)/.test(field)) return;
+        if (!/^(ref_images\.ref_image_|ref_videos\.ref_video_|ref_audios\.ref_audio_)/.test(field)) return;
         var link = workflowLink(node.inputs[field]);
         if (link) collectUpstreamWorkflowNodes(workflow, link[0], detached);
         delete node.inputs[field];
@@ -1319,20 +1494,29 @@
       return id;
     };
     var imageIndex = 0;
+    var videoIndex = 0;
     var audioIndex = 0;
     mediaAssets.forEach(function (asset) {
       var nodeId = nextId();
       var title = "Prompt Workbench · " + asset.label;
       workflow[nodeId] = asset.kind === "audio"
         ? { inputs: { audio: asset.path, audioUI: "" }, class_type: "LoadAudio", _meta: { title: title, rh_prompt_media: true } }
-        : { inputs: { image: asset.path }, class_type: "LoadImage", _meta: { title: title, rh_prompt_media: true } };
-      var field = asset.kind === "audio" ? "audio" : "image";
+        : asset.kind === "video"
+          ? { inputs: { video: asset.path }, class_type: "VHS_LoadVideo", _meta: { title: title, rh_prompt_media: true } }
+          : { inputs: { image: asset.path }, class_type: "LoadImage", _meta: { title: title, rh_prompt_media: true } };
+      var field = asset.kind === "audio" ? "audio" : "video";
+      if (asset.kind !== "audio" && asset.kind !== "video") field = "image";
       fileInputs.push({ id: nodeId + ":" + field, node_id: nodeId, field: field, title: title, class_type: workflow[nodeId].class_type, kind: "file", default: asset.path });
       if (asset.kind === "audio") {
         minimaxNodeIds.forEach(function (minimaxNodeId) {
           workflow[String(minimaxNodeId)].inputs["ref_audios.ref_audio_" + audioIndex] = [nodeId, 0];
         });
         audioIndex += 1;
+      } else if (asset.kind === "video") {
+        minimaxNodeIds.forEach(function (minimaxNodeId) {
+          workflow[String(minimaxNodeId)].inputs["ref_videos.ref_video_" + videoIndex] = [nodeId, 0];
+        });
+        videoIndex += 1;
       } else {
         minimaxNodeIds.forEach(function (minimaxNodeId) {
           workflow[String(minimaxNodeId)].inputs["ref_images.ref_image_" + imageIndex] = [nodeId, 0];
@@ -1372,8 +1556,8 @@
   function importMinimaxMediaToTask() {
     var context = currentWorkflowContext();
     if (!context.hasMiniMax || !context.draft || !context.workflow) return showToast("请先在任务提交页导入或加载包含 MiniMax H3 节点的工作流", true);
-    var entries = usedReferenceMedia().filter(function (entry) { return entry.media.kind === "image" || entry.media.kind === "audio"; });
-    if (!entries.length) return showToast("当前组装台没有可导入的参考图片或参考音频", true);
+    var entries = usedReferenceMedia().filter(function (entry) { return ["image", "audio", "video"].indexOf(entry.media.kind) !== -1; });
+    if (!entries.length) return showToast("当前组装台没有可导入的参考图片、音频或视频", true);
     var button = $("importMedia");
     if (button) {
       button.disabled = true;
@@ -1398,8 +1582,11 @@
         draft.workflow.savedAt = Date.now();
         window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
         var focusImport = notifySubmitImport({ kind: "media", mediaCount: mediaAssets.length });
-        if (!focusImport) window.location.href = "/";
-        showToast("已导入 " + mediaAssets.filter(function (item) { return item.kind === "image"; }).length + " 张参考图和 " + mediaAssets.filter(function (item) { return item.kind === "audio"; }).length + " 条参考音频，任务提交页草稿已更新");
+        if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl();
+        var imageCount = mediaAssets.filter(function (item) { return item.kind === "image"; }).length;
+        var audioCount = mediaAssets.filter(function (item) { return item.kind === "audio"; }).length;
+        var videoCount = mediaAssets.filter(function (item) { return item.kind === "video"; }).length;
+        showToast("已导入 " + imageCount + " 张图片、" + audioCount + " 条音频和 " + videoCount + " 个视频，任务提交页草稿已更新");
       });
     }).catch(function (error) {
       showToast("导入媒体失败：" + error.message, true);
@@ -1414,8 +1601,9 @@
     var parts = String(value || "").split(/[\\/]/);
     return parts[parts.length - 1] || "未设置";
   }
-  function loadImageTargets(draft) {
+  function loadMediaTargets(draft, mediaKind) {
     if (!draft || !draft.workflow) return [];
+    var targetMediaKind = ["image", "video", "audio"].indexOf(mediaKind) !== -1 ? mediaKind : "image";
     var workflow = draft.workflow.data || {};
     var values = draft.workflow.values || {};
     var bypassed = values.bypassedNodes || values.bypassed_nodes || [];
@@ -1426,11 +1614,24 @@
     Object.keys(workflow).forEach(function (nodeId) {
       if (nodeId === "__rh_meta__") return;
       var node = workflow[nodeId];
-      if (!node || typeof node !== "object" || String(node.class_type || "").toLowerCase().indexOf("loadimage") === -1) return;
+      var classType = String(node && node.class_type || "").toLowerCase();
+      var classMatches = targetMediaKind === "video"
+        ? classType.indexOf("loadvideo") !== -1
+        : targetMediaKind === "audio"
+          ? classType.indexOf("loadaudio") !== -1
+          : classType.indexOf("loadimage") !== -1;
+      if (!node || typeof node !== "object" || !classMatches) return;
       var inputs = node.inputs && typeof node.inputs === "object" ? node.inputs : {};
-      var title = node._meta && node._meta.title ? node._meta.title : node.class_type || "LoadImage";
+      var defaultClassType = targetMediaKind === "video" ? "LoadVideo" : (targetMediaKind === "audio" ? "LoadAudio" : "LoadImage");
+      var title = node._meta && node._meta.title ? node._meta.title : node.class_type || defaultClassType;
       Object.keys(inputs).forEach(function (field) {
-        if (String(field).toLowerCase() !== "image") return;
+        var fieldName = String(field).toLowerCase();
+        var fieldMatches = targetMediaKind === "video"
+          ? ["video", "file", "video_path", "path"].indexOf(fieldName) !== -1
+          : targetMediaKind === "audio"
+            ? ["audio", "file", "audio_path", "path"].indexOf(fieldName) !== -1
+            : fieldName === "image";
+        if (!fieldMatches) return;
         var inputId = nodeId + ":" + field;
         var current = Object.prototype.hasOwnProperty.call(values.files || {}, inputId) ? values.files[inputId] : inputs[field];
         targets.push({
@@ -1438,7 +1639,7 @@
           nodeId: String(nodeId),
           field: String(field),
           title: String(title),
-          classType: String(node.class_type || "LoadImage"),
+          classType: String(node.class_type || defaultClassType),
           current: String(current == null ? "" : current),
           bypassed: Boolean(bypassedMap[String(nodeId)]),
         });
@@ -1446,24 +1647,30 @@
     });
     return targets;
   }
+  function loadImageTargets(draft) {
+    return loadMediaTargets(draft, "image");
+  }
   function renderDepthImportTargets(draft) {
-    var targets = loadImageTargets(draft);
+    var mediaKind = ["image", "video", "audio"].indexOf(workflowImportMediaKind) !== -1 ? workflowImportMediaKind : "image";
+    var targets = loadMediaTargets(draft, mediaKind);
     var description = $("depthImportDescription");
     var status = $("depthImportStatus");
     var list = $("depthImportTargets");
     var confirm = $("confirmDepthImport");
-    var assetLabel = workflowImportAsset && workflowImportAsset.label ? workflowImportAsset.label : "图片";
+    var assetLabel = workflowImportAsset && workflowImportAsset.label ? workflowImportAsset.label : (mediaKind === "video" ? "视频" : (mediaKind === "audio" ? "音频" : "图片"));
+    var targetLabel = mediaKind === "video" ? "LoadVideo" : (mediaKind === "audio" ? "LoadAudio" : "LoadImage");
+    list.setAttribute("aria-label", targetLabel + " 节点");
     if (!draft) {
-      description.textContent = "还没有检测到任务提交页的当前工作流。请先导入工作流，再回来选择 LoadImage 节点。";
+      description.textContent = "还没有检测到任务提交页的当前工作流。请先导入工作流，再回来选择 " + targetLabel + " 节点。";
       status.textContent = "任务提交页暂无可用工作流草稿";
-      list.innerHTML = '<div class="depth-import-empty"><strong>先导入一个 API 工作流</strong><span>导入后，这里会列出工作流中的全部 LoadImage 节点。</span></div>';
+      list.innerHTML = '<div class="depth-import-empty"><strong>先导入一个 API 工作流</strong><span>导入后，这里会列出工作流中的全部 ' + targetLabel + ' 节点。</span></div>';
       confirm.disabled = true;
       return;
     }
-    description.textContent = "选择任务提交页当前工作流中的 LoadImage 节点，" + assetLabel + "会作为该节点的本机输入。";
-    status.textContent = "当前工作流：" + (draft.workflow.name || "workflow_api.json") + " · 找到 " + targets.length + " 个 LoadImage 节点";
+    description.textContent = "选择任务提交页当前工作流中的 " + targetLabel + " 节点，" + assetLabel + "会作为该节点的本机输入。";
+    status.textContent = "当前工作流：" + (draft.workflow.name || "workflow_api.json") + " · 找到 " + targets.length + " 个 " + targetLabel + " 节点";
     if (!targets.length) {
-      list.innerHTML = '<div class="depth-import-empty"><strong>没有找到 LoadImage 节点</strong><span>请确认当前工作流使用的是 API 格式，并包含 LoadImage 节点。</span></div>';
+      list.innerHTML = '<div class="depth-import-empty"><strong>没有找到 ' + targetLabel + ' 节点</strong><span>请确认当前工作流使用的是 API 格式，并包含 ' + targetLabel + ' 节点。</span></div>';
       confirm.disabled = true;
       return;
     }
@@ -1473,13 +1680,14 @@
       var disabled = target.bypassed;
       var checked = selected && selected.inputId === target.inputId;
       return '<label class="depth-import-target' + (disabled ? ' is-disabled' : '') + '">' +
-        '<input type="radio" name="depth-import-target" value="' + esc(target.inputId) + '"' + (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + ' />' +
+        '<input type="radio" name="workflow-media-target" value="' + esc(target.inputId) + '"' + (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + ' />' +
         '<span class="depth-import-target-copy"><strong>' + esc(target.title) + '</strong><span><code>' + esc(target.inputId) + '</code> · ' + esc(target.classType) + '</span><small>' + (disabled ? '已旁路，本次提交不会使用' : '当前：' + esc(filenameFromPath(target.current))) + '</small></span>' +
         '</label>';
     }).join("");
     confirm.disabled = !selected;
   }
   function workflowImportKicker(label) {
+    if (String(label || "").indexOf("视频") !== -1) return "IMPORT VIDEO";
     return label === "骨骼图" ? "IMPORT SKELETON MAP" : label === "深度图" ? "IMPORT DEPTH MAP" : "IMPORT TO WORKFLOW";
   }
   function applyWorkflowImportDialogLabels(title, label) {
@@ -1496,15 +1704,18 @@
       label: poseImportInfo.label,
       title: action.title + " · " + poseImportInfo.label,
       toastLabel: poseImportInfo.label,
+      mediaKind: "image",
     };
+    workflowImportMediaKind = "image";
     renderDepthImportTargets(readTaskDraft());
     applyWorkflowImportDialogLabels("导入" + poseImportInfo.label, poseImportInfo.label);
     window.RHMotion.openModal("depthImportModal", "closeDepthImport");
   }
   function openWorkflowImport(asset) {
-    if (!asset || !asset.endpoint) return showToast("这个积木没有可用的图片", true);
+    if (!asset || !asset.endpoint) return showToast("这个积木没有可用的媒体", true);
     depthImportActionId = "";
     workflowImportAsset = asset;
+    workflowImportMediaKind = ["image", "video", "audio"].indexOf(asset.mediaKind) !== -1 ? asset.mediaKind : "image";
     renderDepthImportTargets(readTaskDraft());
     applyWorkflowImportDialogLabels("导入媒体", asset.label || "");
     window.RHMotion.openModal("depthImportModal", "closeDepthImport");
@@ -1514,6 +1725,22 @@
     var id = trigger.dataset.importWorkflowId || "";
     if (kind === "action") {
       var action = state.actions.find(function (item) { return item.id === id; });
+      var mediaKind = trigger.dataset.importWorkflowMediaKind === "video" ? "video" : "image";
+      if (mediaKind === "video") {
+        var stage = trigger.closest("[data-stage-index]");
+        var toggle = stage && stage.querySelector("[data-action-media-toggle]");
+        if (toggle && toggle.dataset.actionMediaCurrent) trigger.dataset.importWorkflowVariant = toggle.dataset.actionMediaCurrent;
+        var videoKind = trigger.dataset.importWorkflowVariant || "video";
+        var videoInfo = actionVideoImportInfos(action).find(function (item) { return item.kind === videoKind; });
+        if (!action || !videoInfo || !videoInfo.available) return showToast("这个动作没有可用的" + (videoInfo ? videoInfo.label : "视频"), true);
+        return openWorkflowImport({
+          endpoint: "/api/prompt/actions/" + encodeURIComponent(id) + "/" + videoInfo.endpoint,
+          label: videoInfo.label,
+          title: action.title + " · " + videoInfo.label,
+          toastLabel: videoInfo.label,
+          mediaKind: "video",
+        });
+      }
       var poseImportInfo = actionPoseImportInfo(action);
       if (!action || !poseImportInfo.available) return showToast("这个动作没有可用的" + poseImportInfo.label, true);
       return openWorkflowImport({
@@ -1521,29 +1748,37 @@
         label: poseImportInfo.label,
         title: action.title + " · " + poseImportInfo.label,
         toastLabel: poseImportInfo.label,
+        mediaKind: "image",
       });
     }
     if (kind === "reference") {
       var reference = state.references.find(function (item) { return item.id === id; });
-      if (!reference || !reference.image_available || !reference.image_url) return showToast("这个参考资源没有可用的图片", true);
+      var mediaKind = trigger.dataset.importWorkflowMediaKind === "audio" ? "audio" : "image";
+      var mediaAvailable = mediaKind === "audio" ? reference && reference.audio_available && reference.audio_url : reference && reference.image_available && reference.image_url;
+      if (!mediaAvailable) return showToast("这个参考资源没有可用的" + (mediaKind === "audio" ? "音频" : "图片"), true);
       return openWorkflowImport({
-        endpoint: "/api/prompt/references/" + encodeURIComponent(id) + "/image-path",
-        label: "图片",
-        title: reference.title + " · 图片",
-        toastLabel: "图片",
+        endpoint: mediaKind === "audio"
+          ? "/api/prompt/references/" + encodeURIComponent(id) + "/audio-path"
+          : "/api/prompt/references/" + encodeURIComponent(id) + "/image-path",
+        label: mediaKind === "audio" ? "音频" : "图片",
+        title: reference.title + " · " + (mediaKind === "audio" ? "音频" : "图片"),
+        toastLabel: mediaKind === "audio" ? "音频" : "图片",
+        mediaKind: mediaKind,
       });
     }
-    showToast("这个积木没有可导入的图片", true);
+    showToast("这个积木没有可导入的媒体", true);
   }
   function closeDepthImport() {
     depthImportActionId = "";
     workflowImportAsset = null;
+    workflowImportMediaKind = "image";
     applyWorkflowImportDialogLabels("导入媒体", "");
     window.RHMotion.closeModal("depthImportModal");
   }
   function confirmWorkflowImport() {
-    var selected = $("depthImportTargets").querySelector('input[name="depth-import-target"]:checked');
-    if (!workflowImportAsset || !selected) return showToast("请先选择一个 LoadImage 节点", true);
+    var selected = $("depthImportTargets").querySelector('input[name="workflow-media-target"]:checked');
+    var targetLabel = workflowImportMediaKind === "video" ? "LoadVideo" : (workflowImportMediaKind === "audio" ? "LoadAudio" : "LoadImage");
+    if (!workflowImportAsset || !selected) return showToast("请先选择一个 " + targetLabel + " 节点", true);
     var button = $("confirmDepthImport");
     var importedLabel = workflowImportAsset.label || "图片";
     var toastLabel = workflowImportAsset.toastLabel || importedLabel;
@@ -1551,11 +1786,11 @@
     button.textContent = "导入中…";
     jsonRequest(workflowImportAsset.endpoint).then(function (asset) {
       var draft = readTaskDraft();
-      var target = loadImageTargets(draft).find(function (item) { return item.inputId === selected.value && !item.bypassed; });
+      var target = loadMediaTargets(draft, workflowImportMediaKind).find(function (item) { return item.inputId === selected.value && !item.bypassed; });
       if (!draft || !target) throw new Error("任务提交页的工作流已发生变化，请重新打开导入窗口");
       var workflow = draft.workflow.data;
       var node = workflow[target.nodeId];
-      if (!node || !node.inputs || typeof node.inputs !== "object") throw new Error("找不到选中的 LoadImage 节点");
+      if (!node || !node.inputs || typeof node.inputs !== "object") throw new Error("找不到选中的 " + targetLabel + " 节点");
       node.inputs[target.field] = asset.path;
       draft.workflow.values = draft.workflow.values || {};
       draft.workflow.values.files = draft.workflow.values.files || {};
@@ -1565,7 +1800,7 @@
       var focusImport = notifySubmitImport({ kind: "media", inputId: target.inputId });
       closeDepthImport();
       showToast(toastLabel + "已导入「" + target.title + "」，已保存到任务草稿");
-      if (!focusImport) window.location.href = "/";
+      if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl();
     }).catch(function (error) {
       showToast(importedLabel + "导入失败：" + error.message, true);
     }).finally(function () {
@@ -1583,28 +1818,22 @@
     if (!actions.length) {
       $("libraryList").innerHTML = '<div class="library-empty">没有匹配的动作。<br />试试其他标签或搜索提示词。</div>';
       $("libraryCount").textContent = actions.length + " 个动作";
-      $("libraryFooterHint").textContent = state.actionSource ? state.actionSource.paired_count + "/" + state.actionSource.action_count + " 对已配对" : "拖动卡片加入";
+      $("libraryFooterHint").textContent = state.actionSource ? state.actionSource.paired_count + "/" + state.actionSource.action_count + " 个动作媒体已配齐" : "拖动卡片加入";
       return;
     }
     $("libraryList").innerHTML = actions.map(function (action, index) {
-      var hasColorImage = Boolean(action.image_available || action.color_image_available);
-      var poseImportInfo = actionPoseImportInfo(action);
-      var missingPoseImportMessage = poseImportInfo.type === "skeleton" ? "暂无可用骨骼图，请先为动作准备对应文件" : "暂无可用深度图，请先完成原图与深度图配对";
-      var importWorkflowButton = hasColorImage
-        ? '<button class="import-workflow-button action-card-import" type="button" data-import-workflow data-import-workflow-kind="action" data-import-workflow-id="' + esc(action.id) + '" title="' + esc(poseImportInfo.available ? "选择 LoadImage 节点并导入" + poseImportInfo.label : missingPoseImportMessage) + '"' + (poseImportInfo.available ? "" : ' disabled aria-disabled="true"') + '>导入媒体</button>'
-        : "";
       var category = action.category || "未分类";
       return '<article class="action-library-card" draggable="true" data-action-id="' + esc(action.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
         '<div class="action-card-media">' + actionMediaMarkup(action, "") + '</div>' +
         '<div class="action-card-body"><div class="library-block-top action-card-top"><button class="library-block-title resource-title-edit" type="button" data-edit-resource data-resource-kind="action" data-resource-id="' + esc(action.id) + '" aria-label="编辑「' + esc(action.title) + '」"><span class="block-type-dot action" aria-hidden="true"></span><span>' + esc(action.title) + '</span></button></div>' +
-        '<div class="library-card-meta-row"><span class="action-card-top-actions">' + importWorkflowButton + '<span class="action-card-category" title="一级分类">' + esc(category) + '</span><span class="library-block-label">POSE</span></span></div>' +
+        '<div class="library-card-meta-row"><span class="action-card-top-actions"><span class="action-card-category" title="一级分类">' + esc(category) + '</span><span class="library-block-label">' + (action.media_type === "video" ? "VIDEO" : "POSE") + '</span></span></div>' +
         resourceTagsMarkup(action, "action") +
         libraryPromptMarkup(action.text, "action-library-text") +
-        (action.pair_status === "paired" ? "" : '<div class="library-block-footer"><span class="action-pair-status ' + actionPairClass(action) + '" title="' + esc(action.pair_message || "") + '">' + esc(actionPairLabel(action)) + '</span></div>') +
+        (["paired", "video_ready"].indexOf(action.pair_status) !== -1 ? "" : '<div class="library-block-footer"><span class="action-pair-status ' + actionPairClass(action) + '" title="' + esc(action.pair_message || "") + '">' + esc(actionPairLabel(action)) + '</span></div>') +
         '</div></article>';
     }).join("");
     $("libraryCount").textContent = actions.length + " 个动作";
-    $("libraryFooterHint").textContent = state.actionSource ? state.actionSource.paired_count + "/" + state.actionSource.action_count + " 对已配对" : "拖动卡片加入";
+    $("libraryFooterHint").textContent = state.actionSource ? state.actionSource.paired_count + "/" + state.actionSource.action_count + " 个动作媒体已配齐" : "拖动卡片加入";
   }
   function referenceMediaMarkup(reference, extraClass) {
     var title = reference.title || "参考资源";
@@ -1664,13 +1893,10 @@
     }
     $("libraryList").innerHTML = references.map(function (reference, index) {
       var label = reference.kind_label || "参考资源";
-      var importWorkflowButton = reference.image_available
-        ? '<button class="import-workflow-button" type="button" data-import-workflow data-import-workflow-kind="reference" data-import-workflow-id="' + esc(reference.id) + '" title="选择 LoadImage 节点并导入图片">导入媒体</button>'
-        : "";
       return '<article class="reference-library-card" draggable="true" data-reference-id="' + esc(reference.id) + '" style="animation-delay:' + Math.min(index * 35, 220) + 'ms">' +
         referenceMediaMarkup(reference, "reference-card-media") +
         '<div class="reference-card-body"><div class="library-block-top reference-card-top"><button class="library-block-title resource-title-edit" type="button" data-edit-resource data-resource-kind="' + esc(reference.kind) + '" data-resource-id="' + esc(reference.id) + '" aria-label="编辑「' + esc(reference.title) + '」"><span class="block-type-dot reference" aria-hidden="true"></span><span>' + esc(reference.title) + '</span></button></div>' +
-        '<div class="library-card-meta-row"><span class="action-card-top-actions">' + importWorkflowButton + '<span class="library-block-label">' + esc(label) + '</span></span></div>' +
+        '<div class="library-card-meta-row"><span class="action-card-top-actions"><span class="library-block-label">' + esc(label) + '</span></span></div>' +
         resourceTagsMarkup(reference, reference.kind) +
         libraryPromptMarkup(reference.text, "reference-library-text") +
         '</div></article>';
@@ -2016,7 +2242,7 @@
     var stageDataAttributes = (structureField ? ' data-prompt-structure-field="' + esc(structureField) + '"' : "") + (isMedia ? ' data-media-stage-dropzone aria-label="媒体积木，可在卡片任意位置拖入媒体文件替换"' : "");
     var tags = item.tags || [];
     var sourceAction = isAction && !item.missing ? state.actions.find(function (action) { return action.id === item.sourceId; }) : null;
-    var sourceActionImport = sourceAction ? actionPoseImportInfo(sourceAction) : isAction ? actionPoseImportInfo(item) : null;
+    var sourceActionImport = sourceAction ? actionWorkflowImportInfo(sourceAction, item.videoKind) : isAction ? actionWorkflowImportInfo(item, item.videoKind) : null;
     var canImportWorkflow = Boolean(
       (sourceActionImport && sourceActionImport.available) ||
       (isReference && !item.missing && item.imageUrl)
@@ -2024,7 +2250,7 @@
     var hasStagePreview = isAction || isReference || isMedia;
     var stagePreviewMarkup = "";
     if (isAction) {
-      stagePreviewMarkup = actionMediaMarkup({ title: item.title || "动作图片", color_image_url: item.colorImageUrl || item.imageUrl || "", depth_image_url: item.depthImageUrl || "", skeleton_image_url: item.skeletonImageUrl || "", color_image_available: Boolean(item.colorImageUrl || item.imageUrl), depth_image_available: Boolean(item.depthImageUrl), skeleton_image_available: Boolean(item.skeletonImageUrl), pair_status: item.pairStatus || "" }, "stage-action-media");
+      stagePreviewMarkup = actionMediaMarkup({ title: item.title || "动作图片", media_type: item.mediaType || "", videoKind: item.videoKind || "", color_image_url: item.colorImageUrl || item.imageUrl || "", depth_image_url: item.depthImageUrl || "", skeleton_image_url: item.skeletonImageUrl || "", color_image_available: Boolean(item.colorImageUrl || item.imageUrl), depth_image_available: Boolean(item.depthImageUrl), skeleton_image_available: Boolean(item.skeletonImageUrl), video_url: item.videoUrl || "", video_available: Boolean(item.videoUrl), depth_video_url: item.depthVideoUrl || "", depth_video_available: Boolean(item.depthVideoUrl), skeleton_video_url: item.skeletonVideoUrl || "", skeleton_video_available: Boolean(item.skeletonVideoUrl), depth_skeleton_video_url: item.depthSkeletonVideoUrl || "", depth_skeleton_video_available: Boolean(item.depthSkeletonVideoUrl), pair_status: item.pairStatus || "" }, "stage-action-media");
     } else if (isReference) {
       stagePreviewMarkup = referenceMediaMarkup({ title: item.title, imageUrl: item.imageUrl, audioUrl: item.audioUrl, image_available: Boolean(item.imageUrl), audio_available: Boolean(item.audioUrl), media_type: item.mediaType }, "stage-reference-media");
     } else if (isMedia) {
@@ -2035,7 +2261,7 @@
     var stageTitle = isText ? "自由文本" : (item.title || (isMedia ? item.mediaName : "固定积木") || "固定积木");
     var stageTitleButton = '<button class="stage-block-title-button" type="button" data-edit-stage="' + index + '" title="编辑组装台积木" aria-label="编辑组装台积木：' + esc(stageTitle) + '"><h3>' + esc(stageTitle) + '</h3></button>';
     var importWorkflowButton = canImportWorkflow
-      ? '<button class="import-workflow-button stage-workflow-import" type="button" data-import-workflow data-import-workflow-kind="' + (isAction ? "action" : "reference") + '" data-import-workflow-id="' + esc(item.sourceId) + '" title="选择 LoadImage 节点并导入' + (isAction ? sourceActionImport.label : "图片") + '">导入媒体</button>'
+      ? '<button class="import-workflow-button stage-workflow-import" type="button" data-import-workflow data-import-workflow-kind="' + (isAction ? "action" : "reference") + '" data-import-workflow-id="' + esc(item.sourceId) + '"' + (isAction && sourceActionImport && sourceActionImport.kind ? ' data-import-workflow-media-kind="video" data-import-workflow-variant="' + esc(sourceActionImport.kind) + '"' : '') + ' title="选择 ' + (isAction && sourceActionImport && sourceActionImport.kind ? "LoadVideo" : "LoadImage") + ' 节点并导入' + (isAction ? sourceActionImport.label : "图片") + '">导入媒体</button>'
       : "";
     var mediaControlsMarkup = isMedia
       ? '<div class="stage-media-controls"><div class="stage-media-control-buttons"><button class="stage-media-select" type="button" data-open-media-stage data-media-stage-index="' + index + '">选择文件</button><button class="stage-media-paste" type="button" data-paste-media-stage data-media-stage-index="' + index + '">粘贴图片</button></div><span class="stage-media-drop-hint">拖入图片、音频或视频到卡片任意位置可替换</span></div>'
@@ -2110,12 +2336,13 @@
     if (importMediaButton) {
       var workflowContext = currentWorkflowContext();
       var importableEntries = usedReferenceMedia();
-      var hasImportableMedia = importableEntries.some(function (entry) { return entry.media.kind === "image" || entry.media.kind === "audio"; });
+      var hasImportableMedia = importableEntries.some(function (entry) { return ["image", "audio", "video"].indexOf(entry.media.kind) !== -1; });
       var hasActionMedia = importableEntries.some(function (entry) { return entry.media.sourceType === "action"; });
-      importMediaButton.hidden = !workflowContext.hasMiniMax || !hasImportableMedia;
+      importMediaButton.hidden = false;
+      importMediaButton.disabled = !workflowContext.hasMiniMax || !hasImportableMedia;
       importMediaButton.title = !workflowContext.hasMiniMax
         ? "当前工作流不包含 MiniMax H3 节点"
-        : (hasImportableMedia ? "按当前组装台的参考媒体重建 MiniMax H3 输入" + (hasActionMedia ? "；动作引用使用" + poseMediaImportLabel(poseMediaImportType) : "") : "请先把媒体积木加入提示词工作台");
+        : (hasImportableMedia ? "按当前组装台的图片、音频和视频重建 MiniMax H3 输入" + (hasActionMedia ? "；动作引用使用" + poseMediaImportLabel(poseMediaImportType) : "") : "请先把图片、音频或视频媒体积木加入提示词工作台");
     }
     refreshSubjectDefinitionsButton();
   }
@@ -2194,6 +2421,15 @@
         depthImagePath: action.depth_image_path || "",
         skeletonImageUrl: action.skeleton_image_url || "",
         skeletonImagePath: action.skeleton_image_path || "",
+        mediaType: action.media_type || "",
+        videoPath: action.video_path || "",
+        depthVideoPath: action.depth_video_path || "",
+        skeletonVideoPath: action.skeleton_video_path || "",
+        depthSkeletonVideoPath: action.depth_skeleton_video_path || "",
+        videoUrl: action.video_url || "",
+        depthVideoUrl: action.depth_video_url || "",
+        skeletonVideoUrl: action.skeleton_video_url || "",
+        depthSkeletonVideoUrl: action.depth_skeleton_video_url || "",
         pairStatus: action.pair_status || "",
         missing: false,
       };
@@ -2637,7 +2873,7 @@
     var group = state.groups.find(function (item) { return item.id === groupId; });
     if (!group) return false;
     state.activeGroupId = group.id;
-    $("groupName").value = group.name;
+    if ($("groupName")) $("groupName").value = group.name;
     state.stage = (group.items || []).map(stageItemFromApi).filter(Boolean);
     saveState();
     renderStage();
@@ -2698,6 +2934,7 @@
     });
   }
   function resourceMediaSlots(kind) {
+    if (kind === "action" && resourceMediaType === "video") return ACTION_VIDEO_MEDIA_SLOTS;
     return RESOURCE_MEDIA_SLOTS[kind] || [];
   }
   function resourceMediaFileName(file) {
@@ -2719,6 +2956,60 @@
   }
   function mediaTypeLabel(kind) {
     return ({ image: "图片", audio: "音频", video: "视频" }[kind] || "媒体");
+  }
+  function renderResourceMediaTypeControl() {
+    var control = $("resourceMediaTypeControl");
+    if (!control) return;
+    var visible = editingResourceKind === "action";
+    control.hidden = !visible;
+    control.querySelectorAll("[data-resource-media-type]").forEach(function (button) {
+      var active = button.dataset.resourceMediaType === resourceMediaType;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    renderActionVideoGenerationOptions();
+  }
+  function renderActionVideoGenerationOptions() {
+    var options = $("actionVideoGenerationOptions");
+    if (!options) return;
+    options.hidden = editingResourceKind !== "action" || resourceMediaType !== "video";
+  }
+  function resourceMediaDescription(kind) {
+    if (kind === "action") {
+      return resourceMediaType === "video"
+        ? "视频动作会自动复制到 ref/pose/video、video-depth、video-skeleton 和 video-depth-skeleton，并保持四类视频的 basename 配对。"
+        : "图片动作会自动复制到 ref/pose/color、ref/pose/depth 和 ref/pose/skeleton，并保持三类文件的 basename 配对。";
+    }
+    return "保存后会把选择的素材复制到 ref/" + kind + "；已有素材无需重新选择，选择新文件即可替换。";
+  }
+  function renderResourceMediaCopy() {
+    if (!editingResourceKind) return;
+    var description = $("customBlockDescription");
+    if (description) description.textContent = resourceMediaDescription(editingResourceKind);
+    var hint = $("resourceMediaHint");
+    if (hint) hint.textContent = editingResourceKind === "action"
+      ? (resourceMediaType === "video" ? "视频动作支持拖入或选择 MP4、MOV、WebM 等视频文件；点击自动生成会先保存原视频，再按 24 FPS 后台生成四种变体。" : "图片动作支持选择、拖入或粘贴图片；保存时会按原图、深度图和骨骼图写入动作库。")
+      : resourceMediaDescription(editingResourceKind);
+  }
+  function setResourceMediaType(type) {
+    if (editingResourceKind !== "action") return;
+    var nextType = String(type || "").toLowerCase() === "video" ? "video" : "image";
+    if (nextType === resourceMediaType) return;
+    ["resourceImagePath", "resourceDepthPath", "resourceSkeletonPath", "resourceVideoPath", "resourceDepthVideoPath", "resourceSkeletonVideoPath", "resourceDepthSkeletonVideoPath"].forEach(function (pathId) {
+      var input = $(pathId);
+      if (input) input.value = "";
+    });
+    pendingResourceMedia = {};
+    activeResourceMediaRole = nextType === "video" ? "video" : "color";
+    resourceMediaType = nextType;
+    if (nextType === "video") {
+      $("resourceVideoResolution").value = "original";
+      $("resourceVideoStartFrame").value = "0";
+      $("resourceVideoDuration").value = "";
+    }
+    renderResourceMediaTypeControl();
+    renderResourceMediaSlots();
+    renderResourceMediaCopy();
   }
   function localPathForMediaFile(file, event) {
     if (window.rhElectron && typeof window.rhElectron.getPathForFile === "function") {
@@ -2894,6 +3185,7 @@
     var type = String(file && file.type || "").toLowerCase();
     var name = resourceMediaFileName(file).toLowerCase();
     if (slot.role === "audio") return type.indexOf("audio/") === 0 || /\.(aac|flac|m4a|mp3|ogg|wav|webm)$/i.test(name);
+    if (slot.role === "video" || slot.role === "depth_video" || slot.role === "skeleton_video" || slot.role === "depth_skeleton_video") return type.indexOf("video/") === 0 || /\.(avi|flv|mkv|mov|mp4|m4v|webm|wmv)$/i.test(name);
     return type.indexOf("image/") === 0 || /\.(avif|bmp|gif|jpeg|jpg|png|webp)$/i.test(name);
   }
   function resourceMediaPath(pathId) {
@@ -2921,9 +3213,12 @@
       var generateButton = generationKind
         ? '<button class="resource-media-slot-button resource-media-generate-button" type="button" data-resource-media-generate="' + generationKind + '"' + (generationBusy ? " disabled" : "") + '>' + (generationBusy ? "生成中…" : "自动生成") + '</button>'
         : "";
+      var videoGenerateButton = slot.role === "video" && editingResourceKind === "action" && resourceMediaType === "video"
+        ? '<button class="resource-media-slot-button resource-media-generate-button" type="button" data-resource-media-generate-video' + (videoGenerationBusy ? " disabled" : "") + '>' + (videoGenerationBusy ? "生成中…" : "自动生成") + '</button>'
+        : "";
       return '<div class="resource-media-slot' + (selected ? " is-selected" : "") + '" tabindex="0" role="group" data-resource-media-slot="' + esc(slot.role) + '">' +
         '<div class="resource-media-slot-head"><span class="resource-media-slot-label">' + esc(slot.label) + '</span><span class="resource-media-slot-status' + statusClass + '" title="' + esc(status) + '">' + esc(status) + '</span></div>' +
-        '<div class="resource-media-slot-actions"><button class="resource-media-slot-button" type="button" data-resource-media-pick="' + esc(slot.role) + '" data-resource-media-accept="' + esc(slot.accept) + '">选择文件</button>' + pasteButton + generateButton + '</div>' +
+        '<div class="resource-media-slot-actions"><button class="resource-media-slot-button" type="button" data-resource-media-pick="' + esc(slot.role) + '" data-resource-media-accept="' + esc(slot.accept) + '">选择文件</button>' + pasteButton + generateButton + videoGenerateButton + '</div>' +
         '<span class="resource-media-slot-drop-hint">也可以把文件拖到这里' + (slot.paste ? "，或直接按 ⌘V / Ctrl+V" : "") + "。</span>" +
         '</div>';
     }).join("");
@@ -2931,9 +3226,13 @@
   function setResourceMediaFile(role, file) {
     var slot = resourceMediaSlots(editingResourceKind).find(function (item) { return item.role === role; });
     if (!slot || !file) return;
-    if (!resourceMediaMatches(slot, file)) return showToast(slot.role === "audio" ? "请选择音频文件" : "请选择图片文件", true);
+    if (!resourceMediaMatches(slot, file)) return showToast(slot.role === "audio" ? "请选择音频文件" : (slot.role.indexOf("video") !== -1 ? "请选择视频文件" : "请选择图片文件"), true);
     activeResourceMediaRole = role;
     pendingResourceMedia[role] = file;
+    if (role === "video") {
+      ["depth_video", "skeleton_video", "depth_skeleton_video"].forEach(function (generatedRole) { delete pendingResourceMedia[generatedRole]; });
+      ["resourceVideoPath", "resourceDepthVideoPath", "resourceSkeletonVideoPath", "resourceDepthSkeletonVideoPath"].forEach(function (pathId) { $(pathId).value = ""; });
+    }
     if (role === "color" && pendingResourceMedia.depth && pendingResourceMedia.depth.generated) delete pendingResourceMedia.depth;
     renderResourceMediaSlots();
   }
@@ -2993,6 +3292,90 @@
       renderResourceMediaSlots();
     });
   }
+  function generateActionVideo() {
+    if (editingResourceKind !== "action" || resourceMediaType !== "video" || videoGenerationBusy) return;
+    var videoFile = pendingResourceMedia.video || null;
+    var sourcePath = resourceMediaPath("resourceVideoPath");
+    if (!videoFile && !sourcePath) return showToast("请先选择原视频", true);
+    var name = $("customBlockName").value.trim();
+    var text = $("customBlockText").value.trim();
+    if (!name) return showToast("请填写动作名称", true);
+    var category = $("customBlockCategory").value.trim() || $("customBlockCategorySelect").value.trim() || "未分类";
+    var resolution = String($("resourceVideoResolution").value || "").trim() || "original";
+    var startFrame = String($("resourceVideoStartFrame").value || "").trim() || "0";
+    var duration = String($("resourceVideoDuration").value || "").trim();
+    var resourcePayload = {
+      resource_id: editingResourceId,
+      kind: "action",
+      category: category,
+      title: name,
+      text: text,
+      tags: parseTags($("customBlockTags").value),
+      media_type: "video",
+      image_path: "",
+      color_image_path: "",
+      depth_image_path: "",
+      skeleton_image_path: "",
+      video_path: sourcePath,
+      depth_video_path: "",
+      skeleton_video_path: "",
+      depth_skeleton_video_path: "",
+      resolution: resolution,
+      start_frame: startFrame,
+      duration_seconds: duration || null,
+    };
+    videoGenerationBusy = true;
+    renderResourceMediaSlots();
+    resourceMediaPayload().then(function (media) {
+      if (media.length) resourcePayload.source = media[0];
+      return jsonRequest("/api/prompt/actions/generate-video", "POST", resourcePayload);
+    }).then(function (generated) {
+      var updated = generated.action;
+      if (!updated || !generated.job) throw new Error("资源已保存，但后台任务没有正常创建");
+      if (editingResourceId) {
+        var actionIndex = state.actions.findIndex(function (item) { return item.id === editingResourceId; });
+        if (actionIndex !== -1) state.actions[actionIndex] = updated;
+      } else {
+        state.actions.push(updated);
+      }
+      state.stage.forEach(function (item) {
+        if (item.sourceId !== updated.id || item.kind !== "action") return;
+        item.title = updated.title;
+        item.text = updated.text || "";
+        item.tags = updated.tags || [];
+        item.missing = false;
+      });
+      closeCustomModal();
+      renderAll();
+      showToast("资源已保存，深度和骨骼视频正在后台生成");
+      watchActionVideoGeneration(generated.job.id, updated.id);
+    }).catch(function (error) {
+      showToast("资源保存失败：" + error.message, true);
+    }).finally(function () {
+      videoGenerationBusy = false;
+      renderResourceMediaSlots();
+    });
+  }
+  function watchActionVideoGeneration(jobId, actionId) {
+    var attempts = 0;
+    function poll() {
+      jsonRequest("/api/prompt/actions/generate-video/" + encodeURIComponent(jobId), "GET").then(function (job) {
+        if (job.status === "completed") {
+          return jsonRequest("/api/prompt/actions").then(function (snapshot) {
+            applyActionSnapshot(snapshot);
+            renderAll();
+            showToast("动作「" + (job.action && job.action.title ? job.action.title : actionId) + "」的深度和骨骼视频已完成");
+          });
+        }
+        if (job.status === "failed") throw new Error(job.error || "后台生成失败");
+        attempts += 1;
+        if (attempts < 720) window.setTimeout(poll, 3000);
+      }).catch(function (error) {
+        showToast("后台生成失败：" + error.message, true);
+      });
+    }
+    window.setTimeout(poll, 1200);
+  }
   function handleResourceMediaPaste(event) {
     if (!editingResourceKind || $("customBlockModal").hidden) return;
     var file = clipboardImageFromEvent(event);
@@ -3019,16 +3402,26 @@
     editingResourceId = "";
     pendingResourceMedia = {};
     activeResourceMediaRole = "image";
+    resourceMediaType = "image";
     depthGenerationBusy = false;
     skeletonGenerationBusy = false;
+    videoGenerationBusy = false;
     visionRecognitionBusy = false;
     $("resourceMediaFields").hidden = true;
     $("resourceVisionButton").hidden = true;
     $("resourceImagePath").value = "";
     $("resourceDepthPath").value = "";
     $("resourceSkeletonPath").value = "";
+    $("resourceVideoPath").value = "";
+    $("resourceDepthVideoPath").value = "";
+    $("resourceSkeletonVideoPath").value = "";
+    $("resourceDepthSkeletonVideoPath").value = "";
     $("resourceAudioPath").value = "";
+    $("resourceVideoResolution").value = "original";
+    $("resourceVideoStartFrame").value = "0";
+    $("resourceVideoDuration").value = "";
     $("resourceMediaSlots").innerHTML = "";
+    renderResourceMediaTypeControl();
     var textField = $("customBlockText").closest(".field-group");
     var tagsField = $("customBlockTags").closest(".field-group");
     if (textField) textField.hidden = false;
@@ -3067,11 +3460,14 @@
     $("customBlockCategoryField").hidden = false;
     $("customBlockTitle").textContent = (resource ? "编辑" : "添加") + (RESOURCE_LABELS[kind] || "参考资源");
     $("customBlockModal").querySelector(".section-kicker").textContent = resource ? "EDIT RESOURCE" : "NEW RESOURCE";
-    $("customBlockDescription").textContent = "保存后会把选择的素材复制到 ref 对应目录，并将相对路径回写到 JSON 文件；修改名称时会同步重命名关联文件。动作会同时处理原图、深度图和骨骼图。";
+    $("customBlockDescription").textContent = kind === "action"
+      ? "动作资源至少需要名称和一种媒体；文本内容可选。保存后会把素材复制到 ref/pose 对应目录，并将相对路径回写到 JSON 文件。"
+      : "保存后会把选择的素材复制到 ref 对应目录，并将相对路径回写到 JSON 文件；修改名称时会同步重命名关联文件。";
     $("customBlockForm").querySelector('button[type="submit"]').textContent = resource ? "保存修改" : "保存资源";
     $("customBlockNameLabel").textContent = (RESOURCE_LABELS[kind] || "资源") + "名称";
-    $("customBlockTextLabel").textContent = "文本内容";
+    $("customBlockTextLabel").textContent = kind === "action" ? "文本内容（可选）" : "文本内容";
     $("customBlockForm").reset();
+    resourceMediaType = resource && (resource.media_type === "video" || resource.video_path || resource.depth_video_path || resource.skeleton_video_path || resource.depth_skeleton_video_path) ? "video" : "image";
     var resourceCategory = resource ? resource.category || "未分类" : "未分类";
     $("customBlockName").value = resource ? resource.title || "" : "";
     $("customBlockText").value = resource ? resource.text || "" : "";
@@ -3083,13 +3479,16 @@
     $("resourceImagePath").value = resource ? resource.image_path || resource.color_image_path || "" : "";
     $("resourceDepthPath").value = resource ? resource.depth_image_path || "" : "";
     $("resourceSkeletonPath").value = resource ? resource.skeleton_image_path || "" : "";
+    $("resourceVideoPath").value = resource ? resource.video_path || "" : "";
+    $("resourceDepthVideoPath").value = resource ? resource.depth_video_path || "" : "";
+    $("resourceSkeletonVideoPath").value = resource ? resource.skeleton_video_path || "" : "";
+    $("resourceDepthSkeletonVideoPath").value = resource ? resource.depth_skeleton_video_path || "" : "";
     $("resourceAudioPath").value = resource ? resource.audio_path || "" : "";
     pendingResourceMedia = {};
     activeResourceMediaRole = resourceMediaSlots(kind)[0] ? resourceMediaSlots(kind)[0].role : "image";
+    renderResourceMediaTypeControl();
     renderResourceMediaSlots();
-    $("resourceMediaHint").textContent = kind === "action"
-      ? "动作素材会自动复制到 ref/pose/color、ref/pose/depth 和 ref/pose/skeleton，并保持三类文件的 basename 配对。"
-      : "素材会自动复制到 ref/" + kind + "；已有素材无需重新选择，选择新文件即可替换。";
+    renderResourceMediaCopy();
     renderResourceCategoryOptions(kind);
     setEditorCategory(resourceCategory);
     window.RHMotion.openModal("customBlockModal", "customBlockName");
@@ -3195,7 +3594,7 @@
     menu.hidden = true;
     menu.style.left = "";
     menu.style.top = "";
-    libraryImageContext = { src: "", title: "" };
+    libraryImageContext = { src: "", title: "", target: null };
   }
   function positionLibraryImageContextMenu(menu, clientX, clientY) {
     var margin = 8;
@@ -3205,18 +3604,144 @@
     menu.style.left = Math.max(margin, left) + "px";
     menu.style.top = Math.max(margin, top) + "px";
   }
-  function openLibraryImageContextMenu(event, imageButton) {
-    var src = imageButton && imageButton.dataset.imagePreview;
-    if (!src) return;
+  function libraryContextImportItems(target) {
+    if (!target || !target.entry) return [];
+    if (target.kind === "action") {
+      var action = target.entry;
+      if (String(action.media_type || "").toLowerCase() === "video") {
+        return actionVideoImportInfos(action).map(function (item) {
+          return {
+            label: "导入" + item.label,
+            title: item.available ? "选择 LoadVideo 节点并导入" + item.label : "暂无可用" + item.label,
+            endpoint: "/api/prompt/actions/" + encodeURIComponent(action.id) + "/" + item.endpoint,
+            mediaKind: "video",
+            available: item.available,
+          };
+        });
+      }
+      var poseImportInfo = actionPoseImportInfo(action);
+      return [{
+        label: "导入" + poseImportInfo.label,
+        title: poseImportInfo.available ? "选择 LoadImage 节点并导入" + poseImportInfo.label : "暂无可用" + poseImportInfo.label,
+        endpoint: "/api/prompt/actions/" + encodeURIComponent(action.id) + "/" + poseImportInfo.endpoint,
+        mediaKind: "image",
+        available: poseImportInfo.available,
+      }];
+    }
+    if (target.kind === "reference") {
+      var referenceEndpoint = "/api/prompt/references/" + encodeURIComponent(target.entry.id) + "/";
+      var referenceImports = [];
+      if (target.entry.image_available && target.entry.image_url) {
+        referenceImports.push({
+          label: "导入图片",
+          title: "选择 LoadImage 节点并导入图片",
+          endpoint: referenceEndpoint + "image-path",
+          mediaKind: "image",
+          available: true,
+        });
+      }
+      if (target.entry.audio_available && target.entry.audio_url) {
+        referenceImports.push({
+          label: "导入音频",
+          title: "选择 LoadAudio 节点并导入音频",
+          endpoint: referenceEndpoint + "audio-path",
+          mediaKind: "audio",
+          available: true,
+        });
+      }
+      return referenceImports;
+    }
+    return [];
+  }
+  function libraryContextImportMarkup(item, target) {
+    return '<button type="button" role="menuitem" data-library-context-import data-library-context-import-endpoint="' + esc(item.endpoint) + '" data-library-context-import-label="' + esc(item.label.replace(/^导入/, "")) + '" data-library-context-import-title="' + esc(target.entry.title + " · " + item.label.replace(/^导入/, "")) + '" data-library-context-import-media-kind="' + esc(item.mediaKind) + '" title="' + esc(item.title) + '"' + (item.available ? "" : " disabled aria-disabled=\"true\"") + '>' + esc(item.label) + '</button>';
+  }
+  function libraryContextResourceActions(target) {
+    if (!target || !target.entry) return [];
+    if (target.kind === "block") {
+      return [{
+        action: "delete",
+        label: "删除",
+        endpoint: "/api/prompt/library/" + encodeURIComponent(target.id),
+        title: "删除积木索引内容",
+      }];
+    }
+    if (target.kind !== "action" && target.kind !== "reference") return [];
+    var entry = target.entry;
+    var hasMedia = target.kind === "action"
+      ? ["color_image_available", "depth_image_available", "skeleton_image_available", "video_available", "depth_video_available", "skeleton_video_available", "depth_skeleton_video_available"].some(function (key) { return entry[key]; })
+      : Boolean(entry.image_available || entry.audio_available);
+    var resourceType = target.kind === "action" ? "actions" : "references";
+    var endpoint = "/api/prompt/" + resourceType + "/" + encodeURIComponent(target.id);
+    var actions = [];
+    if (hasMedia) actions.push({ action: "open-folder", label: "打开所在文件夹", endpoint: endpoint + "/open-folder", title: "打开媒体所在文件夹" });
+    actions.push({ action: "delete", label: "删除", endpoint: endpoint, title: "删除媒体文件和索引内容" });
+    return actions;
+  }
+  function libraryContextResourceActionMarkup(item) {
+    return '<button type="button" role="menuitem" class="library-context-menu-' + esc(item.action) + '" data-library-context-action="' + esc(item.action) + '" data-library-context-endpoint="' + esc(item.endpoint) + '" title="' + esc(item.title) + '">' + esc(item.label) + '</button>';
+  }
+  function openLibraryImageContextMenu(event, card) {
+    var target = libraryCardTarget(card);
+    if (!target || !target.entry) return;
     event.preventDefault();
-    libraryImageContext = { src: src, title: imageButton.dataset.imageTitle || "图片" };
+    var imageButton = card.querySelector('[data-image-preview]:not([hidden])') || card.querySelector("[data-image-preview]");
+    var src = imageButton && imageButton.dataset.imagePreview || "";
+    var title = target.entry.title || (imageButton && imageButton.dataset.imageTitle) || "媒体";
+    var imports = libraryContextImportItems(target);
+    var resourceActions = libraryContextResourceActions(target);
+    var actions = [];
+    if (src) actions.push('<button type="button" role="menuitem" data-library-image-menu-action="copy">复制图片</button>');
+    if (imports.length) {
+      if (actions.length) actions.push('<div class="library-context-menu-divider" role="separator"></div>');
+      actions = actions.concat(imports.map(function (item) { return libraryContextImportMarkup(item, target); }));
+    }
+    if (resourceActions.length) {
+      if (actions.length) actions.push('<div class="library-context-menu-divider" role="separator"></div>');
+      actions = actions.concat(resourceActions.map(libraryContextResourceActionMarkup));
+    }
+    if (!actions.length) return;
+    libraryImageContext = { src: src, title: title, target: target };
     var menu = $("libraryImageContextMenu");
+    menu.querySelector("[data-library-context-title]").textContent = title;
+    menu.querySelector("[data-library-context-actions]").innerHTML = actions.join("");
     var copyButton = menu.querySelector('[data-library-image-menu-action="copy"]');
-    copyButton.disabled = libraryImageCopyBusy;
-    copyButton.textContent = libraryImageCopyBusy ? "复制中…" : "复制";
+    if (copyButton) {
+      copyButton.disabled = libraryImageCopyBusy;
+      copyButton.textContent = libraryImageCopyBusy ? "复制中…" : "复制图片";
+    }
     menu.hidden = false;
     positionLibraryImageContextMenu(menu, event.clientX, event.clientY);
-    copyButton.focus();
+    var firstMenuButton = copyButton || menu.querySelector("[data-library-context-import]") || menu.querySelector("[data-library-context-action]");
+    if (firstMenuButton) firstMenuButton.focus();
+  }
+  function openLibraryResourceFolder(target, endpoint) {
+    if (!target || !endpoint) return;
+    jsonRequest(endpoint, "POST").then(function (data) {
+      showToast(data.message || "已打开媒体所在文件夹");
+    }).catch(function (error) {
+      showToast("打开所在文件夹失败：" + error.message, true);
+    });
+  }
+  function deleteLibraryResource(target, endpoint) {
+    if (!target || !target.entry || !endpoint) return;
+    var title = target.entry.title || (target.kind === "block" ? "这块积木" : "该媒体");
+    if (target.kind === "block") {
+      if (!window.confirm("删除「" + title + "」？\n已经加入组装台的内容不会改变。")) return;
+    } else if (!window.confirm("删除「" + title + "」？\n将同时删除媒体文件和索引内容。")) return;
+    jsonRequest(endpoint, "DELETE").then(function () {
+      if (target.kind === "block") {
+        state.libraryBlocks = state.libraryBlocks.filter(function (item) { return item.id !== target.id; });
+      } else if (target.kind === "action") {
+        state.actions = state.actions.filter(function (item) { return item.id !== target.id; });
+      } else if (target.kind === "reference") {
+        state.references = state.references.filter(function (item) { return item.id !== target.id; });
+      }
+      renderAll();
+      showToast("「" + title + "」已删除");
+    }).catch(function (error) {
+      showToast("删除失败：" + error.message, true);
+    });
   }
   function imageBlobAsPng(blob) {
     if (String(blob.type || "").toLowerCase() === "image/png") return Promise.resolve(blob);
@@ -3252,8 +3777,10 @@
     }
     libraryImageCopyBusy = true;
     var copyButton = $("libraryImageContextMenu").querySelector('[data-library-image-menu-action="copy"]');
-    copyButton.disabled = true;
-    copyButton.textContent = "复制中…";
+    if (copyButton) {
+      copyButton.disabled = true;
+      copyButton.textContent = "复制中…";
+    }
     var imageBlob = fetch(src, { credentials: "same-origin" }).then(function (response) {
       if (!response.ok) throw new Error("图片加载失败");
       return response.blob();
@@ -3273,8 +3800,10 @@
       showToast("图片复制失败：" + (error && error.message ? error.message : "请检查剪贴板权限"), true);
     }).finally(function () {
       libraryImageCopyBusy = false;
-      copyButton.disabled = false;
-      copyButton.textContent = "复制";
+      if (copyButton) {
+        copyButton.disabled = false;
+        copyButton.textContent = "复制图片";
+      }
     });
   }
   function openTextPreview(content, title) {
@@ -3292,7 +3821,7 @@
       localStorage.setItem(TASK_PROMPT_IMPORT_KEY, JSON.stringify({ version: 1, text: output, createdAt: Date.now() }));
       var focusImport = notifySubmitImport({ kind: "prompt" });
       showToast(focusImport ? "提示词已导入任务提交面板" : "提示词已写入任务提交页草稿");
-      if (!focusImport) window.location.href = "/";
+      if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl();
     } catch (error) {
       showToast("导入失败：无法保存本机跳转数据", true);
     }
@@ -3390,11 +3919,34 @@
       });
     });
     $("libraryList").addEventListener("contextmenu", function (event) {
-      var imageButton = event.target.closest("[data-image-preview]");
-      if (!imageButton || !event.currentTarget.contains(imageButton)) return;
-      openLibraryImageContextMenu(event, imageButton);
+      var card = event.target.closest(".library-block, .action-library-card, .reference-library-card");
+      if (!card || !event.currentTarget.contains(card)) return;
+      openLibraryImageContextMenu(event, card);
     });
     $("libraryImageContextMenu").addEventListener("click", function (event) {
+      var importButton = event.target.closest("[data-library-context-import]");
+      if (importButton) {
+        var importAsset = {
+          endpoint: importButton.dataset.libraryContextImportEndpoint,
+          label: importButton.dataset.libraryContextImportLabel,
+          title: importButton.dataset.libraryContextImportTitle,
+          toastLabel: importButton.dataset.libraryContextImportLabel,
+          mediaKind: importButton.dataset.libraryContextImportMediaKind,
+        };
+        closeLibraryImageContextMenu();
+        return openWorkflowImport(importAsset);
+      }
+      var resourceActionButton = event.target.closest("[data-library-context-action]");
+      if (resourceActionButton) {
+        var context = libraryImageContext;
+        var target = context.target;
+        var action = resourceActionButton.dataset.libraryContextAction;
+        var endpoint = resourceActionButton.dataset.libraryContextEndpoint;
+        closeLibraryImageContextMenu();
+        if (action === "open-folder") return openLibraryResourceFolder(target, endpoint);
+        if (action === "delete") return deleteLibraryResource(target, endpoint);
+        return;
+      }
       var copyButton = event.target.closest('[data-library-image-menu-action="copy"]');
       if (!copyButton) return;
       var context = libraryImageContext;
@@ -3655,12 +4207,6 @@
     $("importMedia").addEventListener("click", importMinimaxMediaToTask);
     $("downloadPrompt").addEventListener("click", downloadPrompt);
     $("generateSubjectDefinitions").addEventListener("click", generateSubjectDefinitions);
-    $("addTextStage").addEventListener("click", addTextBlock);
-    $("newGroup").addEventListener("click", startNewGroup);
-    $("groupForm").addEventListener("submit", function (event) {
-      event.preventDefault();
-      saveGroup();
-    });
     $("openCustomBlock").addEventListener("click", function () {
       if (state.libraryMode === "blocks") return openCustomModal();
       openResourceModal(state.libraryMode === "pose" || state.libraryMode === "actions" ? "action" : state.libraryMode);
@@ -3675,6 +4221,8 @@
       if (pasteButton) return pasteResourceMedia(pasteButton.dataset.resourceMediaPaste);
       var generateButton = event.target.closest("[data-resource-media-generate]");
       if (generateButton) return generateActionAuxiliary(generateButton.dataset.resourceMediaGenerate);
+      var generateVideoButton = event.target.closest("[data-resource-media-generate-video]");
+      if (generateVideoButton) return generateActionVideo();
       var slot = event.target.closest("[data-resource-media-slot]");
       if (slot) chooseResourceMedia(slot.dataset.resourceMediaSlot);
     });
@@ -3704,6 +4252,10 @@
       var file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
       if (file) setResourceMediaFile(slot.dataset.resourceMediaSlot, file);
     });
+    $("resourceMediaTypeControl").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-resource-media-type]");
+      if (button) setResourceMediaType(button.dataset.resourceMediaType);
+    });
     $("resourceMediaPicker").addEventListener("change", function (event) {
       var file = event.target.files && event.target.files[0];
       if (file) setResourceMediaFile(activeResourceMediaRole, file);
@@ -3731,7 +4283,7 @@
     $("cancelDepthImport").addEventListener("click", closeDepthImport);
     $("confirmDepthImport").addEventListener("click", confirmDepthImport);
     $("depthImportTargets").addEventListener("change", function (event) {
-      if (event.target.name === "depth-import-target") $("confirmDepthImport").disabled = false;
+      if (event.target.name === "workflow-media-target") $("confirmDepthImport").disabled = false;
     });
     $("depthImportModal").addEventListener("click", function (event) { if (event.target === $("depthImportModal")) closeDepthImport(); });
     $("customBlockForm").addEventListener("submit", function (event) {
@@ -3767,11 +4319,16 @@
           title: name,
           text: text,
           tags: parseTags($("customBlockTags").value),
+          media_type: resourceKind === "action" ? resourceMediaType : "",
           image_path: $("resourceImagePath").value.trim(),
           audio_path: $("resourceAudioPath").value.trim(),
           color_image_path: $("resourceImagePath").value.trim(),
           depth_image_path: $("resourceDepthPath").value.trim(),
           skeleton_image_path: $("resourceSkeletonPath").value.trim(),
+          video_path: $("resourceVideoPath").value.trim(),
+          depth_video_path: $("resourceDepthVideoPath").value.trim(),
+          skeleton_video_path: $("resourceSkeletonVideoPath").value.trim(),
+          depth_skeleton_video_path: $("resourceDepthSkeletonVideoPath").value.trim(),
         };
         var resourceSubmitButton = event.target.querySelector('button[type="submit"]');
         resourceSubmitButton.disabled = true;
@@ -3781,7 +4338,9 @@
         var resourceMethod = resourceId ? "PUT" : "POST";
         resourceMediaPayload().then(function (media) {
           if (media.length) resourcePayload.media = media;
-          if (!text && !resourcePayload.image_path && !resourcePayload.audio_path && !media.length) {
+          if (!text && !resourcePayload.image_path && !resourcePayload.depth_image_path && !resourcePayload.skeleton_image_path
+            && !resourcePayload.audio_path && !resourcePayload.video_path && !resourcePayload.depth_video_path
+            && !resourcePayload.skeleton_video_path && !resourcePayload.depth_skeleton_video_path && !media.length) {
             throw new Error("请填写文本或添加媒体文件");
           }
           return jsonRequest(resourceEndpoint, resourceMethod, resourcePayload);

@@ -5,7 +5,8 @@
   var taskProjects = [];
   var taskProjectId = "";
   var submitRepeatCount = 1;
-  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", workflowAccountId: "", workflowInputConfig: null, analysis: null, workflowDirty: false, bypassedNodes: {}, keys: [], accounts: [], currentAccountId: "", tasks: [], taskPage: 1, settings: null, loading: false, activeFileInputId: "", configEditor: null };
+  var submitTaskName = "";
+  var appState = { workflowId: "", remoteWorkflowId: "", workflow: null, workflowName: "", workflowSourceDir: "", workflowAccountId: "", workflowInputConfig: null, analysis: null, workflowDirty: false, bypassedNodes: {}, keys: [], accounts: [], currentAccountId: "", tasks: [], taskPage: 1, settings: null, loading: false, activeFileInputId: "", configEditor: null, mediaInputBusy: false };
   var previewUrls = {};
   var previewFiles = {};
   var draggedPreviewInputId = "";
@@ -26,6 +27,7 @@
   var draftStorageKey = "rh-workflow-desk-draft-v1";
   var pendingPromptStorageKey = "rh-workflow-desk-pending-prompt-v1";
   var pendingPromptGroupStorageKey = "rh-workflow-desk-pending-prompt-group-v1";
+  var toolboxReplayStorageKey = "rh-workflow-desk-toolbox-replay-v1";
   var submitWorkspaceStorageKey = "rh-workflow-desk-submit-workspace-v1";
   var statusLabels = {
     queued: "排队中", submitting: "提交中", running: "执行中", completed: "已完成",
@@ -51,10 +53,15 @@
     "16:9 (Widescreen)",
     "21:9 (Ultrawide)"
   ];
+  var mediaInputTypes = {
+    image: { label: "图片", classType: "LoadImage", field: "image", accept: "image/*", icon: "▧" },
+    audio: { label: "音频", classType: "LoadAudio", field: "audio", accept: "audio/*", icon: "♫" },
+    video: { label: "视频", classType: "VHS_LoadVideo", field: "video", accept: "video/*", icon: "▶" }
+  };
 
   function $(id) { return document.getElementById(id); }
   function normalizeSubmitWorkspaceSection(value) {
-    return ["submit", "codex", "media"].indexOf(String(value || "").trim()) !== -1 ? String(value).trim() : "submit";
+    return ["submit", "codex", "media", "tts"].indexOf(String(value || "").trim()) !== -1 ? String(value).trim() : "submit";
   }
   function activateSubmitWorkspaceSection(value, options) {
     var section = normalizeSubmitWorkspaceSection(value);
@@ -378,6 +385,7 @@
       version: 1,
       projectId: taskProjectId,
       repeatCount: submitRepeatCount,
+      taskName: submitTaskName,
       workflow: previous.workflow || null
     };
     if (appState.workflow && appState.analysis && appState.workflowId) {
@@ -517,6 +525,11 @@
     if (draft.repeatCount != null) {
       var savedRepeatCount = Number(draft.repeatCount);
       if (Number.isFinite(savedRepeatCount)) submitRepeatCount = Math.min(20, Math.max(1, Math.round(savedRepeatCount)));
+    }
+    if (typeof draft.taskName === "string") {
+      submitTaskName = draft.taskName;
+      var taskNameInput = $("taskName");
+      if (taskNameInput) taskNameInput.value = submitTaskName;
     }
     syncSubmitRepeatControl();
     var savedWorkflow = draft.workflow;
@@ -681,10 +694,55 @@
     return instanceTypeLabels[String(task && task.instance_type || "default").toLowerCase()] || instanceTypeLabels.default;
   }
 
+  function taskWorkflowId(task) {
+    return String(task && (task.workflow_id || task.remote_workflow_id || task.local_workflow_id) || "").trim();
+  }
+
+  function taskDisplayName(task) {
+    var customName = String(task && (task.task_name || task.output_prefix) || "").trim();
+    return customName || String(task && task.workflow_name || "任务").trim() || "任务";
+  }
+
+  function isToolboxTask(task) {
+    return String(task && task.task_type || "").trim().toLowerCase() === "toolbox";
+  }
+
+  function toolboxReplaySection(task) {
+    var custom = task && task.custom_inputs && typeof task.custom_inputs === "object" ? task.custom_inputs : {};
+    var tool = String(custom.tool || "").trim();
+    if (tool === "codex") return "codex";
+    if (tool === "tts") return "tts";
+    return "media";
+  }
+
+  function replayToolboxTask(data) {
+    var savedTask = data && data.task && typeof data.task === "object" ? data.task : {};
+    activateSubmitWorkspaceSection(toolboxReplaySection(savedTask), { updateUrl: true });
+    if (window.RHToolbox && typeof window.RHToolbox.replayTask === "function") {
+      window.RHToolbox.replayTask(data).catch(function (error) { showToast("恢复工具箱任务失败：" + error.message, true); });
+    } else {
+      window.__rhPendingToolboxReplay = data;
+    }
+  }
+
+  function consumeToolboxReplay() {
+    var raw = "";
+    try {
+      raw = window.localStorage.getItem(toolboxReplayStorageKey) || "";
+      if (raw) window.localStorage.removeItem(toolboxReplayStorageKey);
+    } catch (error) {}
+    if (!raw) return;
+    try {
+      replayToolboxTask(JSON.parse(raw));
+    } catch (error) {
+      showToast("工具箱任务清单无法读取", true);
+    }
+  }
+
   function taskCompletionNotice(tasks) {
     if (!tasks.length) return;
     if (tasks.length === 1) {
-      var taskName = String(tasks[0].workflow_name || "工作流").trim() || "工作流";
+      var taskName = taskDisplayName(tasks[0]);
       showToast("任务完成：" + taskName);
       return;
     }
@@ -727,6 +785,7 @@
     var start = (appState.taskPage - 1) * TASK_PAGE_SIZE;
     var visibleTasks = tasks.slice(start, start + TASK_PAGE_SIZE);
     list.innerHTML = visibleTasks.map(function (task) {
+      var displayName = taskDisplayName(task);
       var outputCount = (task.outputs || []).filter(function (item) { return item.kind === "file"; }).length;
       var outputLabel = outputCount ? outputCount + " 个产物" : (task.status === "completed" ? "无文件产物" : "");
       var costLabel = formatTaskCost(task);
@@ -737,11 +796,17 @@
       var statusClass = esc(task.status);
       var errorText = taskErrorText(task);
       var progressMarkup = errorText ? '<button class="task-error task-error-copy" type="button" data-action="copy-task-error" title="点击复制完整错误信息" aria-label="复制完整错误信息">' + esc(taskErrorSummary(errorText)) + '</button>' : esc(task.progress || "等待调度…");
+      var toolboxTask = isToolboxTask(task);
+      var workflowId = taskWorkflowId(task) || "未记录";
+      var taskActionLabel = toolboxTask ? "复现任务" : "加载任务";
+      var taskMeta = '<span>' + esc(taskCredentialLabel(task)) + '</span><span>·</span>' +
+        (toolboxTask ? '' : '<span>机型 ' + esc(taskInstanceLabel(task)) + '</span><span>·</span>') +
+        queueLabel + '<span>workflowId ' + esc(workflowId) + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span>';
       return '<article class="task-card ' + statusClass + '" data-task-id="' + esc(task.id) + '">' +
-        '<div class="task-card-main" data-action="load-task" role="button" tabindex="0" aria-label="加载任务：' + esc(task.workflow_name) + '" title="点击加载任务">' +
-        '<div class="task-top"><button class="task-name task-name-button" type="button" data-action="open-task" title="打开任务详情" aria-label="打开任务 ' + esc(task.workflow_name) + '">' + esc(task.workflow_name) + '</button>' +
+        '<div class="task-card-main" data-action="load-task" role="button" tabindex="0" aria-label="' + taskActionLabel + '：' + esc(displayName) + '" title="点击' + taskActionLabel + '">' +
+        '<div class="task-top"><button class="task-name task-name-button" type="button" data-action="open-task" title="打开任务详情" aria-label="打开任务 ' + esc(displayName) + '">' + esc(displayName) + '</button>' +
         '<span class="task-status ' + statusClass + '">' + statusLabel(task.status) + '</span></div>' +
-        '<div class="task-meta"><span>' + esc(taskCredentialLabel(task)) + '</span><span>·</span><span>机型 ' + esc(taskInstanceLabel(task)) + '</span><span>·</span>' + queueLabel + '<span>workflowId ' + esc(task.remote_workflow_id || "未记录") + '</span><span>·</span><span>' + formatTime(task.created_at) + '</span></div>' +
+        '<div class="task-meta">' + taskMeta + '</div>' +
         '<div class="task-progress">' + progressMarkup + '</div>' +
         '</div><div class="task-footer"><span class="task-footer-info"><span class="task-output-count">' + esc(outputLabel) + '</span>' + (costLabel ? '<span class="task-cost">' + esc(costLabel) + '</span>' : '') + '<span class="task-duration">' + esc(durationLabel) + '</span></span>' +
         '<span class="task-actions">' +
@@ -896,12 +961,16 @@
     }
     var telegramSettings = appState.settings.telegram || {};
     if ($("telegramBotToken") && document.activeElement !== $("telegramBotToken")) $("telegramBotToken").value = "";
-    if ($("telegramChatId") && document.activeElement !== $("telegramChatId")) $("telegramChatId").value = telegramSettings.chat_id || "";
+    if ($("telegramPushChatId") && document.activeElement !== $("telegramPushChatId")) $("telegramPushChatId").value = telegramSettings.push_chat_id || telegramSettings.chat_id || "";
+    if ($("telegramInboundChatId") && document.activeElement !== $("telegramInboundChatId")) $("telegramInboundChatId").value = telegramSettings.inbound_chat_id || telegramSettings.chat_id || "";
     if ($("telegramEnabled") && document.activeElement !== $("telegramEnabled")) {
       $("telegramEnabled").checked = Boolean(telegramSettings.enabled);
     }
     if ($("telegramInboundEnabled") && document.activeElement !== $("telegramInboundEnabled")) {
       $("telegramInboundEnabled").checked = Boolean(telegramSettings.inbound_enabled);
+    }
+    if ($("telegramVideoInboundEnabled") && document.activeElement !== $("telegramVideoInboundEnabled")) {
+      $("telegramVideoInboundEnabled").checked = Boolean(telegramSettings.video_inbound_enabled);
     }
     if ($("telegramInboundWorkflow")) {
       var inboundWorkflow = telegramSettings.inbound_workflow_name || telegramSettings.inbound_workflow_id || "未选择工作流";
@@ -968,7 +1037,16 @@
     if (input) input.value = appState.remoteWorkflowId;
   }
 
+  function setWorkflowPanelTitle() {
+    var title = $("workflowPanelTitle");
+    if (!title) return;
+    var name = appState.workflow && appState.workflowName ? canonicalWorkflowName(appState.workflowName) : "导入 API 工作流";
+    title.textContent = name;
+    title.title = name === "导入 API 工作流" ? "" : name;
+  }
+
   function setWorkflowLibraryActionsVisible(visible) {
+    setWorkflowPanelTitle();
     ["editWorkflowSnapshotButton", "saveWorkflowLibraryButton", "exportWorkflowButton"].forEach(function (id) {
       var button = $(id);
       if (button) button.hidden = !visible;
@@ -1319,6 +1397,159 @@
     return "image";
   }
 
+  function mediaInputSpec(kind) {
+    return mediaInputTypes[["image", "audio", "video"].indexOf(kind) !== -1 ? kind : "image"];
+  }
+
+  function isMediaInputItem(item) {
+    var classType = String(item && item.class_type || "").toLowerCase();
+    var field = String(item && item.field || "").toLowerCase();
+    if (classType.indexOf("loadimage") !== -1 || classType.indexOf("loadaudio") !== -1 || classType.indexOf("loadvideo") !== -1) return true;
+    return classType.indexOf("load") !== -1 && ["image", "audio", "video"].indexOf(field) !== -1;
+  }
+
+  function mediaInputDeleteMarkup(item) {
+    return '<button class="input-media-delete" type="button" data-action="remove-media-input" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '" title="删除这个媒体输入节点" aria-label="删除 ' + esc(item.title || item.id) + '">删除</button>';
+  }
+
+  function minimaxConditioningNodeIds(workflow) {
+    return Object.keys(workflow || {}).filter(function (nodeId) {
+      if (nodeId === "__rh_meta__") return false;
+      var node = workflow[nodeId];
+      return String(node && node.class_type || "").toLowerCase().indexOf("minimaxh3audioconditioning") !== -1;
+    });
+  }
+
+  function nextMinimaxReferenceField(workflow, kind, nodeIds) {
+    var prefix = kind === "audio" ? "ref_audios.ref_audio_" : (kind === "video" ? "ref_videos.ref_video_" : "ref_images.ref_image_");
+    var used = {};
+    (nodeIds || []).forEach(function (nodeId) {
+      var inputs = workflow && workflow[String(nodeId)] && workflow[String(nodeId)].inputs;
+      Object.keys(inputs && typeof inputs === "object" ? inputs : {}).forEach(function (field) {
+        if (field.indexOf(prefix) !== 0) return;
+        var index = field.slice(prefix.length);
+        if (/^\d+$/.test(index)) used[index] = true;
+      });
+    });
+    var next = 0;
+    while (used[String(next)]) next += 1;
+    return prefix + next;
+  }
+
+  function refreshWorkflowAnalysis(previousValues, successMessage) {
+    if (!appState.workflow) return Promise.reject(new Error("请先导入或加载 API 工作流"));
+    var activeBypassed = bypassedNodeList().filter(function (nodeId) { return Boolean(appState.workflow[String(nodeId)]); });
+    return jsonRequest("/api/workflows/analyze", "POST", {
+      filename: appState.workflowName || "workflow_api.json",
+      content: JSON.stringify(appState.workflow),
+      source_dir: appState.workflowSourceDir || "",
+      account_id: appState.workflowAccountId || "",
+      remote_workflow_id: appState.remoteWorkflowId || ($("remoteWorkflowId") ? $("remoteWorkflowId").value.trim() : ""),
+    }).then(function (data) {
+      appState.analysis = effectiveWorkflowAnalysis(data.analysis || {}, appState.workflowInputConfig, appState.workflow);
+      setBypassedNodeMap(activeBypassed);
+      appState.workflowDirty = true;
+      renderAnalysis(appState.analysis);
+      restoreInputValues(previousValues || {});
+      saveDraftNow();
+      if (successMessage) showToast(successMessage);
+      return data;
+    });
+  }
+
+  function updateMediaInputConfig(inputItem, remove) {
+    var config = appState.workflowInputConfig;
+    if (!config || config.mode !== "manual" || !Array.isArray(config.items)) return;
+    var items = config.items.filter(function (item) { return String(item && item.id || (item && item.node_id + ":" + item.field) || "") !== String(inputItem.id); });
+    if (!remove) items.push({
+      id: inputItem.id,
+      node_id: inputItem.node_id,
+      field: inputItem.field,
+      title: inputItem.title,
+      label: inputItem.title,
+      class_type: inputItem.class_type,
+      kind: "file",
+      required: true,
+    });
+    appState.workflowInputConfig = { mode: "manual", items: items };
+  }
+
+  function updateMediaInputModalCopy() {
+    var kind = $("mediaInputType") ? $("mediaInputType").value : "image";
+    var spec = mediaInputSpec(kind);
+    var description = $("mediaInputTypeDescription");
+    if (description) description.textContent = spec.label + "会创建 " + spec.classType + " 节点，并自动接入第一个 MiniMax H3 节点的 " + (kind === "image" ? "ref_images" : (kind === "audio" ? "ref_audios" : "ref_videos")) + " 输入；没有 H3 节点时保留为独立媒体输入。";
+  }
+
+  function openMediaInputModal() {
+    if (!appState.workflow) return showToast("请先导入或加载 API 工作流", true);
+    var select = $("mediaInputType");
+    if (select) select.value = "image";
+    updateMediaInputModalCopy();
+    window.RHMotion.openModal("mediaInputModal", "closeMediaInput");
+  }
+
+  function closeMediaInputModal() {
+    if (appState.mediaInputBusy) return;
+    window.RHMotion.closeModal("mediaInputModal");
+  }
+
+  function addMediaInputNode() {
+    if (appState.mediaInputBusy) return;
+    if (!appState.workflow) return showToast("请先导入或加载 API 工作流", true);
+    var kind = $("mediaInputType") ? $("mediaInputType").value : "image";
+    var spec = mediaInputSpec(kind);
+    var values = collectInputs();
+    var nodeId = nextWorkflowNodeId();
+    var inputs = {};
+    inputs[spec.field] = "";
+    if (kind === "audio") inputs.audioUI = "";
+    appState.workflow[nodeId] = {
+      inputs: inputs,
+      class_type: spec.classType,
+      _meta: { title: "媒体输入 · " + spec.label, rh_dynamic_media: true, rh_media_kind: kind }
+    };
+    var minimaxNodeIds = minimaxConditioningNodeIds(appState.workflow);
+    var referenceField = minimaxNodeIds.length ? nextMinimaxReferenceField(appState.workflow, kind, minimaxNodeIds) : "";
+    if (referenceField) {
+      minimaxNodeIds.forEach(function (minimaxNodeId) {
+        appState.workflow[String(minimaxNodeId)].inputs[referenceField] = [nodeId, 0];
+      });
+    }
+    updateMediaInputConfig({ id: nodeId + ":" + spec.field, node_id: nodeId, field: spec.field, title: "媒体输入 · " + spec.label, class_type: spec.classType }, false);
+    appState.mediaInputBusy = true;
+    window.RHMotion.closeModal("mediaInputModal");
+    refreshWorkflowAnalysis(values, "已添加" + spec.label + "输入节点 " + nodeId + (referenceField ? "，已接入 " + referenceField : ""))
+      .catch(function (error) { showToast("添加媒体输入失败：" + error.message, true); })
+      .finally(function () { appState.mediaInputBusy = false; });
+  }
+
+  function removeMediaInputNode(nodeId, inputId) {
+    if (appState.mediaInputBusy || !appState.workflow || !appState.workflow[String(nodeId)]) return;
+    var node = appState.workflow[String(nodeId)];
+    var title = String(node._meta && node._meta.title || node.class_type || ("节点 " + nodeId));
+    if (!window.confirm("删除「" + title + "」吗？相关 H3 引用连线也会一并移除。")) return;
+    var values = collectInputs();
+    Object.keys(appState.workflow).forEach(function (otherId) {
+      if (otherId === String(nodeId) || otherId === "__rh_meta__") return;
+      var other = appState.workflow[otherId];
+      var inputs = other && other.inputs && typeof other.inputs === "object" ? other.inputs : {};
+      Object.keys(inputs).forEach(function (field) {
+        var link = inputs[field];
+        if (Array.isArray(link) && String(link[0]) === String(nodeId)) delete inputs[field];
+      });
+    });
+    delete appState.workflow[String(nodeId)];
+    delete appState.bypassedNodes[String(nodeId)];
+    updateMediaInputConfig({ id: inputId || String(nodeId) + ":" + String(node.inputs && Object.keys(node.inputs)[0] || "") }, true);
+    var preview = document.querySelector('.file-preview[data-preview-id="' + CSS.escape(String(inputId || "")) + '"]');
+    if (preview) clearImagePreview(String(inputId));
+    appState.mediaInputBusy = true;
+    refreshWorkflowAnalysis(values, "已删除媒体输入节点 " + nodeId)
+      .catch(function (error) { showToast("删除媒体输入失败：" + error.message, true); })
+      .finally(function () { appState.mediaInputBusy = false; });
+  }
+
   function expectedPreviewKind(inputId) {
     var preview = document.querySelector('.file-preview[data-preview-id="' + CSS.escape(inputId) + '"]');
     var kind = String(preview && preview.dataset.expectedPreviewKind || "").toLowerCase();
@@ -1585,16 +1816,25 @@
     renderWorkflowConfigBuilder();
   }
 
+  function inputTitleMarkup(item, fallbackTitle) {
+    var nodeId = String(item && (item.node_id || item.id) || "").trim();
+    var title = String(item && (item.title || fallbackTitle || item.class_type) || nodeId).trim();
+    return '<div class="input-title-row">' + (nodeId ? '<code class="input-node-id" aria-label="节点编号 ' + esc(nodeId) + '">' + esc(nodeId) + '</code>' : '') + '<div class="input-title">' + esc(title) + '</div></div>';
+  }
+
   function renderAnalysis(analysis) {
     var summary = $("workflowSummary");
     var inputs = $("workflowInputs");
     var files = analysis.file_inputs || [];
+    var mediaFiles = files.filter(isMediaInputItem);
+    var otherFiles = files.filter(function (item) { return !isMediaInputItem(item); });
     var prompts = analysis.prompt_inputs || [];
     var randomNoise = analysis.random_noise_inputs || [];
     var resolutions = analysis.resolution_inputs || [];
     var customInputs = analysis.custom_inputs || [];
     summary.hidden = false;
-    summary.innerHTML = '<div class="summary-item"><strong>' + files.length + '</strong> 个文件输入</div>' +
+    summary.innerHTML = '<div class="summary-item"><strong>' + mediaFiles.length + '</strong> 个媒体输入</div>' +
+      '<div class="summary-item"><strong>' + otherFiles.length + '</strong> 个其他文件输入</div>' +
       '<div class="summary-item"><strong>' + prompts.length + '</strong> 个提示词节点</div>' +
       '<div class="summary-item"><strong>' + resolutions.length + '</strong> 个尺寸节点</div>' +
       '<div class="summary-item"><strong>' + randomNoise.length + '</strong> 个 RandomNoise</div>' +
@@ -1602,29 +1842,39 @@
       '<div class="summary-item bypass-summary"><strong>' + bypassedNodeList().length + '</strong> 个旁路节点</div>' +
       '<div class="summary-item">已完成节点扫描</div>';
     var html = "";
-    var inputNodes = files.map(function (item) { return { item: item, kind: "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(resolutions.map(function (item) { return { item: item, kind: "resolution" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; })).concat(customInputs.map(function (item) { return { item: item, kind: "custom" }; }));
+    var inputNodes = files.map(function (item) { return { item: item, kind: isMediaInputItem(item) ? "media-file" : "file" }; }).concat(prompts.map(function (item) { return { item: item, kind: "prompt" }; })).concat(resolutions.map(function (item) { return { item: item, kind: "resolution" }; })).concat(randomNoise.map(function (item) { return { item: item, kind: "random-noise" }; })).concat(customInputs.map(function (item) { return { item: item, kind: "custom" }; }));
     if (inputNodes.length) {
       html += '<div class="input-jump-bar"><div class="input-jump-heading"><span>输入节点</span><small>点击标签快速定位</small></div><div class="input-jump-list">';
       inputNodes.forEach(function (entry) {
         var item = entry.item;
-        var icon = entry.kind === "file" ? "▧" : (entry.kind === "prompt" ? "Aa" : (entry.kind === "resolution" ? "WH" : (entry.kind === "random-noise" ? "RN" : "CFG")));
+        var icon = entry.kind === "media-file" ? "◉" : (entry.kind === "file" ? "▧" : (entry.kind === "prompt" ? "Aa" : (entry.kind === "resolution" ? "WH" : (entry.kind === "random-noise" ? "RN" : "CFG"))));
         html += '<button class="input-jump-tag ' + entry.kind + '" type="button" data-action="jump-input" data-input-id="' + esc(item.id) + '" title="定位到 ' + esc(item.id) + '"><span class="input-jump-icon" aria-hidden="true">' + icon + '</span><span class="input-jump-title">' + esc(item.title || item.class_type) + '</span><code>' + esc(item.id) + '</code></button>';
       });
       html += '</div></div>';
     }
-    if (files.length) {
-      html += '<div class="section-kicker">文件输入 · 必填</div>';
-      files.forEach(function (item) {
+    if (appState.workflow) {
+      html += '<div class="media-input-toolbar"><div><strong>媒体输入</strong><span>图片、音频、视频都可以独立添加；有 MiniMax H3 节点时会自动接入对应参考槽。</span></div><button class="secondary-button button-compact media-input-add-button" type="button" data-action="add-media-input">＋ 添加媒体输入</button></div>';
+    }
+    if (mediaFiles.length) {
+      html += '<div class="section-kicker media-input-section-label">媒体输入 · 图片 / 音频 / 视频</div>';
+      mediaFiles.forEach(function (item) {
         var originalFileValue = String(item.default || "");
-        var visibleFileValue = /^(\/|[A-Za-z]:[\\/])/.test(originalFileValue) ? originalFileValue : "";
-        html += '<div class="input-card file-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.title) + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+        html += '<div class="input-card file-input-card media-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label">' + inputTitleMarkup(item) + '<div class="input-card-subhead"><div class="input-type">' + esc(mediaKindLabel(mediaKindForInput(item)) + ' · ' + item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + mediaInputDeleteMarkup(item) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+          filePreviewMarkup({ id: item.id, default: originalFileValue, field: item.field, class_type: item.class_type });
+      });
+    }
+    if (otherFiles.length) {
+      html += '<div class="section-kicker">其他文件输入 · 必填</div>';
+      otherFiles.forEach(function (item) {
+        var originalFileValue = String(item.default || "");
+        html += '<div class="input-card file-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label">' + inputTitleMarkup(item) + '<div class="input-card-subhead"><div class="input-type">' + esc(item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           filePreviewMarkup({ id: item.id, default: originalFileValue, field: item.field, class_type: item.class_type });
       });
     }
     if (prompts.length) {
       html += '<div class="section-kicker prompt-section-label">提示词节点 · 可选</div>';
       prompts.forEach(function (item) {
-        html += '<div class="input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.title) + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+        html += '<div class="input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label">' + inputTitleMarkup(item) + '<div class="input-card-subhead"><div class="input-type">' + esc(item.class_type) + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           '<textarea class="prompt-value" data-input-id="' + esc(item.id) + '" placeholder="可以直接输入，也可以从下方加载 .txt">' + esc(item.default || "") + '</textarea>' +
           '<div class="prompt-tools"><input class="prompt-picker" data-input-id="' + esc(item.id) + '" type="file" accept=".txt,text/plain" hidden /><button class="file-button" data-action="pick-prompt" data-input-id="' + esc(item.id) + '" type="button">加载 TXT</button><button class="file-button translate-prompt-button" data-action="translate-prompt" data-input-id="' + esc(item.id) + '" type="button"><span>翻译中文</span></button><span class="file-meta" data-prompt-meta-id="' + esc(item.id) + '">读取内容后仍可继续编辑</span></div></div>';
       });
@@ -1637,7 +1887,7 @@
         var options = (item.aspect_ratio_options || resolutionAspectRatios).map(function (option) {
           return '<option value="' + esc(option) + '"' + (option === aspect ? ' selected' : '') + '>' + esc(option) + '</option>';
         }).join("");
-        html += '<div class="input-card resolution-card' + (isNodeBypassed(item.node_id || item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.title || "尺寸") + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.class_type || "ResolutionSelector") + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id || item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+        html += '<div class="input-card resolution-card' + (isNodeBypassed(item.node_id || item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div class="input-card-label">' + inputTitleMarkup(item, "尺寸") + '<div class="input-card-subhead"><div class="input-type">' + esc(item.class_type || "ResolutionSelector") + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id || item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           '<div class="resolution-grid"><label class="field-group"><span class="field-label">宽高比例</span><select class="resolution-aspect" data-node-id="' + esc(item.node_id || item.id) + '">' + options + '</select></label>' +
           '<div class="field-group resolution-megapixels-group"><div class="resolution-field-label"><span class="field-label">megapixels</span><button class="resolution-help" type="button" aria-label="查看 megapixels 分辨率参考" aria-expanded="false">?</button></div><input class="resolution-megapixels" data-node-id="' + esc(item.node_id || item.id) + '" type="number" min="0.1" max="4" step="0.1" inputmode="decimal" aria-label="megapixels" value="' + esc(megapixels) + '" /><div class="resolution-reference-popover" role="tooltip">' + resolutionReferenceMarkup(aspect) + '</div></div></div>' +
           '<div class="file-meta">megapixels 范围 0.1–4</div></div>';
@@ -1648,7 +1898,7 @@
       randomNoise.forEach(function (item) {
         var seed = item.seed == null || item.seed === "" ? 0 : item.seed;
         var mode = item.mode === "fixed" ? "fixed" : "randomize";
-        html += '<div class="input-card random-noise-card' + (isNodeBypassed(item.node_id || item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.title || "RandomNoise") + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.class_type || "RandomNoise") + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id || item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+        html += '<div class="input-card random-noise-card' + (isNodeBypassed(item.node_id || item.id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id || item.id) + '"><div class="input-card-head"><div class="input-card-label">' + inputTitleMarkup(item, "RandomNoise") + '<div class="input-card-subhead"><div class="input-type">' + esc(item.class_type || "RandomNoise") + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id || item.id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           '<div class="random-noise-grid"><label class="field-group"><span class="field-label">随机种子</span><input class="random-noise-seed" data-node-id="' + esc(item.node_id || item.id) + '" type="number" inputmode="numeric" step="1" value="' + esc(seed) + '" /></label>' +
           '<label class="field-group"><span class="field-label">模式</span><select class="random-noise-mode" data-node-id="' + esc(item.node_id || item.id) + '"><option value="fixed"' + (mode === "fixed" ? " selected" : "") + '>固定</option><option value="randomize"' + (mode === "randomize" ? " selected" : "") + '>随机</option></select></label></div>' +
           '<div class="file-meta">导出或提交时写入 ' + esc(item.seed_field || "noise_seed") + ' 和 mode</div></div>';
@@ -1670,7 +1920,7 @@
         } else {
           control = '<input class="custom-value" data-input-id="' + esc(item.id) + '" type="' + (kind === "number" ? "number" : "text") + '"' + (kind === "number" ? ' step="any" inputmode="decimal"' : '') + ' value="' + esc(value) + '" placeholder="' + esc(item.required ? "请输入必填值" : "可选") + '" />';
         }
-        html += '<div class="input-card custom-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label"><div class="input-title">' + esc(item.label || item.title || item.field) + '</div><div class="input-card-subhead"><div class="input-type">' + esc(item.kind || "text") + (item.required ? " · 必填" : " · 可选") + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
+        html += '<div class="input-card custom-input-card' + (isNodeBypassed(item.node_id) ? ' is-bypassed' : '') + '" data-input-id="' + esc(item.id) + '" data-node-id="' + esc(item.node_id) + '"><div class="input-card-head"><div class="input-card-label">' + inputTitleMarkup(item, item.label || item.title || item.field) + '<div class="input-card-subhead"><div class="input-type">' + esc(item.kind || "text") + (item.required ? " · 必填" : " · 可选") + '</div><span class="input-bypass-note" hidden>本次提交会移除该节点及其直接输出连线</span></div></div><div class="input-card-actions">' + bypassControlMarkup(item.id, item.node_id) + '<span class="field-code">' + esc(item.id) + '</span></div></div>' +
           '<div class="custom-input-control">' + control + '</div><div class="file-meta">节点字段：' + esc(item.node_id + ":" + item.field) + '</div></div>';
       });
     }
@@ -1742,6 +1992,11 @@
   function loadTask(task) {
     return request("/api/tasks/" + encodeURIComponent(task.id) + "/load").then(function (data) {
       var savedTask = data.task || task;
+      if (isToolboxTask(savedTask) || data.kind === "toolbox") {
+        replayToolboxTask(data);
+        showToast("已载入工具箱任务，可再次复现：" + (savedTask.workflow_name || "本地处理"));
+        return;
+      }
       queuePromptGroupSnapshot(data.prompt_group);
       var promptGroup = promptGroupSnapshot(data.prompt_group);
       appState.workflowId = data.workflow_id || "";
@@ -1768,6 +2023,8 @@
         customInputs: savedTask.custom_inputs || {},
         bypassedNodes: savedTask.bypassed_nodes || savedTask.bypassed_inputs || []
       });
+      submitTaskName = String(savedTask.task_name || savedTask.output_prefix || "").trim();
+      if ($("taskName")) $("taskName").value = submitTaskName;
       applyPendingPrompt();
       $("workflowFilename").textContent = "已加载 " + appState.workflowName;
       $("workflowRemoteConfig").hidden = false;
@@ -1775,7 +2032,7 @@
       setAnalysisStatus("已加载任务数据，可以继续修改后提交。", false);
       saveDraftNow();
       notifyPromptWorkbench(promptGroup);
-      showToast("已加载任务：" + appState.workflowName);
+      showToast("已加载任务：" + taskDisplayName(savedTask));
     });
   }
 
@@ -2739,6 +2996,7 @@
       appState.workflowAccountId = prepared.accountId;
       appState.remoteWorkflowId = prepared.remoteWorkflowId;
       appState.workflowInputConfig = config;
+      setWorkflowPanelTitle();
       appState.analysis = effectiveWorkflowAnalysis(analysis, config, appState.workflow);
       var catalog = serverCatalog || workflowInputCatalogFallback();
       appState.analysis.input_catalog = catalog;
@@ -2803,7 +3061,9 @@
     var workflow = prepared.workflow;
     var payload = { content: JSON.stringify(workflow, null, 2) };
     if (appState.workflowInputConfig && typeof appState.workflowInputConfig === "object") payload.input_config = appState.workflowInputConfig;
-    payload.filename = canonicalWorkflowName(appState.workflowName || "workflow_api.json");
+    var snapshotName = canonicalWorkflowName(appState.workflowName || "workflow_api.json");
+    payload.name = snapshotName;
+    payload.filename = snapshotName;
     payload.account_id = appState.workflowAccountId || "";
     payload.remote_workflow_id = prepared.remoteWorkflowId;
     payload.source_dir = appState.workflowSourceDir || "";
@@ -2813,23 +3073,22 @@
       button.textContent = "保存中…";
       button.setAttribute("aria-busy", "true");
     }
-    var sourceWorkflowId = String(appState.workflowId || "").trim();
-    var savePath = sourceWorkflowId ? "/api/workflows/" + encodeURIComponent(sourceWorkflowId) + "/replace" : "/api/workflows";
-    var saveMethod = sourceWorkflowId ? "PATCH" : "POST";
-    // New imports still use jsonRequest("/api/workflows", "POST", payload); loaded library snapshots use /replace.
-    jsonRequest(savePath, saveMethod, payload).then(function (data) {
+    // Saving from the task page always creates a new registered workflow. The
+    // current library entry is a source snapshot, not the record being edited.
+    jsonRequest("/api/workflows", "POST", payload).then(function (data) {
       var record = data.record || {};
       appState.workflow = data.workflow || workflow;
       appState.workflowDirty = false;
       if (record.id) appState.workflowId = String(record.id);
       if (record.name) appState.workflowName = canonicalWorkflowName(record.name);
+      setWorkflowPanelTitle();
       if (record.remote_workflow_id != null) setRemoteWorkflowId(record.remote_workflow_id);
       if (record.source_dir != null) appState.workflowSourceDir = String(record.source_dir || "");
       if (record.account_id != null) appState.workflowAccountId = String(record.account_id || "");
       if (record.input_config && typeof record.input_config === "object") appState.workflowInputConfig = record.input_config;
       saveDraftNow();
       $("workflowFilename").textContent = "已保存 " + appState.workflowName;
-      showToast(sourceWorkflowId ? "已创建新工作流包并迁移活动引用" : (data.prompt_group ? "已保存工作流和当前提示词组" : "已保存为新的工作流"));
+      showToast(data.prompt_group ? "已保存工作流和当前提示词组（新的工作流）" : "已保存为新的工作流");
       window.dispatchEvent(new CustomEvent("rh-workflow-library-refresh", {
         detail: { workflowId: appState.workflowId }
       }));
@@ -2882,6 +3141,7 @@
     });
     if (invalidResolution) return showToast("尺寸节点的比例无效，megapixels 范围必须是 0.1 到 4", true);
     var repeatCount = normalizedSubmitRepeatCount(values);
+    submitTaskName = String($("taskName") ? $("taskName").value : submitTaskName).trim();
     saveDraftNow();
     var project;
     try { project = selectedTaskProject(); }
@@ -2921,7 +3181,8 @@
       bypassed_nodes: values.bypassedNodes,
       instance_type: $("instanceType").value || "default",
       project: project,
-      output_dir: $("outputDir").value.trim() || null
+      output_dir: $("outputDir").value.trim() || null,
+      output_prefix: submitTaskName || null
     };
     var localRandomSeedMode = hasRandomizedNoise(values);
     var baseSubmissionWorkflow = workflowPayload || appState.workflow;
@@ -3055,10 +3316,12 @@
   }
 
   function renderTaskDetail(task, renderOutputs) {
-    $("modalTitle").textContent = task.workflow_name || "任务详情";
+    $("modalTitle").textContent = taskDisplayName(task);
     var meta = $("modalMeta");
     var costLabel = formatTaskCost(task);
-    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>API Key：' + esc(taskCredentialLabel(task)) + '</span><span>机型：' + esc(taskInstanceLabel(task)) + '</span><span>workflowId：' + esc(task.remote_workflow_id || "未记录") + '</span><span>taskId：' + esc(task.remote_task_id || "尚未返回") + '</span>' + (costLabel ? '<span>' + esc(costLabel) + '</span>' : '') + '<span>' + esc(formatTaskDuration(task)) + '</span><span>' + formatTime(task.created_at) + '</span>';
+    var toolboxTask = isToolboxTask(task);
+    var detailWorkflowId = taskWorkflowId(task) || "未记录";
+    meta.innerHTML = '<span>' + statusLabel(task.status) + '</span><span>API Key：' + esc(taskCredentialLabel(task)) + '</span>' + (toolboxTask ? '' : '<span>机型：' + esc(taskInstanceLabel(task)) + '</span>') + '<span>workflowId：' + esc(detailWorkflowId) + '</span><span>taskId：' + esc(task.remote_task_id || "尚未返回") + '</span>' + (costLabel ? '<span>' + esc(costLabel) + '</span>' : '') + '<span>' + esc(formatTaskDuration(task)) + '</span><span>' + formatTime(task.created_at) + '</span>';
     renderDiagnostics(task);
     if (renderOutputs) renderTaskOutputs(task);
   }
@@ -3297,6 +3560,13 @@
       window.RHMotion.closeModal("workflowEditorModal");
     });
     $("restoreWorkflowJson").addEventListener("click", restoreWorkflowJson);
+    $("mediaInputType").addEventListener("change", updateMediaInputModalCopy);
+    $("confirmMediaInput").addEventListener("click", addMediaInputNode);
+    $("closeMediaInput").addEventListener("click", closeMediaInputModal);
+    $("cancelMediaInput").addEventListener("click", closeMediaInputModal);
+    $("mediaInputModal").addEventListener("click", function (event) {
+      if (event.target === this) closeMediaInputModal();
+    });
     var appThemeToggle = $("themeToggle");
     if (appThemeToggle) appThemeToggle.addEventListener("click", function () {
       var nextTheme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
@@ -3330,6 +3600,14 @@
       var inputId = trigger.dataset.inputId;
       if (action === "toggle-bypass") {
         toggleNodeBypass(trigger.dataset.nodeId || String(inputId || "").split(":", 1)[0]);
+        return;
+      }
+      if (action === "add-media-input") {
+        openMediaInputModal();
+        return;
+      }
+      if (action === "remove-media-input") {
+        removeMediaInputNode(trigger.dataset.nodeId, inputId);
         return;
       }
       var inputCard = trigger.closest(".input-card");
@@ -3501,7 +3779,14 @@
       this.value = String(submitRepeatCount);
       saveDraftNow();
     });
-    document.addEventListener("rh-submit-task", submitTask);
+    $("taskName").addEventListener("input", function () {
+      submitTaskName = this.value;
+      scheduleDraftSave();
+    });
+    document.addEventListener("rh-submit-task", function () {
+      activateSubmitWorkspaceSection("submit", { updateUrl: true });
+      submitTask();
+    });
     $("saveWorkflowLibraryButton").addEventListener("click", saveWorkflowLibrary);
     $("exportWorkflowButton").addEventListener("click", exportWorkflow);
     $("workflowEditorModal").addEventListener("click", function (event) {
@@ -3597,15 +3882,23 @@
       button.disabled = true;
       jsonRequest("/api/settings", "PATCH", {
         telegram_bot_token: $("telegramBotToken").value.trim(),
-        telegram_chat_id: $("telegramChatId").value.trim(),
+        telegram_push_chat_id: $("telegramPushChatId").value.trim(),
+        telegram_inbound_chat_id: $("telegramInboundChatId").value.trim(),
         telegram_enabled: $("telegramEnabled").checked,
         telegram_inbound_enabled: $("telegramInboundEnabled").checked,
+        telegram_inbound_mode: telegramSettings.inbound_mode || "fixed",
+        telegram_inbound_workflow_id: telegramSettings.inbound_workflow_id || "",
+        telegram_inbound_folder_id: telegramSettings.inbound_folder_id || "",
+        telegram_video_inbound_enabled: $("telegramVideoInboundEnabled").checked,
+        telegram_video_inbound_workflow_id: telegramSettings.video_inbound_workflow_id || "",
       }).then(function (data) {
         var settings = data.telegram || {};
         $("telegramBotToken").value = "";
-        $("telegramChatId").value = settings.chat_id || "";
+        $("telegramPushChatId").value = settings.push_chat_id || settings.chat_id || "";
+        $("telegramInboundChatId").value = settings.inbound_chat_id || settings.chat_id || "";
         $("telegramEnabled").checked = Boolean(settings.enabled);
         $("telegramInboundEnabled").checked = Boolean(settings.inbound_enabled);
+        $("telegramVideoInboundEnabled").checked = Boolean(settings.video_inbound_enabled);
         if ($("telegramInboundWorkflow")) {
           $("telegramInboundWorkflow").textContent = settings.inbound_workflow_id ? ("当前工作流：" + (settings.inbound_workflow_name || settings.inbound_workflow_id) + (settings.inbound_enabled ? " · 已启用" : " · 未启用")) : "未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。";
         }
@@ -3628,9 +3921,11 @@
       jsonRequest("/api/settings", "PATCH", { telegram_clear: true }).then(function (data) {
         var settings = data.telegram || {};
         $("telegramBotToken").value = "";
-        $("telegramChatId").value = settings.chat_id || "";
+        $("telegramPushChatId").value = settings.push_chat_id || settings.chat_id || "";
+        $("telegramInboundChatId").value = settings.inbound_chat_id || settings.chat_id || "";
         $("telegramEnabled").checked = false;
         $("telegramInboundEnabled").checked = false;
+        $("telegramVideoInboundEnabled").checked = false;
         if ($("telegramInboundWorkflow")) $("telegramInboundWorkflow").textContent = "未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。";
         $("telegramStatus").textContent = settings.configured ? "已配置 · 未启用" : "未配置";
         $("telegramStatus").classList.remove("ready");
@@ -3698,6 +3993,7 @@
         submitAfterInitialLoad();
       });
     }
+    consumeToolboxReplay();
     restoreDraft();
     applyPendingPrompt();
     openSettingsFromQuery();

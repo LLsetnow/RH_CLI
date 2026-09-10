@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from web.prompt_store import PromptStore
+from web.backend.prompt_store import PromptStore
 
 
 def test_prompt_store_creates_json_library_and_json_state_documents(tmp_path):

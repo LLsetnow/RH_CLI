@@ -2,6 +2,8 @@
 
 纯本地 RunningHub API 工作流提交 Web 应用。运行状态和缓存保存在本目录下的 `data/`；基础积木源文件保存在 VideoMake 参考资源目录：
 
+源码按职责分层：`backend/` 保存 Python 服务与业务模块，`static/` 是唯一的浏览器静态资源目录，`electron/` 保存桌面主进程，`scripts/` 保存启动和打包脚本。`web/` 顶层不放源代码文件。
+
 - `data/keys.json`：本地 API Key（权限 600）
 - `data/accounts.json`：本地托管账号的名称、站点和签到状态（权限 600，不保存密码或 token）
 - `data/tasks.sqlite3`：任务历史、状态、taskId、阶段日志和脱敏后的 `error_detail`
@@ -11,7 +13,7 @@
 - `data/workflow/<workflow_id>/manifest.json`：工作流注册文件，保存顶层配置并索引同目录下的工作流文件和提示词组文件
 - `data/workflow-registry.json`：工作流库的内部目录索引；只有登记到这里的完整工作流包会显示在“工作流”页面
 - `data/pasted-inputs/`：从剪贴板粘贴的图片输入副本，供任务提交时使用
-- `data/outputs/`：默认输出目录下的任务产物；每个 `<task_id>/` 还会保存本次提交的 `workflow_api.json`、`prompt_group.json` 和路径清单 `manifest.json`。输入文件不复制到任务目录，只在任务记录、工作流快照和清单中保存原始路径
+- `data/outputs/`：默认输出目录下的任务产物；普通工作流任务的 `<task_id>/` 保存 `workflow_api.json`、`prompt_group.json` 和路径清单 `manifest.json`，Codex/深度/骨骼/角色语音工具箱任务保存包含本地 workflowId、统一 `feature` 类型、提示词、画幅参数和输入路径的 `manifest.json`。输入文件不复制到任务目录，只保存原始路径
 - `VideoMake/ref/Resources.json`：ref 资源目录和各 JSON 索引的机器可读入口；其中 `sources.prompt` 指向提示词基础积木文件。`data/prompt/state.json` 保存当前临时组装顺序；独立提示词组文件只作为历史或兼容数据保留，新的工作流包以自身携带的提示词组为准。基础积木路径由该索引解析，内容放在 JSON 的 `blocks` 数组中，每项包含 `id`、`category`、`tags`、`title` 和 `text`
 - `VideoMake/ref/pose/pose.json`：动作库 JSON 源文件。动作原图、深度图和骨骼图仍从 ref 原目录读取，不会复制到本项目
 - `VideoMake/ref/Resources.json`：ref 资源目录和各 JSON 索引的机器可读入口清单
@@ -25,13 +27,13 @@
 在仓库根目录运行：
 
 ```bash
-./web/start.sh
+./web/scripts/start.sh
 ```
 
 默认地址为 `http://127.0.0.1:8766`。也可以不自动打开浏览器：
 
 ```bash
-./web/start.sh --no-browser
+./web/scripts/start.sh --no-browser
 ```
 
 macOS Electron 开发版：
@@ -514,11 +516,11 @@ flowchart LR
 - “导出当前 API”会把当前文件/提示词配置和已旁路后的节点图一起写入 JSON；非空的 `__rh_meta__.workflowId` 会一并保留。重新导入该文件时会自动回填；真正提交前会剥离这段本地元数据，不会发送给 RunningHub。
 - 提示词页面的“积木库”可以切换“基础积木”、动作、人物、音频、背景和服装。媒体库统一以 `VideoMake/ref` 为根目录，读取 `pose/pose.json`、`character/character.json`、`audio/audio.json`、`background/background.json` 和 `clothes/clothes.json`；设置页只需配置一次 ref 文件夹。动作/参考卡片支持媒体预览、文本预览和标签编辑，保存后会回写对应 JSON。
 - 提示词工坊的“自由文本”卡片可通过阿里云翻译为英文；原文修改后需要重新翻译。复制、导出 TXT 和导入任务始终只使用英文翻译结果，存在未翻译的非空自由文本时会阻止这三个操作。阿里云翻译可在任务提交页“设置”中配置，或使用 `ALIBABA_CLOUD_ACCESS_KEY_ID` / `ALIBABA_CLOUD_ACCESS_KEY_SECRET` 环境变量。
-- 任务完成并保存本地产物后，可在任务提交页“设置”中启用 Telegram 成片推送；图片、视频、音频和其它文件分别使用对应的 Telegram Bot API 接口发送。推送失败不会影响任务状态，发送结果会写入任务阶段日志；Bot Token 只保存在本机 `web/data/keys.json`，也支持 `RH_TELEGRAM_BOT_TOKEN`、`RH_TELEGRAM_CHAT_ID` 和 `RH_TELEGRAM_ENABLED` 环境变量。
+- 任务完成并保存本地产物后，可在任务提交页“设置”中启用 Telegram 成片推送；图片、视频、音频和其它文件分别使用对应的 Telegram Bot API 接口发送。推送与入站共用 Bot Token，但分别使用推送 Chat ID 和入站 Chat ID；入站 Chat ID 为 `*` 时允许任意聊天。推送失败不会影响任务状态，发送结果会写入任务阶段日志；Bot Token 只保存在本机 `web/data/keys.json`，也支持 `RH_TELEGRAM_BOT_TOKEN`、`RH_TELEGRAM_PUSH_CHAT_ID`、`RH_TELEGRAM_INBOUND_CHAT_ID` 和 `RH_TELEGRAM_ENABLED` 环境变量。
 - 基础积木路径从 `VideoMake/ref/Resources.json` 的 `sources.prompt` 解析。JSON 顶层使用 `blocks` 数组，每项包含 `id`、`category`、`tags`、`title` 和 `text`；内容按 MiniMax H3 的模式对齐、参考定义、镜头动作、摄影机、声音、对白和音乐字段拆分，拖入工作台后按顺序拼接。修改、新建和删除都会直接回写该 JSON 文件。
 - 动作库中的“导入媒体”会读取当前任务提交页草稿里的 `LoadImage` 节点；动作卡片导入对应深度图，人物/背景/服装等参考卡片导入原图。选择目标节点后，文件的本机路径会写回该节点并保存到本机草稿，之后打开任务提交页会自动恢复。没有任务草稿时，需要先在任务提交页导入工作流。
 - 动作素材必须使用同一个 basename 配对：原图放在 `VideoMake/ref/pose/color/<name>.<ext>`，深度图统一直接放在 `VideoMake/ref/pose/depth/<name>_depth.png`，骨骼图统一直接放在 `VideoMake/ref/pose/skeleton/<name>_skeleton.png`，不再使用深度图分类子目录；`pose.json` 的同一个动作对象中维护 `color_image_path`、`depth_image_path` 和可选的 `skeleton_image_path`。动作库会检查原图/深度图配对，并额外暴露骨骼图是否可用。
-- “任务提交”页通过子导航提供三个可扩展功能区：普通 RunningHub 工作流提交、Codex 图像生成、深度与骨骼处理。Codex 图像生成支持 0 到多张参考图，并可选择 1K/2K/4K 分辨率和画幅比例，默认 1K、9:16；命令细节完全由应用在后台处理，用户只需填写生成要求。每次运行自动生成 `task_<id>`，输出写入设置中的产物目录。深度、骨骼和深度+骨骼支持图片单张处理及视频逐帧处理，结果也进入任务历史和成片库；旧地址 `/toolbox` 会自动跳转到 Codex 功能区。
+- “任务提交”页通过子导航提供四个功能区：普通 RunningHub 工作流提交、Codex 图像生成、深度与骨骼处理、角色语音。Codex 图像生成支持 0 到多张参考图，并可选择 1K/2K/4K 分辨率和画幅比例，默认 1K、9:16；命令细节完全由应用在后台处理，用户只需填写生成要求。每次运行自动生成 `task_<id>`，输出写入设置中的产物目录，并记录稳定的本地 workflowId 与 manifest。深度、骨骼和深度+骨骼支持图片单张处理及视频逐帧处理，可选择原始、480p、720p 或 1080p，并可指定只处理视频前 N 秒；空白表示整段视频，超过输入实际时长时自动按实际时长处理。选择目标分辨率时会保持画幅比例，先生成短边对应的工作副本，再按处理时长截取、抽帧和推理。同样记录输入路径、模式、分辨率和处理时长并进入任务历史和成片库。角色语音从 `VideoMake/ref/tts/` 自动发现完整的 GPT-SoVITS V4 人物资产，选择人物并输入文本后生成 WAV，也进入统一任务队列和成片库。工具箱任务均可从任务队列或成片库恢复参数再次运行，旧地址 `/toolbox` 会自动跳转到 Codex 功能区。
 - 工作流输入、提示词工坊媒体、任务提交节点视频和成片库视频都支持右键菜单“截取当前帧”；截取位置取当前播放时间，保存后可继续作为图片输入使用。
 - 动作编辑器支持用本机 DWPose 自动生成骨骼图；它输出接近你参考图的 OpenPose 风格黑底、彩色肢体线、面部/手部关键点图，保持原图尺寸。运行环境位于 `VideoMake/.runtime/pose_dwpose/`，模型文件为 `checkpoints/dw-ll_ucoco_384.onnx` 和 `checkpoints/yolox_l.onnx`，生成脚本为 `VideoMake/tools/pose_skeleton_macos.py`。
 - 骨骼图生成面向常规真人姿态参考；动漫、严重遮挡、极近裁切或非人体主体可能识别不完整，识别失败时不会写入空图。
@@ -528,4 +530,5 @@ flowchart LR
 - 设置中的“账号管理”支持分别添加 `runninghub.cn` 和 `runninghub.ai` 账号。首次添加会打开对应站点的 Electron 登录窗口；每个账号使用独立的持久化本地浏览器会话，关闭并重新启动 Electron 后仍可继续使用。点击“签到”会刷新会话并读取 RunningHub 网站返回的 `loginCoinTriggered` / `loginDailyCoin` 状态；如果网站要求重新认证，需要在账号窗口重新登录。网站未返回奖励时，界面会如实显示“未返回奖励”，不会把 100 RH 币当成已签到。
 - 应用重启后，任务会先检查 `<输出目录>/<task_id>/`：如果已经存在产物，就重建本地产物记录并恢复为“已完成”；如果没有产物但保留了远程 `taskId`，则自动恢复轮询并继续下载；只有没有远程 `taskId` 的任务才会保留为“已中断”。
 - 成片库中每个产物卡片的工作流名称可以直接点击；应用会读取该任务保存的 API 快照和输入配置，写入本地任务提交草稿，但不会自动跳转页面。
+- 成片库提供“功能”筛选标签，可在任务提交、Codex 图像生成、深度与骨骼、角色语音四个子功能之间快速切换；功能标签来自任务类型，不依赖用户手动维护，并会同步作用于导出和批量清理。
 - 成片库右上角的“删除一星成片”和“导出所有案例”只作用于当前打开的项目文件夹，按钮数量也按该文件夹计算；“未归类”只处理未归类成片，返回“全部成片”后才使用全库范围。删除只移除标记为 1 星的产物文件和产物记录，保留任务记录及其他星级产物，执行前会二次确认；导出只打包带“案例”标签的媒体文件。

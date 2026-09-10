@@ -21,7 +21,7 @@
   <body>
     <div class="app-shell workflows-shell">
       <header class="topbar">
-        <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
+        <a class="brand-lockup brand-home-link" href="/?workspace=submit" aria-label="返回 RH Workflow Desk">
           <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
           <span>
             <span class="brand-name">RH Workflow Desk</span>
@@ -54,7 +54,7 @@
             <span class="top-nav-label">提示词工坊</span>
           </span>
         </a>
-        <a class="top-nav-link" href="/">
+        <a class="top-nav-link" href="/?workspace=submit">
           <span class="top-nav-content">
             <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>
             <span class="top-nav-label">任务提交</span>
@@ -167,7 +167,33 @@
             </label>
           </div>
           <select id="workflowRecordPromptGroup" hidden aria-hidden="true"><option value=""></option></select>
-          <div class="workflow-editor-note">这里编辑的是临时工作流快照。保存时会把当前提示词工坊状态一起写入新工作流包；API Key 不会写入工作流文件。</div>
+          <section class="workflow-editor-config" aria-labelledby="workflowEditorConfigLabel">
+            <div class="workflow-editor-json-heading">
+              <div>
+                <span id="workflowEditorConfigLabel" class="field-label">配置输入</span>
+                <span class="field-hint">自动识别模式只读取工作流原始输入；与任务提交页使用相同的编辑器，可调整任务提交时显示的节点、类型和默认值。</span>
+              </div>
+            </div>
+            <label class="workflow-config-mode field-group">
+              <span class="field-label">输入识别模式</span>
+              <select id="workflowConfigMode">
+                <option value="auto">自动识别文件、提示词、尺寸和 RandomNoise</option>
+                <option value="manual">手动选择需要在任务提交页显示的输入</option>
+              </select>
+            </label>
+            <div id="workflowConfigBuilder" class="workflow-config-builder">
+              <div class="workflow-config-builder-heading">
+                <div><strong>添加输入字段</strong><span>可以把任意标量节点字段加入任务提交面板。</span></div>
+              </div>
+              <div class="workflow-config-add-grid">
+                <label class="field-group"><span class="field-label">节点</span><select id="workflowConfigNode"></select></label>
+                <label class="field-group"><span class="field-label">字段</span><select id="workflowConfigField"></select></label>
+                <button id="addWorkflowConfigItem" class="secondary-button button-compact" type="button">＋ 添加</button>
+              </div>
+            </div>
+            <div id="workflowConfigItems" class="workflow-config-items"></div>
+          </section>
+          <div class="workflow-editor-note">这里编辑的是工作流库条目的临时快照。保存时会把当前输入配置和提示词工坊状态一起写入新的工作流包；API Key 不会写入工作流文件。</div>
           <span class="sr-only" hidden>关联提示词组由工作流包内部保存，不单独展示。</span>
           <section class="workflow-editor-json" aria-labelledby="workflowEditorJsonLabel">
             <div class="workflow-editor-json-heading">
@@ -187,41 +213,6 @@
             <button id="saveWorkflowRecord" class="primary-button" type="submit"><span class="button-glyph">✓</span><span>保存到工作流库</span></button>
           </div>
         </form>
-      </section>
-    </div>
-
-    <div id="workflowConfigModal" class="modal-backdrop" hidden>
-      <section class="workflow-config-panel dialog-panel" role="dialog" aria-modal="true" aria-labelledby="workflowConfigTitle">
-        <div class="modal-heading">
-          <div>
-            <div class="section-kicker">INPUT CONFIGURATION</div>
-            <h2 id="workflowConfigTitle">配置输入节点</h2>
-          </div>
-          <button id="closeWorkflowConfig" class="close-button" type="button" aria-label="关闭">×</button>
-        </div>
-        <p id="workflowConfigHint" class="workflow-editor-hint">自动识别模式只读取工作流原始输入；切换到手动选择后，已添加的节点可编辑默认值。</p>
-        <label class="workflow-config-mode field-group">
-          <span class="field-label">输入识别模式</span>
-          <select id="workflowConfigMode">
-            <option value="auto">自动识别文件、提示词、尺寸和 RandomNoise</option>
-            <option value="manual">手动选择需要在任务提交页显示的输入</option>
-          </select>
-        </label>
-        <div id="workflowConfigBuilder" class="workflow-config-builder">
-          <div class="workflow-config-builder-heading">
-            <div><strong>添加输入字段</strong><span>可以把任意标量节点字段加入任务提交面板。</span></div>
-          </div>
-          <div class="workflow-config-add-grid">
-            <label class="field-group"><span class="field-label">节点</span><select id="workflowConfigNode"></select></label>
-            <label class="field-group"><span class="field-label">字段</span><select id="workflowConfigField"></select></label>
-            <button id="addWorkflowConfigItem" class="secondary-button button-compact" type="button">＋ 添加</button>
-          </div>
-        </div>
-        <div id="workflowConfigItems" class="workflow-config-items"></div>
-        <div class="dialog-actions">
-          <button id="cancelWorkflowConfig" class="secondary-button" type="button">取消</button>
-          <button id="saveWorkflowConfig" class="primary-button" type="button"><span class="button-glyph">✓</span><span>应用到临时快照</span></button>
-        </div>
       </section>
     </div>
 

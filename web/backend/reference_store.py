@@ -145,7 +145,7 @@ class ReferenceStore:
             Path(configured).expanduser() if configured else None,
             DEFAULT_REFERENCE_ROOT,
             Path.home() / "Documents" / "VideoMake" / "ref",
-            Path(__file__).resolve().parents[2] / "VideoMake" / "ref",
+            Path(__file__).resolve().parents[3] / "VideoMake" / "ref",
         ]
         for candidate in candidates:
             if candidate and candidate.is_dir():
@@ -277,6 +277,14 @@ class ReferenceStore:
             if not reference or kind not in {"image", "audio"}:
                 return None
             return self._resolve_media(reference, "image_path" if kind == "image" else "audio_path")
+
+    def media_folder(self, reference_id: str) -> Path | None:
+        """Return the folder containing the first available reference media file."""
+        for kind in ("image", "audio"):
+            media_path = self.media_path(reference_id, kind)
+            if media_path is not None:
+                return media_path.parent
+        return None
 
     def public_references(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -416,8 +424,23 @@ class ReferenceStore:
             if not current:
                 raise KeyError(f"找不到参考资源：{reference_id}")
             kind = current["kind"]
-            entries = [item for item in self._references if item["kind"] == kind and item["id"] != reference_id]
+            media_paths = []
+            for media_kind in ("image", "audio"):
+                media_path = self.media_path(reference_id, media_kind)
+                if media_path is not None and media_path not in media_paths:
+                    media_paths.append(media_path)
+            remaining_references = [item for item in self._references if item["id"] != reference_id]
+            protected_paths = {
+                media_path
+                for item in remaining_references
+                for media_kind in ("image", "audio")
+                if (media_path := self.media_path(item["id"], media_kind)) is not None
+            }
+            media_paths = [media_path for media_path in media_paths if media_path not in protected_paths]
+            entries = [item for item in remaining_references if item["kind"] == kind]
             self._write_source(kind, entries)
+            for media_path in media_paths:
+                media_path.unlink(missing_ok=True)
             self.refresh(force=True)
 
     def kind_counts(self) -> dict[str, int]:

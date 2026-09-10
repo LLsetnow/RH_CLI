@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import json
 import mimetypes
 import os
@@ -24,22 +25,29 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from rh_cli.errors import RhCliError
 
-from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, matches_public_output_filters, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_dashboard, public_key, public_output_media, public_outputs, public_state, redact_detail, safe_name, workflow_input_catalog
+from .app import DATA_ROOT, WEB_ROOT, LocalStore, TaskManager, matches_public_output_filters, pick_local_directory_on_macos, pick_local_file_on_macos, public_account, public_dashboard, public_key, public_output_media, public_outputs, public_state, redact_detail, safe_name, toolbox_workflow_id, workflow_input_catalog
 from .action_store import ActionStore
 from .prompt_store import PromptStore
 from .prompt_writer import AliyunPromptWriter
 from .reference_store import ReferenceStore
+from .tts import TtsClient, public_tts_voices
 from .translation import AliyunTranslationClient
 from .toolbox import (
     IMAGE_SUFFIXES,
+    MEDIA_PROCESS_FPS,
     TOOLBOX_MODES,
+    VIDEO_SUFFIXES,
     default_codex_image_command,
     expand_command_template,
     find_generated_media,
     normalize_codex_image_resolution,
     normalize_codex_image_size,
+    normalize_media_duration,
+    normalize_media_resolution,
+    normalize_media_start_frame,
     normalize_toolbox_mode,
     process_media,
+    process_media_variants,
     run_local_command,
     validate_local_file,
 )
@@ -67,6 +75,7 @@ def output_action_filters(query: str) -> dict[str, str]:
         "type",
         "rating",
         "workflow",
+        "feature",
         "tag_case",
         "tag_h",
         "range_start",
@@ -83,6 +92,7 @@ def output_action_filters(query: str) -> dict[str, str]:
             "type",
             "rating",
             "workflow",
+            "feature",
             "tag_case",
             "tag_h",
             "range_start",
@@ -428,9 +438,11 @@ def _decode_prompt_media(item: object, kind: str, role: str) -> tuple[bytes, str
     filename = safe_name(str(item.get("name") or ""), "resource-media")
     suffix = Path(filename).suffix.lower()
     inferred_suffix = PROMPT_MEDIA_MIME_EXTENSIONS.get(mime, "")
-    if suffix not in PROMPT_MEDIA_IMAGE_EXTENSIONS | PROMPT_MEDIA_AUDIO_EXTENSIONS:
+    if suffix not in PROMPT_MEDIA_IMAGE_EXTENSIONS | PROMPT_MEDIA_AUDIO_EXTENSIONS | PROMPT_MEDIA_VIDEO_EXTENSIONS:
         suffix = inferred_suffix
-    if kind == "action" or role in {"image", "color", "depth"}:
+    if kind == "action" and role in {"video", "depth_video", "skeleton_video", "depth_skeleton_video"}:
+        allowed = PROMPT_MEDIA_VIDEO_EXTENSIONS
+    elif kind == "action" or role in {"image", "color", "depth", "skeleton"}:
         allowed = PROMPT_MEDIA_IMAGE_EXTENSIONS
     elif role == "audio":
         allowed = PROMPT_MEDIA_AUDIO_EXTENSIONS
@@ -498,7 +510,10 @@ def prepare_prompt_resource_body(
     decoded: dict[str, tuple[bytes, str]] = {}
     for item in media:
         role = str(item.get("role") or "").strip().lower() if isinstance(item, dict) else ""
-        allowed_roles = {"color", "depth", "skeleton"} if kind == "action" else {"audio"} if kind == "audio" else {"image"}
+        allowed_roles = (
+            {"color", "depth", "skeleton", "video", "depth_video", "skeleton_video", "depth_skeleton_video"}
+            if kind == "action" else {"audio"} if kind == "audio" else {"image"}
+        )
         if role not in allowed_roles:
             raise RhCliError("INVALID_PROMPT_MEDIA", "未知的素材槽位。")
         if role in decoded:
@@ -509,16 +524,32 @@ def prepare_prompt_resource_body(
         color_current = str(current.get("color_image_path") or current.get("image_path") or "").strip()
         depth_current = str(current.get("depth_image_path") or "").strip()
         skeleton_current = str(current.get("skeleton_image_path") or "").strip()
+        video_current = str(current.get("video_path") or current.get("original_video_path") or "").strip()
+        depth_video_current = str(current.get("depth_video_path") or "").strip()
+        skeleton_video_current = str(current.get("skeleton_video_path") or "").strip()
+        depth_skeleton_video_current = str(current.get("depth_skeleton_video_path") or "").strip()
         color_item = decoded.get("color")
         depth_item = decoded.get("depth")
         skeleton_item = decoded.get("skeleton")
-        pair_source = color_current or depth_current or skeleton_current
+        video_item = decoded.get("video")
+        depth_video_item = decoded.get("depth_video")
+        skeleton_video_item = decoded.get("skeleton_video")
+        depth_skeleton_video_item = decoded.get("depth_skeleton_video")
+        pair_source = color_current or depth_current or skeleton_current or video_current or depth_video_current or skeleton_video_current or depth_skeleton_video_current
         if not pair_source and color_item:
             pair_source = color_item[1]
         if not pair_source and depth_item:
             pair_source = depth_item[1]
         if not pair_source and skeleton_item:
             pair_source = skeleton_item[1]
+        if not pair_source and video_item:
+            pair_source = video_item[1]
+        if not pair_source and depth_video_item:
+            pair_source = depth_video_item[1]
+        if not pair_source and skeleton_video_item:
+            pair_source = skeleton_video_item[1]
+        if not pair_source and depth_skeleton_video_item:
+            pair_source = depth_skeleton_video_item[1]
         pair_stem = Path(pair_source).stem
         for marker in ("_depth", "_skeleton"):
             if pair_stem.endswith(marker):
@@ -527,8 +558,13 @@ def prepare_prompt_resource_body(
         pair_stem = safe_name(pair_stem, "action")
         color_dir = root / "pose" / "color"
         depth_dir = root / "pose" / "depth"
-        current_paths = {color_current, depth_current, skeleton_current}
-        if not color_current and not depth_current and not skeleton_current:
+        current_paths = {
+            value for value in (
+                color_current, depth_current, skeleton_current,
+                video_current, depth_video_current, skeleton_video_current, depth_skeleton_video_current,
+            ) if value
+        }
+        if not current_paths:
             counter = 2
             original_stem = pair_stem
             while any(
@@ -537,6 +573,10 @@ def prepare_prompt_resource_body(
                     list(color_dir.glob(pair_stem + ".*"))
                     + list(depth_dir.glob(pair_stem + "_depth.*"))
                     + list((root / "pose" / "skeleton").glob(pair_stem + "_skeleton.*"))
+                    + list((root / "pose" / "video").glob(pair_stem + ".*"))
+                    + list((root / "pose" / "video-depth").glob(pair_stem + "_depth.*"))
+                    + list((root / "pose" / "video-skeleton").glob(pair_stem + "_skeleton.*"))
+                    + list((root / "pose" / "video-depth-skeleton").glob(pair_stem + "_depth_skeleton.*"))
                 )
             ):
                 pair_stem = f"{original_stem}-{counter}"
@@ -557,6 +597,19 @@ def prepare_prompt_resource_body(
             payload["skeleton_image_path"] = _write_prompt_media(
                 root, root / "pose" / "skeleton", pair_stem + "_skeleton" + skeleton_suffix, skeleton_item[0], replace_relative=skeleton_current,
             )
+        video_targets = (
+            ("video_path", video_current, video_item, root / "pose" / "video", ""),
+            ("depth_video_path", depth_video_current, depth_video_item, root / "pose" / "video-depth", "_depth"),
+            ("skeleton_video_path", skeleton_video_current, skeleton_video_item, root / "pose" / "video-skeleton", "_skeleton"),
+            ("depth_skeleton_video_path", depth_skeleton_video_current, depth_skeleton_video_item, root / "pose" / "video-depth-skeleton", "_depth_skeleton"),
+        )
+        for field, current_path, selected, directory, marker in video_targets:
+            if not selected:
+                continue
+            suffix = Path(current_path).suffix or Path(selected[1]).suffix
+            payload[field] = _write_prompt_media(
+                root, directory, pair_stem + marker + suffix, selected[0], replace_relative=current_path,
+            )
     else:
         media_role = "audio" if kind == "audio" else "image"
         selected = decoded.get(media_role)
@@ -566,6 +619,44 @@ def prepare_prompt_resource_body(
             payload["audio_path" if media_role == "audio" else "image_path"] = relative
 
     payload.pop("media", None)
+    return payload
+
+
+def prepare_action_video_generation_body(
+    body: dict[str, object],
+    root_value: str | Path,
+    current: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Persist the original video for the auto-generation save step."""
+    root = Path(root_value).expanduser().resolve()
+    if not root.is_dir():
+        raise RhCliError("MEDIA_LIBRARY_NOT_FOUND", f"媒体库根目录不存在：{root}")
+    payload = dict(body)
+    current = current if isinstance(current, dict) else {}
+    current_video = str(current.get("video_path") or current.get("original_video_path") or "").strip()
+    source = payload.pop("source", None)
+    legacy_media = payload.pop("media", None)
+    if source is None and isinstance(legacy_media, list):
+        if len(legacy_media) > 1:
+            raise RhCliError("INVALID_PROMPT_MEDIA", "自动生成只能选择一个原视频。")
+        source = legacy_media[0] if legacy_media else None
+    if source is not None:
+        raw, filename = _decode_prompt_media(source, "action", "video")
+        pair_source = current_video or str(payload.get("video_path") or "").strip() or filename
+        pair_stem = Path(pair_source).stem
+        for marker in ("_depth_skeleton", "_depth", "_skeleton"):
+            if pair_stem.endswith(marker):
+                pair_stem = pair_stem[: -len(marker)]
+                break
+        suffix = Path(filename).suffix or ".mp4"
+        payload["video_path"] = _write_prompt_media(
+            root,
+            root / "pose" / "video",
+            safe_name(pair_stem, "action") + suffix,
+            raw,
+            replace_relative=current_video,
+        )
+    payload.pop("source_path", None)
     return payload
 
 
@@ -736,12 +827,149 @@ def generate_prompt_skeleton(body: dict[str, object], root_value: str | Path) ->
             pass
 
 
+def _copy_prompt_media_file(root: Path, directory: Path, filename: str, source: Path) -> str:
+    """Copy a generated media file into the configured resource tree safely."""
+    directory.mkdir(parents=True, exist_ok=True)
+    requested = safe_name(filename, "resource-video.mp4")
+    target = directory / requested
+    if target.exists():
+        stem = Path(requested).stem
+        suffix = Path(requested).suffix
+        counter = 2
+        while target.exists():
+            target = directory / f"{stem}-{counter}{suffix}"
+            counter += 1
+    temporary = directory / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(target)
+    except OSError as exc:
+        raise RhCliError("PROMPT_MEDIA_SAVE_FAILED", "无法把自动生成的视频保存到媒体库，请重试。") from exc
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return _prompt_relative(root, target)
+
+
+def generate_prompt_video(body: dict[str, object], root_value: str | Path) -> dict[str, object]:
+    """Generate paired action videos on one shared 24fps processing timeline."""
+    root = Path(root_value).expanduser().resolve()
+    if not root.is_dir():
+        raise RhCliError("MEDIA_LIBRARY_NOT_FOUND", f"媒体库根目录不存在：{root}")
+
+    normalized_resolution = normalize_media_resolution(body.get("resolution"))
+    normalized_start_frame = normalize_media_start_frame(body.get("start_frame"))
+    normalized_duration = normalize_media_duration(body.get("duration_seconds"))
+    temporary_parent = DATA_ROOT / "prompt"
+    temporary_parent.mkdir(parents=True, exist_ok=True)
+    temporary_dir = Path(tempfile.mkdtemp(prefix="video-generation-", dir=str(temporary_parent)))
+    try:
+        source_path = str(body.get("source_path") or "").strip()
+        if source_path:
+            candidate = Path(source_path).expanduser()
+            if not candidate.is_absolute():
+                if ".." in candidate.parts:
+                    raise RhCliError("INVALID_PROMPT_MEDIA", "原视频路径不能跳出媒体库根目录。")
+                candidate = (root / candidate).resolve()
+            source = validate_local_file(candidate, label="原视频", suffixes=VIDEO_SUFFIXES)
+        else:
+            raw, filename = _decode_prompt_media(body.get("source"), "action", "video")
+            source = temporary_dir / filename
+            source.write_bytes(raw)
+            source = validate_local_file(source, label="原视频", suffixes=VIDEO_SUFFIXES)
+
+        requested_stem = safe_name(str(body.get("title") or "").strip(), "")
+        if not requested_stem:
+            requested_stem = safe_name(source.stem, "action")
+        source_suffix = source.suffix.lower() or ".mp4"
+        target_stem = requested_stem
+        target_dirs = (
+            root / "pose" / "video",
+            root / "pose" / "video-depth",
+            root / "pose" / "video-skeleton",
+            root / "pose" / "video-depth-skeleton",
+        )
+        counter = 2
+        while any(directory.joinpath(target_stem + suffix).exists() for directory, suffix in (
+            (target_dirs[0], source_suffix),
+            (target_dirs[1], "_depth.mp4"),
+            (target_dirs[2], "_skeleton.mp4"),
+            (target_dirs[3], "_depth_skeleton.mp4"),
+        )):
+            target_stem = f"{requested_stem}-{counter}"
+            counter += 1
+
+        generated = process_media_variants(
+            {"depth", "skeleton", "depth_skeleton"},
+            source,
+            temporary_dir / "generated",
+            root,
+            resolution=normalized_resolution,
+            duration_seconds=normalized_duration,
+            start_frame=normalized_start_frame,
+        )
+        paths = {
+            "video_path": _copy_prompt_media_file(root, target_dirs[0], target_stem + source_suffix, source),
+            "depth_video_path": _copy_prompt_media_file(root, target_dirs[1], target_stem + "_depth.mp4", generated["depth"]),
+            "skeleton_video_path": _copy_prompt_media_file(root, target_dirs[2], target_stem + "_skeleton.mp4", generated["skeleton"]),
+            "depth_skeleton_video_path": _copy_prompt_media_file(root, target_dirs[3], target_stem + "_depth_skeleton.mp4", generated["depth_skeleton"]),
+        }
+        return {
+            "fps": MEDIA_PROCESS_FPS,
+            "resolution": normalized_resolution,
+            "start_frame": normalized_start_frame,
+            "duration_seconds": normalized_duration,
+            "paths": paths,
+        }
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+
+
+def generate_prompt_video_variants(
+    source: Path,
+    root_value: str | Path,
+    output_dir: Path,
+    *,
+    resolution: object = "original",
+    start_frame: object = 0,
+    duration_seconds: object = None,
+) -> dict[str, str]:
+    """Generate only the derived action videos for an already-saved original."""
+    root = Path(root_value).expanduser().resolve()
+    if not root.is_dir():
+        raise RhCliError("MEDIA_LIBRARY_NOT_FOUND", f"媒体库根目录不存在：{root}")
+    source = validate_local_file(source, label="原视频", suffixes=VIDEO_SUFFIXES)
+    normalized_resolution = normalize_media_resolution(resolution)
+    normalized_start_frame = normalize_media_start_frame(start_frame)
+    normalized_duration = normalize_media_duration(duration_seconds)
+    generated = process_media_variants(
+        {"depth", "skeleton", "depth_skeleton"},
+        source,
+        output_dir,
+        root,
+        resolution=normalized_resolution,
+        duration_seconds=normalized_duration,
+        start_frame=normalized_start_frame,
+    )
+    stem = safe_name(source.stem, "action")
+    return {
+        "depth_video_path": _copy_prompt_media_file(root, root / "pose" / "video-depth", stem + "_depth.mp4", generated["depth"]),
+        "skeleton_video_path": _copy_prompt_media_file(root, root / "pose" / "video-skeleton", stem + "_skeleton.mp4", generated["skeleton"]),
+        "depth_skeleton_video_path": _copy_prompt_media_file(root, root / "pose" / "video-depth-skeleton", stem + "_depth_skeleton.mp4", generated["depth_skeleton"]),
+    }
+
+
 class ToolboxManager:
     """Run local toolbox jobs and persist them through the normal task store."""
 
     def __init__(self, store: LocalStore) -> None:
         self.store = store
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rh-toolbox")
+        self._tts = TtsClient()
+        self._action_video_jobs: dict[str, dict[str, object]] = {}
+        self._action_video_jobs_lock = threading.Lock()
 
     @staticmethod
     def _asset_path(value: object, *, label: str, suffixes: set[str]) -> Path:
@@ -762,6 +990,8 @@ class ToolboxManager:
         output_root = Path(self.store.output_dir()).expanduser().resolve()
         task_folder = output_root / task_id
         task_folder.mkdir(parents=True, exist_ok=True)
+        tool = str(custom_inputs.get("tool") or "").strip()
+        mode = str(custom_inputs.get("mode") or "").strip()
         task = {
             "id": task_id,
             "created_at": created_at,
@@ -769,6 +999,7 @@ class ToolboxManager:
             "workflow_name": str(name or "本地处理").strip() or "本地处理",
             "task_type": "toolbox",
             "remote_workflow_id": "",
+            "local_workflow_id": toolbox_workflow_id(tool, mode),
             "registered_workflow_id": "",
             "submission_source": "local",
             "files": files,
@@ -786,6 +1017,9 @@ class ToolboxManager:
             "initial_status": "running",
             "initial_progress": "已启动本地处理…",
         }
+        save_manifest = getattr(self.store, "save_toolbox_manifest", None)
+        if callable(save_manifest):
+            task["manifest_path"] = str(save_manifest(task))
         self.store.create_task(task)
         self.store.update_task(task_id, started_at=created_at, progress="已启动本地处理…")
         return task, task_folder
@@ -942,20 +1176,72 @@ class ToolboxManager:
         except Exception as error:
             self._fail(task_id, error, started_at)
 
+    def submit_tts(self, body: dict[str, object]) -> dict[str, object]:
+        voice_id = str(body.get("voice") or body.get("voice_id") or "").strip()
+        text = str(body.get("text") or "").strip()
+        voice = self._tts.voice(voice_id)
+        if not text:
+            raise RhCliError("TTS_TEXT_MISSING", "请输入语音内容。")
+        task, task_folder = self._new_task(
+            name=f"{voice['name']} 语音生成",
+            files={"reference": str(voice["reference_path"])},
+            prompts={"text": text, "reference_text": str(voice["prompt_text"])},
+            custom_inputs={
+                "tool": "tts",
+                "engine": "GPT-SoVITS V4",
+                "voice": str(voice["id"]),
+                "voice_name": str(voice["name"]),
+                "input_type": "text",
+                "language": "中文",
+            },
+        )
+        self._executor.submit(self._run_tts, task["id"], task_folder, voice_id, text, int(task["created_at"]))
+        return self.store.task(str(task["id"])) or task
+
+    def _run_tts(self, task_id: str, task_folder: Path, voice_id: str, text: str, started_at: int) -> None:
+        try:
+            self._update_progress(task_id, "正在加载角色音色并合成语音…")
+            audio, _voice = self._tts.synthesize(voice_id, text)
+            output = task_folder / "result.wav"
+            output.write_bytes(audio)
+            self._finish(task_id, [self._file_output(output, node_id="tts")], started_at)
+        except Exception as error:
+            self._fail(task_id, error, started_at)
+
     def submit_media(self, body: dict[str, object]) -> dict[str, object]:
         mode = normalize_toolbox_mode(body.get("mode"))
+        resolution = normalize_media_resolution(body.get("resolution"))
+        duration_seconds = normalize_media_duration(body.get("duration_seconds"))
+        start_frame = normalize_media_start_frame(body.get("start_frame"))
         source = self._asset_path(body.get("input"), label="输入媒体", suffixes=IMAGE_SUFFIXES | {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"})
         label = {"depth": "深度图", "skeleton": "骨骼图", "depth_skeleton": "深度+骨骼图"}[mode]
         task, task_folder = self._new_task(
             name=label + ("视频处理" if source.suffix.lower() not in IMAGE_SUFFIXES else "处理"),
             files={"input": str(source)},
             prompts={},
-            custom_inputs={"tool": "media_processor", "mode": mode, "input_type": "video" if source.suffix.lower() not in IMAGE_SUFFIXES else "image"},
+            custom_inputs={
+                "tool": "media_processor",
+                "mode": mode,
+                "resolution": resolution,
+                "duration_seconds": duration_seconds,
+                "start_frame": start_frame,
+                "input_type": "video" if source.suffix.lower() not in IMAGE_SUFFIXES else "image",
+            },
         )
-        self._executor.submit(self._run_media, task["id"], task_folder, source, mode, int(task["created_at"]))
+        self._executor.submit(self._run_media, task["id"], task_folder, source, mode, int(task["created_at"]), resolution, duration_seconds, start_frame)
         return self.store.task(str(task["id"])) or task
 
-    def _run_media(self, task_id: str, task_folder: Path, source: Path, mode: str, started_at: int) -> None:
+    def _run_media(
+        self,
+        task_id: str,
+        task_folder: Path,
+        source: Path,
+        mode: str,
+        started_at: int,
+        resolution: str = "original",
+        duration_seconds: float | None = None,
+        start_frame: int = 0,
+    ) -> None:
         try:
             last_phase = ""
 
@@ -972,11 +1258,98 @@ class ToolboxManager:
                 task_folder,
                 self.store.media_library_root(),
                 progress=report_progress,
+                resolution=resolution,
+                duration_seconds=duration_seconds,
+                start_frame=start_frame,
             )
             outputs = [self._file_output(output, node_id=mode)]
             self._finish(task_id, outputs, started_at)
         except Exception as error:
             self._fail(task_id, error, started_at)
+
+    def submit_action_video_generation(
+        self,
+        action_store: ActionStore,
+        action_id: str,
+        source: Path,
+        *,
+        resolution: object = "original",
+        start_frame: object = 0,
+        duration_seconds: object = None,
+    ) -> dict[str, object]:
+        job_id = f"action-video-{uuid.uuid4().hex[:12]}"
+        job = {
+            "id": job_id,
+            "action_id": action_id,
+            "status": "queued",
+            "fps": MEDIA_PROCESS_FPS,
+            "resolution": normalize_media_resolution(resolution),
+            "start_frame": normalize_media_start_frame(start_frame),
+            "duration_seconds": normalize_media_duration(duration_seconds),
+            "error": "",
+        }
+        with self._action_video_jobs_lock:
+            self._action_video_jobs[job_id] = job
+        self._executor.submit(
+            self._run_action_video_generation,
+            job_id,
+            action_store,
+            action_id,
+            source,
+            job["start_frame"],
+            job["duration_seconds"],
+            job["resolution"],
+        )
+        return copy.deepcopy(job)
+
+    def action_video_job(self, job_id: str) -> dict[str, object]:
+        with self._action_video_jobs_lock:
+            job = self._action_video_jobs.get(job_id)
+            if not job:
+                raise RhCliError("ACTION_VIDEO_JOB_NOT_FOUND", "找不到动作视频后台任务。")
+            return copy.deepcopy(job)
+
+    def _update_action_video_job(self, job_id: str, **changes: object) -> None:
+        with self._action_video_jobs_lock:
+            job = self._action_video_jobs.get(job_id)
+            if job:
+                job.update(changes)
+
+    def _run_action_video_generation(
+        self,
+        job_id: str,
+        action_store: ActionStore,
+        action_id: str,
+        source: Path,
+        start_frame: int,
+        duration_seconds: float | None,
+        resolution: str = "original",
+    ) -> None:
+        temporary_parent = DATA_ROOT / "prompt"
+        temporary_parent.mkdir(parents=True, exist_ok=True)
+        temporary_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-", dir=str(temporary_parent)))
+        try:
+            self._update_action_video_job(job_id, status="running")
+            paths = generate_prompt_video_variants(
+                source,
+                action_store.source_root,
+                temporary_dir / "generated",
+                resolution=resolution,
+                start_frame=start_frame,
+                duration_seconds=duration_seconds,
+            )
+            current = next((item for item in action_store.actions() if item["id"] == action_id), None)
+            current_source = action_store.video_path(action_id, "video")
+            if not current or current_source is None or current_source.resolve() != source.resolve():
+                raise RhCliError("ACTION_VIDEO_SOURCE_CHANGED", "动作原视频已变化，已停止写入后台生成结果。")
+            updated = action_store.update_action(action_id, paths)
+            public = next(item for item in action_store.public_actions() if item["id"] == updated["id"])
+            self._update_action_video_job(job_id, status="completed", action=public, paths=paths)
+        except Exception as error:
+            message = error.message if isinstance(error, RhCliError) else str(error)
+            self._update_action_video_job(job_id, status="failed", error=message)
+        finally:
+            shutil.rmtree(temporary_dir, ignore_errors=True)
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False, cancel_futures=False)
@@ -1069,6 +1442,9 @@ class LocalHandler(BaseHTTPRequestHandler):
             state["settings"]["media_library_root"] = store.media_library_root() or str(self.server.reference_store.source_root)  # type: ignore[attr-defined]
             self._json(200, state)
             return
+        if path == "/api/tts/voices":
+            self._json(200, {"voices": public_tts_voices()})
+            return
         if path == "/api/outputs":
             store, manager = self.state
             self._json(200, public_outputs(store, manager))
@@ -1150,6 +1526,10 @@ class LocalHandler(BaseHTTPRequestHandler):
             action_store.refresh()
             self._json(200, action_store.source_status())
             return
+        if path.startswith("/api/prompt/actions/generate-video/"):
+            job_id = path.rsplit("/", 1)[-1]
+            self._json(200, self.server.toolbox.action_video_job(job_id))  # type: ignore[attr-defined]
+            return
         if path == "/api/prompt/references":
             reference_store = self.server.reference_store  # type: ignore[attr-defined]
             reference_store.refresh()
@@ -1173,6 +1553,18 @@ class LocalHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/prompt/actions/") and path.endswith("/skeleton-path"):
             self._serve_action_path(path, "skeleton")
             return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/depth-skeleton-video-path"):
+            self._serve_action_video_path(path, "depth_skeleton_video")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/skeleton-video-path"):
+            self._serve_action_video_path(path, "skeleton_video")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/depth-video-path"):
+            self._serve_action_video_path(path, "depth_video")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/video-path"):
+            self._serve_action_video_path(path, "video")
+            return
         if path.startswith("/api/prompt/actions/") and path.endswith("/image-path"):
             self._serve_action_path(path, "color")
             return
@@ -1181,6 +1573,18 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/prompt/actions/") and path.endswith("/skeleton"):
             self._serve_action_image(path, "skeleton")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/depth-skeleton-video"):
+            self._serve_action_video(path, "depth_skeleton_video")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/skeleton-video"):
+            self._serve_action_video(path, "skeleton_video")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/depth-video"):
+            self._serve_action_video(path, "depth_video")
+            return
+        if path.startswith("/api/prompt/actions/") and path.endswith("/video"):
+            self._serve_action_video(path, "video")
             return
         if path.startswith("/api/prompt/actions/") and path.endswith("/image"):
             self._serve_action_image(path, "color")
@@ -1204,7 +1608,7 @@ class LocalHandler(BaseHTTPRequestHandler):
             task_id = path.split("/")[3]
             store, _ = self.state
             try:
-                self._json(200, store.load_task_workflow(task_id))
+                self._json(200, store.load_task_replay(task_id))
             except Exception as exc:
                 self._json(400 if isinstance(exc, RhCliError) else 500, self._safe_error(exc))
             return
@@ -1332,11 +1736,68 @@ class LocalHandler(BaseHTTPRequestHandler):
                 action_store = self.server.action_store  # type: ignore[attr-defined]
                 self._json(200, generate_prompt_skeleton(self._body(), action_store.source_root))
                 return
+            if path == "/api/prompt/actions/generate-video":
+                action_store = self.server.action_store  # type: ignore[attr-defined]
+                body = self._body()
+                action_id = str(body.get("resource_id") or "").strip()
+                current = next((item for item in action_store.actions() if item["id"] == action_id), None) if action_id else None
+                if action_id and current is None:
+                    raise RhCliError("ACTION_NOT_FOUND", "找不到要生成的视频动作。")
+                prepared = prepare_action_video_generation_body(body, action_store.source_root, current)
+                source_value = str(prepared.get("video_path") or prepared.get("original_video_path") or "").strip()
+                source_candidate = Path(source_value).expanduser()
+                if not source_candidate.is_absolute():
+                    if ".." in source_candidate.parts:
+                        raise RhCliError("INVALID_PROMPT_MEDIA", "原视频路径不能跳出媒体库根目录。")
+                    source_candidate = (Path(action_store.source_root).resolve() / source_candidate).resolve()
+                source = validate_local_file(source_candidate, label="原视频", suffixes=VIDEO_SUFFIXES)
+                action = action_store.update_action(action_id, prepared) if action_id else action_store.add_action(prepared)
+                source = action_store.video_path(action["id"], "video") or source
+                job = self.server.toolbox.submit_action_video_generation(  # type: ignore[attr-defined]
+                    action_store,
+                    action["id"],
+                    source,
+                    resolution=body.get("resolution"),
+                    start_frame=body.get("start_frame"),
+                    duration_seconds=body.get("duration_seconds"),
+                )
+                public_action = next(item for item in action_store.public_actions() if item["id"] == action["id"])
+                self._json(202, {"action": public_action, "job": job})
+                return
+            if path.startswith("/api/prompt/actions/") and path.endswith("/open-folder"):
+                parts = path.split("/")
+                if len(parts) != 6 or not parts[4]:
+                    self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
+                    return
+                action_store = self.server.action_store  # type: ignore[attr-defined]
+                folder = action_store.media_folder(parts[4])
+                if folder is None or not folder.is_dir():
+                    raise RhCliError("ACTION_MEDIA_FOLDER_NOT_FOUND", "动作媒体所在文件夹不存在")
+                if not open_local_directory(folder):
+                    raise RhCliError("OPEN_FOLDER_UNAVAILABLE", "当前系统无法打开媒体所在文件夹")
+                self._json(200, {"opened": True, "message": "已打开媒体所在文件夹"})
+                return
+            if path.startswith("/api/prompt/references/") and path.endswith("/open-folder"):
+                parts = path.split("/")
+                if len(parts) != 6 or not parts[4]:
+                    self._json(404, {"code": "NOT_FOUND", "message": "接口不存在"})
+                    return
+                reference_store = self.server.reference_store  # type: ignore[attr-defined]
+                folder = reference_store.media_folder(parts[4])
+                if folder is None or not folder.is_dir():
+                    raise RhCliError("REFERENCE_MEDIA_FOLDER_NOT_FOUND", "参考资源媒体所在文件夹不存在")
+                if not open_local_directory(folder):
+                    raise RhCliError("OPEN_FOLDER_UNAVAILABLE", "当前系统无法打开媒体所在文件夹")
+                self._json(200, {"opened": True, "message": "已打开媒体所在文件夹"})
+                return
             if path == "/api/toolbox/image":
                 self._json(202, {"task": self.server.toolbox.submit_image(self._body())})  # type: ignore[attr-defined]
                 return
             if path == "/api/toolbox/media":
                 self._json(202, {"task": self.server.toolbox.submit_media(self._body())})  # type: ignore[attr-defined]
+                return
+            if path == "/api/toolbox/tts":
+                self._json(202, {"task": self.server.toolbox.submit_tts(self._body())})  # type: ignore[attr-defined]
                 return
             if path == "/api/prompt/actions":
                 action_store = self.server.action_store  # type: ignore[attr-defined]
@@ -1363,7 +1824,15 @@ class LocalHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/tasks/") and path.endswith("/telegram"):
                 task_id = path.split("/")[3]
                 _, manager = self.state
-                self._json(200, manager.upload_task_to_telegram(task_id, self._body().get("output_index")))
+                body = self._body()
+                self._json(
+                    200,
+                    manager.upload_task_to_telegram(
+                        task_id,
+                        body.get("output_index"),
+                        body.get("chat_ids"),
+                    ),
+                )
                 return
             if path.startswith("/api/tasks/") and path.endswith("/open-folder"):
                 parts = path.split("/")
@@ -1419,6 +1888,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                 content = body.get("content")
                 if not isinstance(content, str):
                     raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
+                workflow_filename = str(body.get("filename") or body.get("name") or "workflow.json")
                 store, _ = self.state
                 prompt_group = (
                     body.get("prompt_group")
@@ -1428,7 +1898,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     else self.server.prompt_store.get_group(str(body.get("prompt_group_id") or ""))  # type: ignore[attr-defined]
                 )
                 workflow_id, _, _ = store.save_workflow(
-                    str(body.get("filename") or "workflow.json"),
+                    workflow_filename,
                     content,
                     account_id=str(body.get("account_id") or ""),
                     remote_workflow_id=str(body.get("remote_workflow_id") or ""),
@@ -1454,9 +1924,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                 content = body.get("content")
                 if not isinstance(content, str):
                     raise RhCliError("INVALID_WORKFLOW", "缺少工作流 JSON 内容。")
+                workflow_filename = str(body.get("filename") or body.get("name") or "workflow.json")
                 store, _ = self.state
                 workflow_id, _, analysis = store.save_workflow(
-                    str(body.get("filename") or "workflow.json"),
+                    workflow_filename,
                     content,
                     account_id=str(body.get("account_id") or ""),
                     remote_workflow_id=str(body.get("remote_workflow_id") or ""),
@@ -1474,7 +1945,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                         # The on-disk path is ID-addressed; keep the original
                         # user-facing filename in the response instead of
                         # leaking the storage key into the editor state.
-                        "filename": str(body.get("filename") or "workflow.json"),
+                        "filename": workflow_filename,
                         "analysis": analysis,
                         "remote_workflow_id": analysis.get("remote_workflow_id", ""),
                         "account_id": str(saved_metadata.get("accountId") or saved_metadata.get("account_id") or ""),
@@ -1708,11 +2179,30 @@ class LocalHandler(BaseHTTPRequestHandler):
                     result["aliyun_vision"] = store.set_aliyun_vision_api_key(str(body.get("aliyun_vision_api_key") or ""))
                 if body.get("telegram_clear"):
                     result["telegram"] = store.clear_telegram_settings()
-                elif any(key in body for key in ("telegram_bot_token", "telegram_chat_id", "telegram_enabled")):
+                elif any(
+                    key in body
+                    for key in (
+                        "telegram_bot_token",
+                        "telegram_chat_id",
+                        "telegram_push_chat_id",
+                        "telegram_inbound_chat_id",
+                        "telegram_enabled",
+                    )
+                ):
                     result["telegram"] = store.set_telegram_settings(
                         str(body.get("telegram_bot_token") or ""),
                         str(body.get("telegram_chat_id") or ""),
                         body.get("telegram_enabled"),
+                        push_chat_id=(
+                            str(body.get("telegram_push_chat_id") or "")
+                            if "telegram_push_chat_id" in body
+                            else None
+                        ),
+                        inbound_chat_id=(
+                            str(body.get("telegram_inbound_chat_id") or "")
+                            if "telegram_inbound_chat_id" in body
+                            else None
+                        ),
                     )
                 if any(key in body for key in ("telegram_inbound_workflow_id", "telegram_inbound_folder_id", "telegram_inbound_mode", "telegram_inbound_enabled")):
                     result["telegram"] = store.set_telegram_inbound_settings(
@@ -1740,6 +2230,12 @@ class LocalHandler(BaseHTTPRequestHandler):
                     folder_id, str(self._body().get("name") or "")
                 )
                 self._json(200, {"folder": folder})
+                return
+            if path == "/api/workflows/reorder":
+                body = self._body()
+                store, _ = self.state
+                workflows = store.reorder_workflows(body.get("folder_id"), body.get("workflow_ids"))
+                self._json(200, {"workflows": workflows})
                 return
             if path.startswith("/api/workflows/"):
                 workflow_id = path.rsplit("/", 1)[-1]
@@ -1892,6 +2388,26 @@ class LocalHandler(BaseHTTPRequestHandler):
                 store, _ = self.state
                 store.remove_account(account_id)
                 self._json(200, {"ok": True})
+                return
+            if path == "/api/outputs/selected":
+                store, _ = self.state
+                body = self._body()
+                raw_keys = body.get("output_keys")
+                if not isinstance(raw_keys, list):
+                    raise RhCliError("INVALID_OUTPUT_SELECTION", "请选择要删除的成片。")
+                output_keys: set[tuple[str, int]] = set()
+                for raw_key in raw_keys:
+                    if not isinstance(raw_key, dict):
+                        raise RhCliError("INVALID_OUTPUT_SELECTION", "成片选择格式无效。")
+                    task_id = str(raw_key.get("task_id") or "").strip()
+                    try:
+                        output_index = int(raw_key.get("output_index"))
+                    except (TypeError, ValueError) as exc:
+                        raise RhCliError("INVALID_OUTPUT_SELECTION", "成片选择格式无效。") from exc
+                    if not task_id or output_index < 0:
+                        raise RhCliError("INVALID_OUTPUT_SELECTION", "成片选择格式无效。")
+                    output_keys.add((task_id, output_index))
+                self._json(200, {"ok": True, **store.delete_outputs_by_keys(output_keys)})
                 return
             if path == "/api/outputs/rating/1":
                 store, manager = self.state
@@ -2081,6 +2597,24 @@ class LocalHandler(BaseHTTPRequestHandler):
         if file_path is None:
             label = {"depth": "深度图", "skeleton": "骨骼图"}.get(kind, "原图")
             self._json(404, {"code": "ACTION_IMAGE_NOT_FOUND", "message": f"动作{label}不存在"})
+            return
+        self._json(200, {"path": str(file_path), "name": file_path.name, "kind": kind})
+
+    def _serve_action_video(self, path: str, kind: str) -> None:
+        parts = path.split("/")
+        action_id = parts[4] if len(parts) >= 6 else ""
+        file_path = self.server.action_store.video_path(action_id, kind)  # type: ignore[attr-defined]
+        if file_path is None:
+            self._json(404, {"code": "ACTION_VIDEO_NOT_FOUND", "message": "动作视频不存在"})
+            return
+        self._serve_file_with_ranges(file_path, "ACTION_VIDEO_NOT_FOUND", "动作视频不存在")
+
+    def _serve_action_video_path(self, path: str, kind: str) -> None:
+        parts = path.split("/")
+        action_id = parts[4] if len(parts) >= 6 else ""
+        file_path = self.server.action_store.video_path(action_id, kind)  # type: ignore[attr-defined]
+        if file_path is None:
+            self._json(404, {"code": "ACTION_VIDEO_NOT_FOUND", "message": "动作视频不存在"})
             return
         self._json(200, {"path": str(file_path), "name": file_path.name, "kind": kind})
 

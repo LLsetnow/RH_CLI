@@ -22,7 +22,7 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand-lockup brand-home-link" href="/" aria-label="返回 RH Workflow Desk">
+        <a class="brand-lockup brand-home-link" href="/?workspace=submit" aria-label="返回 RH Workflow Desk">
           <img class="brand-mark" src="/static/assets/rh-workflow-desk-icon.png" alt="" aria-hidden="true" />
           <span>
             <span class="brand-name">RH Workflow Desk</span>
@@ -55,7 +55,7 @@
             <span class="top-nav-label">提示词工坊</span>
           </span>
         </a>
-        <a class="top-nav-link active" href="/" aria-current="page">
+        <a class="top-nav-link active" href="/?workspace=submit" aria-current="page">
           <span class="top-nav-content">
             <svg class="top-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>
             <span class="top-nav-label">任务提交</span>
@@ -95,6 +95,7 @@
               <button id="submitWorkspaceTabSubmit" class="submit-workspace-tab active" data-submit-section="submit" type="button" role="tab" aria-selected="true" aria-controls="submitWorkspacePanelSubmit"><span class="submit-workspace-tab-index">01</span><span><strong>任务提交</strong><small>RunningHub 工作流</small></span></button>
               <button id="submitWorkspaceTabCodex" class="submit-workspace-tab" data-submit-section="codex" type="button" role="tab" aria-selected="false" aria-controls="submitWorkspacePanelCodex"><span class="submit-workspace-tab-index">02</span><span><strong>Codex 图像生成</strong><small>文本 + 参考图</small></span></button>
               <button id="submitWorkspaceTabMedia" class="submit-workspace-tab" data-submit-section="media" type="button" role="tab" aria-selected="false" aria-controls="submitWorkspacePanelMedia"><span class="submit-workspace-tab-index">03</span><span><strong>深度与骨骼</strong><small>图片 + 视频</small></span></button>
+              <button id="submitWorkspaceTabTts" class="submit-workspace-tab" data-submit-section="tts" type="button" role="tab" aria-selected="false" aria-controls="submitWorkspacePanelTts"><span class="submit-workspace-tab-index">04</span><span><strong>角色语音</strong><small>人物 + 文本</small></span></button>
             </div>
           </div>
 
@@ -103,7 +104,7 @@
             <div class="panel-heading">
               <div>
                 <div class="section-kicker">01 / WORKFLOW</div>
-                <h2>导入 API 工作流</h2>
+                <h2 id="workflowPanelTitle">导入 API 工作流</h2>
               </div>
               <div class="workflow-heading-actions">
                 <div class="workflow-library-actions" aria-label="工作流库操作">
@@ -152,6 +153,10 @@
                   <label class="field-label" for="submitRepeatCount">提交次数</label>
                   <input id="submitRepeatCount" type="number" min="1" max="20" step="1" value="1" inputmode="numeric" disabled />
                 </div>
+              <label class="submit-task-name" for="taskName">
+                <span class="field-label">本次任务名称</span>
+                <input id="taskName" type="text" maxlength="160" autocomplete="off" placeholder="例如：千夏展示片" />
+              </label>
               <button id="submitButton" class="primary-button" type="button">
                 <span class="button-glyph">→</span><span class="button-label">加入任务队列</span>
               </button>
@@ -196,7 +201,7 @@
               <div><div class="section-kicker">DEPTH / SKELETON MAP</div><h2>深度与骨骼</h2></div>
               <span class="toolbox-block-chip">IMAGE + VIDEO</span>
             </div>
-            <p class="toolbox-description">导入单张图片或完整视频，选择输出类型。视频会逐帧处理，并编码成与原视频节奏一致的新视频。</p>
+            <p class="toolbox-description">导入单张图片或视频，选择输出类型。视频统一按 24 帧/秒读取，可按起始帧和处理时长预览、处理指定片段。</p>
             <input id="mediaPicker" class="visually-hidden" type="file" accept="image/*,video/*" />
             <div class="toolbox-media-input-card">
               <div class="toolbox-media-input-head">
@@ -204,7 +209,7 @@
                 <span class="toolbox-media-input-chip">IMAGE · VIDEO</span>
               </div>
               <div id="mediaDropzone" class="toolbox-dropzone toolbox-media-dropzone" tabindex="0" role="button" aria-label="添加图片或视频">
-                <span class="toolbox-drop-mark" aria-hidden="true">↥</span><span><strong>拖入图片或视频</strong><small>图片处理一张；视频处理全部帧</small></span><span class="toolbox-drop-key">MEDIA</span>
+                <span class="toolbox-drop-mark" aria-hidden="true">↥</span><span><strong>拖入图片或视频</strong><small>图片处理一张；视频按 24 FPS 处理</small></span><span class="toolbox-drop-key">MEDIA</span>
               </div>
               <div class="toolbox-media-path-row">
                 <span id="mediaPathLabel" class="toolbox-media-path" title="尚未选择本地媒体">尚未选择本地媒体</span>
@@ -213,6 +218,31 @@
               </div>
               <div id="mediaPreview" class="toolbox-media-preview"><div class="toolbox-empty-hint">等待输入媒体</div></div>
               <div id="mediaMeta" class="toolbox-media-meta" hidden></div>
+            </div>
+            <div class="toolbox-media-settings-row">
+              <div class="toolbox-field-group">
+                <div class="toolbox-field-heading"><span>处理分辨率</span><span>RESIZE FIRST</span></div>
+                <label class="toolbox-select-field" for="mediaResolution"><select id="mediaResolution" aria-label="处理分辨率">
+                  <option value="original" selected>原始</option>
+                  <option value="480p">480p</option>
+                  <option value="720p">720p</option>
+                  <option value="1080p">1080p</option>
+                </select></label>
+              </div>
+              <div class="toolbox-field-group">
+                <div class="toolbox-field-heading"><span>读取的起始帧</span><span>VIDEO · 24 FPS</span></div>
+                <label class="toolbox-duration-field" for="mediaStartFrame">
+                  <input id="mediaStartFrame" type="number" min="0" step="1" inputmode="numeric" value="0" aria-label="读取的起始帧" />
+                  <span>帧 · 从第 0 帧开始，预览会同步跳到这里</span>
+                </label>
+              </div>
+              <div class="toolbox-field-group">
+                <div class="toolbox-field-heading"><span>处理时长</span><span>VIDEO ONLY</span></div>
+                <label class="toolbox-duration-field" for="mediaDuration">
+                  <input id="mediaDuration" type="number" min="0.1" step="0.1" inputmode="decimal" placeholder="全片" aria-label="处理时长（秒）" />
+                  <span>秒 · 从起始帧开始读取，超过实际范围按实际范围处理</span>
+                </label>
+              </div>
             </div>
             <div class="toolbox-field-group">
               <div class="toolbox-field-heading"><span>输出类型</span><span>PROCESSOR</span></div>
@@ -225,13 +255,37 @@
             <div class="toolbox-submit-row"><button id="submitMediaProcess" class="primary-button" type="button">生成处理结果 <span aria-hidden="true">→</span></button><span id="mediaTaskStatus" class="toolbox-inline-status" role="status"></span><span id="mediaTaskId" class="toolbox-inline-task-id" aria-label="任务 ID"></span></div>
             <div id="mediaTaskResult" class="toolbox-task-result" hidden></div>
           </section>
+          <section id="submitWorkspacePanelTts" class="panel toolbox-block submit-workspace-panel tts-workspace-panel" data-submit-section="tts" role="tabpanel" aria-labelledby="submitWorkspaceTabTts" hidden>
+            <div class="toolbox-block-heading">
+              <div class="toolbox-block-number">04</div>
+              <div><div class="section-kicker">CHARACTER / VOICE</div><h2>角色语音</h2></div>
+              <span class="toolbox-block-chip">GPT-SOVITS V4</span>
+            </div>
+            <p class="toolbox-description">从 VideoMake 的本地角色音色中选择人物，输入台词即可生成语音。每个角色使用自己的 GPT、SoVITS 和参考音频资产。</p>
+            <div class="toolbox-auto-command-note tts-runtime-note">
+              <span class="toolbox-auto-command-mark" aria-hidden="true">♫</span>
+              <span><strong>本地角色音色</strong><small id="ttsRuntimeStatus">正在读取可用人物…</small></span>
+              <span class="toolbox-auto-command-key">LOCAL</span>
+            </div>
+            <div class="toolbox-field-group">
+              <div class="toolbox-field-heading"><span>人物</span><span>CHARACTER</span></div>
+              <div class="tts-voice-select-row">
+                <label class="toolbox-select-field" for="ttsVoice"><select id="ttsVoice" aria-label="人物"><option value="">读取中…</option></select></label>
+                <div id="ttsVoiceMeta" class="tts-voice-meta"><strong>—</strong><small>选择人物后试听参考音频</small></div>
+              </div>
+              <div id="ttsReferenceAudio" class="tts-reference-audio" hidden></div>
+            </div>
+            <label class="toolbox-field-group" for="ttsText"><span class="toolbox-field-heading"><span>语音内容</span><span>TEXT</span></span><textarea id="ttsText" rows="8" placeholder="输入要生成的台词或旁白…"></textarea></label>
+            <div class="toolbox-submit-row"><button id="submitTts" class="primary-button" type="button">生成角色语音 <span aria-hidden="true">→</span></button><span id="ttsTaskStatus" class="toolbox-inline-status" role="status"></span><span id="ttsTaskId" class="toolbox-inline-task-id" aria-label="任务 ID"></span></div>
+            <div id="ttsTaskResult" class="toolbox-task-result" hidden></div>
+          </section>
           </div>
 
         </main>
 
         <aside class="queue-column">
           <nav class="process-nav" aria-label="工作流流程">
-            <span class="process-index">01—03</span>
+            <span class="process-index">01—04</span>
             <button class="process-step active" type="button" data-process-step="workflow">导入工作流</button>
             <span class="process-arrow" aria-hidden="true">→</span>
             <button class="process-step" type="button" data-process-step="inputs">输入节点</button>
@@ -356,35 +410,37 @@
         </div>
         <div class="credential-heading telegram-heading">
           <div>
-            <span class="field-label">Telegram 成片推送</span>
-            <span class="field-hint">可选。任务下载完成后，自动发送图片、视频、音频或其它成片到指定聊天。</span>
+            <span class="field-label">Telegram Bot</span>
+            <span class="field-hint">推送与入站共用同一个 Bot Token，下面分别配置两项功能的 Chat ID。</span>
           </div>
           <span id="telegramStatus" class="credential-status">未配置</span>
         </div>
-        <div class="telegram-credential-grid">
+        <div class="telegram-shared-token-field">
           <label class="field-group">
-            <span class="field-label">Bot Token</span>
+            <span class="field-label">Bot Token（推送与入站共用）</span>
             <input id="telegramBotToken" type="password" autocomplete="new-password" placeholder="输入 BotFather 发放的 Token" />
           </label>
-          <label class="field-group">
-            <span class="field-label">Chat ID（多个用逗号分隔）</span>
-            <input id="telegramChatId" type="text" autocomplete="off" placeholder="例如 -1001234567890, -1009876543210" />
-          </label>
         </div>
-        <div class="telegram-actions">
-          <label class="telegram-enabled-toggle"><input id="telegramEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用成片自动推送</span></label>
-          <span class="telegram-button-group">
-            <button id="saveTelegram" class="secondary-button" type="button">保存 Telegram</button>
-            <button id="clearTelegram" class="secondary-button" type="button">清除配置</button>
-            <button id="testTelegram" class="secondary-button" type="button">测试连接</button>
-          </span>
-        </div>
-        <div class="telegram-inbound-panel">
-          <div class="telegram-inbound-copy">
-            <span class="field-label">Telegram 图片入站</span>
-            <span id="telegramInboundWorkflow" class="field-hint">未选择工作流。请在工作流卡片上点击“设为 Telegram 入站”。</span>
+        <div class="telegram-function-panel telegram-push-panel">
+          <div class="telegram-function-heading"><div><span class="field-label">Telegram 成片推送</span><span class="field-hint">任务下载完成后，自动发送图片、视频、音频或其它成片到指定聊天。</span></div></div>
+          <label class="field-group"><span class="field-label">推送 Chat ID（多个用逗号分隔）</span><input id="telegramPushChatId" type="text" autocomplete="off" placeholder="例如 -1001234567890, -1009876543210（或 5468961835）" /></label>
+          <div class="telegram-actions">
+            <label class="telegram-enabled-toggle"><input id="telegramEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用成片自动推送</span></label>
+            <span class="telegram-button-group">
+              <button id="saveTelegram" class="secondary-button" type="button">保存 Telegram</button>
+              <button id="clearTelegram" class="secondary-button" type="button">清除配置</button>
+              <button id="testTelegram" class="secondary-button" type="button">测试连接</button>
+            </span>
           </div>
-          <label class="telegram-enabled-toggle"><input id="telegramInboundEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用图片入站</span></label>
+        </div>
+        <div class="telegram-function-panel telegram-inbound-panel">
+          <div class="telegram-function-heading"><div><span class="field-label">Telegram 入站</span><span class="field-hint">图片和视频链接入站共用此 Chat ID；填写 * 可接收任意聊天的入站消息。</span></div></div>
+          <label class="field-group"><span class="field-label">入站 Chat ID（多个用逗号分隔）</span><input id="telegramInboundChatId" type="text" autocomplete="off" placeholder="例如 5468961835 或 *" /><span class="field-hint">只在入站功能中生效；* 表示允许任意账号。</span></label>
+          <div class="telegram-inbound-row">
+            <label class="telegram-enabled-toggle"><input id="telegramInboundEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用图片入站</span></label>
+            <label class="telegram-enabled-toggle"><input id="telegramVideoInboundEnabled" type="checkbox" /><span class="telegram-toggle-track" aria-hidden="true"></span><span>启用视频链接入站</span></label>
+          </div>
+          <div class="telegram-inbound-copy"><span id="telegramInboundWorkflow" class="field-hint">未选择图片入站工作流。请在工作流卡片上点击“设为 Telegram 入站”。</span></div>
         </div>
         <div class="setting-grid personal-capacity-setting">
           <label class="field-group">
@@ -532,6 +588,31 @@
             <button id="saveWorkflowRecord" class="primary-button" type="submit"><span class="button-glyph">✓</span><span>应用到当前快照</span></button>
           </div>
         </form>
+      </section>
+    </div>
+    <div id="mediaInputModal" class="modal-backdrop" hidden>
+      <section class="media-input-dialog dialog-panel" role="dialog" aria-modal="true" aria-labelledby="mediaInputTitle">
+        <div class="modal-heading">
+          <div>
+            <div class="section-kicker">MEDIA INPUT NODE</div>
+            <h2 id="mediaInputTitle">添加媒体输入</h2>
+          </div>
+          <button id="closeMediaInput" class="close-button" type="button" aria-label="关闭添加媒体输入">×</button>
+        </div>
+        <p class="modal-description">添加一个可以在本次任务中独立选择文件的媒体节点。选择后会自动加入工作流，并在有 MiniMax H3 节点时接入对应参考输入。</p>
+        <label class="field-group" for="mediaInputType">
+          <span class="field-label">媒体类型</span>
+          <select id="mediaInputType">
+            <option value="image">图片 · LoadImage</option>
+            <option value="audio">音频 · LoadAudio</option>
+            <option value="video">视频 · VHS_LoadVideo</option>
+          </select>
+        </label>
+        <div id="mediaInputTypeDescription" class="media-input-type-description" role="status"></div>
+        <div class="dialog-actions">
+          <button id="cancelMediaInput" class="secondary-button" type="button">取消</button>
+          <button id="confirmMediaInput" class="primary-button" type="button">添加媒体输入</button>
+        </div>
       </section>
     </div>
     <div id="imagePreviewModal" class="modal-backdrop image-preview-backdrop" role="dialog" aria-modal="true" aria-label="图片预览" hidden>

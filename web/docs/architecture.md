@@ -8,7 +8,8 @@
 Electron main.cjs
         │ 启动本地 Python 服务
         ▼
-server.py  ── HTTP API / 静态文件
+backend/
+  server.py  ── HTTP API / 静态文件
         │
         ├── app.py            LocalStore + TaskManager
         ├── prompt_store.py   提示词积木状态
@@ -20,7 +21,7 @@ server.py  ── HTTP API / 静态文件
 
 | 页面 | 入口 | 主要职责 |
 | --- | --- | --- |
-| 任务提交 | `index.html` | 导入 API 工作流、识别输入节点、保存路径配置、提交和查看任务队列 |
+| 任务提交 | `index.html` | 导入 API 工作流、Codex 图像、深度/骨骼、角色语音四个子功能，以及任务队列 |
 | 提示词工坊 | `prompt.html` | 管理固定/自由文本积木，组合提示词，导入动作、深度图和骨骼图资源 |
 | 成片 | `outputs.html` | 手动浏览本地产物；点击任务下的工作流名称可恢复该任务并跳转任务提交页，也可把产物导入任务节点或批量清理一星产物 |
 | 工作流 | `workflows.html` | 管理工作流库与临时工作流快照：导入外部快照、保存到工作流库、从工作流库加载快照、导出和删除库条目 |
@@ -30,9 +31,9 @@ server.py  ── HTTP API / 静态文件
 
 ## 后端职责
 
-- `server.py` 提供静态文件和本地 JSON API，例如状态、任务、产物、工作流、设置、文件预览和原生文件/目录选择器。
-- `app.py` 中的 `LocalStore` 负责 SQLite 任务历史、独立用量记录、工作流资料和本地持久化；`TaskManager` 负责本地等待队列、并发槽位、提交、轮询、产物下载和重启恢复。仪表盘的消耗指标只读取 `usage_records`，首次启动时从已有任务回填，删除任务不会删除用量记录；注册工作流评分排行则读取成片库当前可见产物的评分，只保留工作流库中已登记的工作流。
-- `prompt_store.py`、`action_store.py`、`reference_store.py` 分别管理提示词、动作和参考资源的 JSON 索引；动作/参考资源统一从设置的媒体库 ref 根目录读取固定目录中的 JSON 文件。每个条目保存稳定 `id`、分类、标签、文本和相对媒体路径，前端编辑、新建和删除后由对应 Store 原子重写 JSON；不再生成或读取 Markdown 及派生索引缓存。
+- `backend/server.py` 提供静态文件和本地 JSON API，例如状态、任务、产物、工作流、设置、文件预览和原生文件/目录选择器。
+- `backend/app.py` 中的 `LocalStore` 负责 SQLite 任务历史、独立用量记录、工作流资料和本地持久化；`TaskManager` 负责本地等待队列、并发槽位、提交、轮询、产物下载和重启恢复。仪表盘的消耗指标只读取 `usage_records`，首次启动时从已有任务回填，删除任务不会删除用量记录；注册工作流评分排行则读取成片库当前可见产物的评分，只保留工作流库中已登记的工作流。
+- `backend/prompt_store.py`、`backend/action_store.py`、`backend/reference_store.py` 分别管理提示词、动作和参考资源的 JSON 索引；动作/参考资源统一从设置的媒体库 ref 根目录读取固定目录中的 JSON 文件。每个条目保存稳定 `id`、分类、标签、文本和相对媒体路径，前端编辑、新建和删除后由对应 Store 原子重写 JSON；不再生成或读取 Markdown 及派生索引缓存。
 - API Key、账号和 token 等敏感信息只能脱敏后进入页面或日志，不能写入调试输出、文档或 git。
 
 ## 数据目录
@@ -48,10 +49,12 @@ server.py  ── HTTP API / 静态文件
 - `data/workflow/<workflow_id>/manifest.json`：工作流注册文件，是该工作流包的顶层配置和唯一入口，保存名称、所属账号、workflowId、输入配置，以及另外两个文件的相对路径。
 - `data/workflow-registry.json`：工作流库的内部目录索引，只保存工作流 ID 与 `workflow/<workflow_id>/manifest.json` 路径；它不是用户需要理解或单独编辑的工作流对象。
 - `data/pasted-inputs/`：剪贴板图片副本；普通拖入/选择文件只保存本机绝对路径，不复制原始输入。
-- `data/outputs/`：默认产物目录；用户可以在设置中指定外部绝对路径。每个任务文件夹保存 `workflow_api.json`、`prompt_group.json` 和 `manifest.json`。输入文件只保留原始路径，不复制到任务目录。
+- `data/outputs/`：默认产物目录；用户可以在设置中指定外部绝对路径。普通工作流任务文件夹保存 `workflow_api.json`、`prompt_group.json` 和 `manifest.json`；Codex 图像、深度图、骨骼图、角色语音工具箱任务没有工作流 JSON，只保存路径型 `manifest.json`。输入文件只保留原始路径，不复制到任务目录。
 - `data/prompt/state.json`：提示词工坊当前临时组装顺序。独立提示词组索引和文件可以作为历史数据或兼容数据保留，但新的工作流库条目以自身的 `prompt_group.json` 为准，工作流页面不展示“组状态库”。
 
 成片库的批量一星清理只更新任务中的产物列表并删除对应本地文件，不删除任务历史；独立用量台账中的原始产物数量也不会因清理而回写。
+
+成片库会根据任务类型生成稳定的功能标签：普通工作流为“任务提交”，本地 Codex、深度/骨骼和角色语音分别为对应子功能。功能筛选由前端展示并由后端导出、批量清理接口共同执行，旧任务没有额外迁移成本。
 
 任务调度策略由 `TaskManager._automatic_candidates()` 统一处理：任务提交页不再选择 API Key，所有普通提交按策略在个人/共享企业 Key 中选择可用槽位；个人优先模式只有在个人槽位全部占用时才使用共享/企业 Key，个人槽位释放后新任务会重新优先个人。后端仍保留 `key_id` 字段以兼容旧任务记录和内部调用。
 
@@ -59,7 +62,7 @@ server.py  ── HTTP API / 静态文件
 
 任务轮询返回 805 时，Standard（24GB，内部值为 `default`）只切换到 Plus（48GB）重新提交一次；已经是 Plus 的任务仍使用 Plus 重试一次。第二次 805 或其他机型不进入无限重试。
 
-每个任务的产物目录会保存本次提交的 API 工作流快照、提示词组快照和 `manifest.json`，通常分别为 `<输出目录>/<task_id>/workflow_api.json`、`prompt_group.json` 和 `manifest.json`。manifest 只记录输入文件路径，不复制输入文件。普通提交保存当前组装台或请求显式提供的提示词组；Telegram 入站提交保存所选工作流包关联的提示词组。任务提交 API 可通过可选的 `output_prefix` 指定下载产物的文件名前缀，文件会按 `<output_prefix>_<序号>.<扩展名>` 保存；省略时继续使用 `output_<序号>.<扩展名>`。任务加载接口会返回任务自己的工作流快照、提示词组快照和路径字段；旧任务在快照文件仍存在时会自动补写路径清单。
+每个任务的产物目录会保存本次提交的复现清单。普通工作流任务通常包括 `<输出目录>/<task_id>/workflow_api.json`、`prompt_group.json` 和 `manifest.json`；工具箱任务只保存 `manifest.json`，其中记录本地 workflowId、工具/模式、提示词、画幅参数和输入文件原始路径。所有任务 manifest 都包含统一的 `feature` 对象：`workflow/任务提交`、`codex/Codex 图像生成`、`media/深度与骨骼` 或 `tts/角色语音`，便于直接识别任务子功能。深度/骨骼任务还记录 `original`、`480p`、`720p` 或 `1080p` 预处理分辨率，以及可选的前 N 秒处理时长；实际执行时先读取视频时长，将请求时长限制在输入实际时长以内，再生成工作副本、抽帧和推理。角色语音任务额外记录人物 ID、参考音频路径、参考文本和待合成内容。manifest 只记录输入文件路径，不复制输入文件。普通提交保存当前组装台或请求显式提供的提示词组；Telegram 入站提交保存所选工作流包关联的提示词组。任务提交 API 可通过可选的 `output_prefix` 指定下载产物的文件名前缀，文件会按 `<output_prefix>_<序号>.<扩展名>` 保存；省略时继续使用 `output_<序号>.<扩展名>`。任务加载接口会按 `task_type` 返回工作流快照或工具箱 manifest，旧工具箱任务在启动时自动补写清单；历史任务启动时会自动补齐缺失的 `feature` 字段。
 
 任务项目默认从输出目录或工作流路径中的 `.../projects/<项目名>/...` 推断，也可以由提交 API 显式传入 `project` 覆盖。成片页按任务项目展示项目文件夹和任务卡片；可将任意成片卡片拖到项目文件夹，或使用“移动到项目”菜单，这些操作只更新 SQLite 任务元数据及 manifest 的 `project` 字段，不移动或复制任何媒体文件。应用启动时会为已有任务回填可推断的项目归属，并同步已有 manifest。
 

@@ -15,12 +15,13 @@ from .library_rating import normalize_library_rating, replace_rating_tag
 from .media_rename import rename_media_files, safe_media_stem
 
 
-VERSION = 6
+VERSION = 7
 DEFAULT_POSE_RESOURCES_PATH = Path("/Users/apple/Documents/VideoMake/ref/pose/pose.json")
+ACTION_VIDEO_KINDS = ("video", "depth_video", "skeleton_video", "depth_skeleton_video")
 
 
-def _action_id(image_path: str, title: str) -> str:
-    source = image_path or title
+def _action_id(media_path: str, title: str) -> str:
+    source = media_path or title
     digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:12]
     return f"pose-{digest}"
 
@@ -65,8 +66,20 @@ def _normalise_action(value: Any) -> dict[str, Any] | None:
     color_image_path = str(value.get("color_image_path") or value.get("image_path") or "").strip()
     depth_image_path = str(value.get("depth_image_path") or "").strip()
     skeleton_image_path = str(value.get("skeleton_image_path") or "").strip()
-    if not action_id or not title or not text:
+    video_path = str(value.get("video_path") or value.get("original_video_path") or "").strip()
+    depth_video_path = str(value.get("depth_video_path") or "").strip()
+    skeleton_video_path = str(value.get("skeleton_video_path") or "").strip()
+    depth_skeleton_video_path = str(value.get("depth_skeleton_video_path") or "").strip()
+    has_media_paths = any((color_image_path, depth_image_path, skeleton_image_path, video_path, depth_video_path, skeleton_video_path, depth_skeleton_video_path))
+    if not action_id or not title or (not text and not has_media_paths):
         return None
+    media_type = str(value.get("media_type") or "").strip().lower()
+    has_video_paths = any((video_path, depth_video_path, skeleton_video_path, depth_skeleton_video_path))
+    # Video paths are authoritative so a stale explicit media_type cannot hide a video action.
+    if has_video_paths:
+        media_type = "video"
+    elif media_type not in {"image", "video"}:
+        media_type = "image"
     category = _category(str(value.get("category") or "")) or "未分类"
     return {
         "id": action_id,
@@ -79,7 +92,12 @@ def _normalise_action(value: Any) -> dict[str, Any] | None:
         "color_image_path": color_image_path,
         "depth_image_path": depth_image_path,
         "skeleton_image_path": skeleton_image_path,
-        "pair_key": str(value.get("pair_key") or _pair_key(color_image_path or depth_image_path, "color")).strip(),
+        "media_type": media_type,
+        "video_path": video_path,
+        "depth_video_path": depth_video_path,
+        "skeleton_video_path": skeleton_video_path,
+        "depth_skeleton_video_path": depth_skeleton_video_path,
+        "pair_key": str(value.get("pair_key") or _pair_key(color_image_path or depth_image_path or video_path, "color")).strip(),
     }
 
 
@@ -137,7 +155,7 @@ class ActionStore:
             _json_source_path(configured) if configured else None,
             DEFAULT_POSE_RESOURCES_PATH,
             Path.home() / "Documents" / "VideoMake" / "ref" / "pose" / "pose.json",
-            Path(__file__).resolve().parents[2] / "VideoMake" / "ref" / "pose" / "pose.json",
+            Path(__file__).resolve().parents[3] / "VideoMake" / "ref" / "pose" / "pose.json",
         ]
         for candidate in candidates:
             if candidate and candidate.is_file():
@@ -195,21 +213,26 @@ class ActionStore:
     def _find(self, action_id: str) -> dict[str, Any] | None:
         return next((action for action in self._actions if action["id"] == action_id), None)
 
-    def image_path(self, action_id: str, kind: str = "color") -> Path | None:
+    def media_path(self, action_id: str, kind: str = "color") -> Path | None:
         with self._lock:
             action = self._find(action_id)
             if not action:
                 return None
-            if kind not in {"color", "depth", "skeleton"}:
+            fields = {
+                "color": "color_image_path",
+                "depth": "depth_image_path",
+                "skeleton": "skeleton_image_path",
+                "video": "video_path",
+                "depth_video": "depth_video_path",
+                "skeleton_video": "skeleton_video_path",
+                "depth_skeleton_video": "depth_skeleton_video_path",
+            }
+            field = fields.get(kind)
+            if not field:
                 return None
-            if kind == "color":
-                raw_path = action.get("color_image_path")
-                if raw_path is None:  # compatibility with older JSON entries
-                    raw_path = action.get("image_path")
-            elif kind == "depth":
-                raw_path = action.get("depth_image_path")
-            else:
-                raw_path = action.get("skeleton_image_path")
+            raw_path = action.get(field)
+            if kind == "color" and raw_path is None:  # compatibility with older JSON entries
+                raw_path = action.get("image_path")
             relative = Path(str(raw_path or ""))
             if not relative.parts or relative.is_absolute() or ".." in relative.parts:
                 return None
@@ -223,7 +246,44 @@ class ActionStore:
                     return path
             return None
 
+    def image_path(self, action_id: str, kind: str = "color") -> Path | None:
+        if kind not in {"color", "depth", "skeleton"}:
+            return None
+        return self.media_path(action_id, kind)
+
+    def video_path(self, action_id: str, kind: str = "video") -> Path | None:
+        if kind not in ACTION_VIDEO_KINDS:
+            return None
+        return self.media_path(action_id, kind)
+
+    def media_folder(self, action_id: str) -> Path | None:
+        """Return the folder containing the first available action media file."""
+        for kind in ("color", "depth", "skeleton", *ACTION_VIDEO_KINDS):
+            media_path = self.media_path(action_id, kind)
+            if media_path is not None:
+                return media_path.parent
+        return None
+
     def _pair_status(self, action: dict[str, Any]) -> tuple[str, str, bool, bool]:
+        if action.get("media_type") == "video":
+            available = {
+                kind: self.video_path(action["id"], kind) is not None
+                for kind in ACTION_VIDEO_KINDS
+            }
+            if not available["video"]:
+                return "missing_video", "缺少原视频", False, False
+            missing = [
+                label
+                for kind, label in (
+                    ("depth_video", "深度视频"),
+                    ("skeleton_video", "骨骼视频"),
+                    ("depth_skeleton_video", "深度+骨骼视频"),
+                )
+                if not available[kind]
+            ]
+            if missing:
+                return "video_partial", "缺少" + "、".join(missing), True, False
+            return "video_ready", "原视频、深度视频、骨骼视频和叠加视频已配齐", True, True
         color_path = self.image_path(action["id"], "color")
         depth_path = self.image_path(action["id"], "depth")
         color_exists = color_path is not None
@@ -245,7 +305,9 @@ class ActionStore:
             result = []
             for action in self._actions:
                 item = copy.deepcopy(action)
-                status, message, color_available, depth_available = self._pair_status(action)
+                status, message, _, _ = self._pair_status(action)
+                color_available = self.image_path(action["id"], "color") is not None
+                depth_available = self.image_path(action["id"], "depth") is not None
                 item["color_image_path"] = str(action.get("color_image_path") or action.get("image_path") or "")
                 item["depth_image_path"] = str(action.get("depth_image_path") or "")
                 item.pop("image_path", None)
@@ -260,6 +322,13 @@ class ActionStore:
                 item["skeleton_image_path"] = str(action.get("skeleton_image_path") or "")
                 item["skeleton_image_available"] = skeleton_available
                 item["skeleton_image_url"] = f"/api/prompt/actions/{quote(action['id'], safe='')}/skeleton" if skeleton_available else ""
+                item["media_type"] = str(action.get("media_type") or "image")
+                for kind in ACTION_VIDEO_KINDS:
+                    field = f"{kind}_path"
+                    path = self.video_path(action["id"], kind)
+                    item[field] = str(action.get(field) or "")
+                    item[f"{kind}_available"] = path is not None
+                    item[f"{kind}_url"] = f"/api/prompt/actions/{quote(action['id'], safe='')}/{kind.replace('_', '-')}" if path is not None else ""
                 item["pair_status"] = status
                 item["pair_message"] = message
                 result.append(item)
@@ -287,15 +356,23 @@ class ActionStore:
         payload["color_image_path"] = _relative_path(payload.get("color_image_path") or payload.get("image_path"), self.source_root)
         payload["depth_image_path"] = _relative_path(payload.get("depth_image_path"), self.source_root)
         payload["skeleton_image_path"] = _relative_path(payload.get("skeleton_image_path"), self.source_root)
+        for field in ("video_path", "depth_video_path", "skeleton_video_path", "depth_skeleton_video_path"):
+            payload[field] = _relative_path(payload.get(field), self.source_root)
         title = str(payload.get("title") or "").strip()
         if not title:
             raise ValueError("动作名称不能为空。")
-        payload["id"] = str(payload.get("id") or _action_id(payload["color_image_path"] or payload["depth_image_path"], title)).strip()
+        payload["id"] = str(payload.get("id") or _action_id(payload["color_image_path"] or payload["depth_image_path"] or payload["video_path"], title)).strip()
         if any(item["id"] == payload["id"] for item in self._actions):
             raise ValueError("动作 ID 已存在。")
         payload["text"] = str(payload.get("text") or "").strip()
-        if not payload["text"]:
-            raise ValueError("动作提示词不能为空。")
+        if not payload["text"] and not any(
+            payload.get(field)
+            for field in (
+                "color_image_path", "depth_image_path", "skeleton_image_path",
+                "video_path", "depth_video_path", "skeleton_video_path", "depth_skeleton_video_path",
+            )
+        ):
+            raise ValueError("动作至少需要文本或媒体文件。")
         normalised = _normalise_action(payload)
         if not normalised:
             raise ValueError("动作内容不完整。")
@@ -316,6 +393,8 @@ class ActionStore:
             payload["color_image_path"] = _relative_path(payload.get("color_image_path") or payload.get("image_path"), self.source_root)
             payload["depth_image_path"] = _relative_path(payload.get("depth_image_path"), self.source_root)
             payload["skeleton_image_path"] = _relative_path(payload.get("skeleton_image_path"), self.source_root)
+            for field in ("video_path", "depth_video_path", "skeleton_video_path", "depth_skeleton_video_path"):
+                payload[field] = _relative_path(payload.get(field), self.source_root)
             normalised = _normalise_action(payload)
             if not normalised:
                 raise ValueError("动作内容不完整。")
@@ -326,6 +405,10 @@ class ActionStore:
                     ("color", "color_image_path", ""),
                     ("depth", "depth_image_path", "_depth"),
                     ("skeleton", "skeleton_image_path", "_skeleton"),
+                    ("video", "video_path", ""),
+                    ("depth_video", "depth_video_path", "_depth"),
+                    ("skeleton_video", "skeleton_video_path", "_skeleton"),
+                    ("depth_skeleton_video", "depth_skeleton_video_path", "_depth_skeleton"),
                 ):
                     path = str(payload.get(field) or "").strip()
                     if path:
@@ -338,8 +421,16 @@ class ActionStore:
                     payload["depth_image_path"] = renamed["depth"]
                 if "skeleton" in renamed:
                     payload["skeleton_image_path"] = renamed["skeleton"]
+                for role, field in (
+                    ("video", "video_path"),
+                    ("depth_video", "depth_video_path"),
+                    ("skeleton_video", "skeleton_video_path"),
+                    ("depth_skeleton_video", "depth_skeleton_video_path"),
+                ):
+                    if role in renamed:
+                        payload[field] = renamed[role]
                 payload["pair_key"] = _pair_key(
-                    str(payload.get("color_image_path") or payload.get("image_path") or payload.get("depth_image_path") or ""),
+                    str(payload.get("color_image_path") or payload.get("image_path") or payload.get("depth_image_path") or payload.get("video_path") or ""),
                     "color",
                 )
                 normalised = _normalise_action(payload)
@@ -362,22 +453,37 @@ class ActionStore:
 
     def delete_action(self, action_id: str) -> None:
         with self._lock:
-            before = len(self._actions)
-            self._actions = [item for item in self._actions if item["id"] != action_id]
-            if len(self._actions) == before:
+            current = self._find(action_id)
+            if not current:
                 raise KeyError(f"找不到动作：{action_id}")
+            media_paths = []
+            for kind in ("color", "depth", "skeleton", *ACTION_VIDEO_KINDS):
+                media_path = self.media_path(action_id, kind)
+                if media_path is not None and media_path not in media_paths:
+                    media_paths.append(media_path)
+            remaining_actions = [item for item in self._actions if item["id"] != action_id]
+            protected_paths = {
+                media_path
+                for item in remaining_actions
+                for kind in ("color", "depth", "skeleton", *ACTION_VIDEO_KINDS)
+                if (media_path := self.media_path(item["id"], kind)) is not None
+            }
+            media_paths = [media_path for media_path in media_paths if media_path not in protected_paths]
+            self._actions = remaining_actions
             self._write_source(self._actions)
+            for media_path in media_paths:
+                media_path.unlink(missing_ok=True)
             self.refresh(force=True)
 
     def source_status(self) -> dict[str, Any]:
         with self._lock:
             _, source_sha256 = self._source_signature()
             public_actions = self.public_actions()
-            paired = sum(1 for action in public_actions if action["pair_status"] == "paired")
+            paired = sum(1 for action in public_actions if action["pair_status"] in {"paired", "video_ready"})
             issues = [
                 {"id": action["id"], "title": action["title"], "status": action["pair_status"], "message": action["pair_message"]}
                 for action in public_actions
-                if action["pair_status"] != "paired"
+                if action["pair_status"] not in {"paired", "video_ready"}
             ]
             return {
                 "source": self.source_path.name,

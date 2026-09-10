@@ -5,11 +5,19 @@
   var OUTPUT_WORKFLOW_FILTER_MAX_CHARS = 18;
   var UNCLASSIFIED_PROJECT_ID = "__unclassified__";
   var UNBOUND_ACCOUNT_ID = "__unbound__";
+  var OUTPUT_FEATURE_FILTERS = [
+    { key: "workflow", label: "任务提交" },
+    { key: "codex", label: "Codex 图像生成" },
+    { key: "media", label: "深度与骨骼" },
+    { key: "tts", label: "角色语音" }
+  ];
   var OUTPUT_TAG_FILTER_TAGS = ["案例", "H"];
   var OUTPUT_TAG_FILTER_MODES = ["off", "include", "exclude"];
-  var state = { outputs: [], projects: [], summary: {}, type: "all", rating: 0, tagFilters: { "案例": "off", "H": "off" }, workflowFilter: "", search: "", sort: "newest", page: 1, projectId: "", telegramConfigured: false, contextRangeStart: 0, contextRangeEnd: 0, contextRangeDays: 0, contextAccountId: "", contextWorkflowName: "", contextArtifactId: "", contextProjectId: "", selectedArtifactId: "" };
+  var state = { outputs: [], projects: [], summary: {}, type: "all", rating: 0, feature: "", tagFilters: { "案例": "off", "H": "off" }, workflowFilter: "", search: "", sort: "newest", page: 1, projectId: "", telegramConfigured: false, telegramRecipients: [], contextRangeStart: 0, contextRangeEnd: 0, contextRangeDays: 0, contextAccountId: "", contextWorkflowName: "", contextArtifactId: "", contextProjectId: "", selectedArtifactId: "" };
   var outputImport = { item: null, path: "" };
-  var projectMove = { item: null, projectId: "" };
+  var projectMove = { item: null, items: [], projectId: "" };
+  var outputMultiSelectMode = false;
+  var multiSelectedArtifactIds = {};
   var projectEditor = { mode: "", projectId: "" };
   var projectDelete = { projectId: "" };
   var draftStorageKey = "rh-workflow-desk-draft-v1";
@@ -20,6 +28,7 @@
   var ratingBusy = {};
   var tagBusy = {};
   var telegramUploadBusy = {};
+  var telegramUploadSelection = { items: [], item: null, button: null, selectedIds: [] };
   var previewSeekSeconds = 1;
 
   function $(id) { return document.getElementById(id); }
@@ -149,6 +158,10 @@
     var type = String(value == null ? "" : value);
     return ["all", "image", "video", "audio", "text", "other"].indexOf(type) !== -1 ? type : "all";
   }
+  function restoredOutputFeature(value) {
+    var feature = String(value == null ? "" : value);
+    return OUTPUT_FEATURE_FILTERS.some(function (item) { return item.key === feature; }) ? feature : "";
+  }
   function restoredOutputRating(value) {
     if (value === "unrated") return value;
     var rating = Number(value);
@@ -175,6 +188,7 @@
     if (saved.projectId != null) state.projectId = String(saved.projectId);
     if (saved.type != null) state.type = restoredOutputType(saved.type);
     if (saved.rating != null) state.rating = restoredOutputRating(saved.rating);
+    if (saved.feature != null) state.feature = restoredOutputFeature(saved.feature);
     if (saved.tagFilters && typeof saved.tagFilters === "object") state.tagFilters = restoredOutputTagFilters(saved.tagFilters);
     if (saved.workflowFilter != null) state.workflowFilter = String(saved.workflowFilter);
     if (saved.search != null) state.search = String(saved.search);
@@ -197,6 +211,7 @@
         projectId: String(state.projectId || ""),
         type: restoredOutputType(state.type),
         rating: restoredOutputRating(state.rating),
+        feature: restoredOutputFeature(state.feature),
         tagFilters: restoredOutputTagFilters(state.tagFilters),
         workflowFilter: String(state.workflowFilter || ""),
         search: String(state.search || ""),
@@ -210,6 +225,7 @@
     state.projectId = "";
     state.type = "all";
     state.rating = 0;
+    state.feature = "";
     state.tagFilters = defaultOutputTagFilters();
     state.workflowFilter = "";
     state.page = 1;
@@ -253,6 +269,17 @@
   }
   function hasOutputTag(item, tag) {
     return normalizedOutputTags(item).indexOf(String(tag || "").trim()) !== -1;
+  }
+  function outputFeatureKey(item) {
+    var key = String(item && (item.feature || item.feature_key) || "").trim();
+    return OUTPUT_FEATURE_FILTERS.some(function (feature) { return feature.key === key; }) ? key : "workflow";
+  }
+  function outputFeatureLabel(key) {
+    var feature = OUTPUT_FEATURE_FILTERS.find(function (item) { return item.key === key; });
+    return feature ? feature.label : "任务提交";
+  }
+  function outputFeatureFilterMatches(item) {
+    return !state.feature || outputFeatureKey(item) === state.feature;
   }
   function outputTagFilterMode(tag) {
     var mode = state.tagFilters && state.tagFilters[tag];
@@ -328,6 +355,7 @@
     if (state.rating === "unrated") add("rating", "unrated");
     else if (typeof state.rating === "number" && state.rating) add("rating", state.rating);
     if (state.workflowFilter) add("workflow", state.workflowFilter);
+    if (state.feature) add("feature", state.feature);
     add("tag_case", outputTagFilterMode("案例") === "off" ? "" : outputTagFilterMode("案例"));
     add("tag_h", outputTagFilterMode("H") === "off" ? "" : outputTagFilterMode("H"));
     if (state.contextRangeStart) add("range_start", state.contextRangeStart);
@@ -478,6 +506,7 @@
       if (state.type !== "all" && item.display_type !== state.type) return false;
       if (state.rating === "unrated" && normalizedRating(item.rating) !== 0) return false;
       if (typeof state.rating === "number" && state.rating && normalizedRating(item.rating) !== state.rating) return false;
+      if (!outputFeatureFilterMatches(item)) return false;
       if (!matchesOutputTagFilters(item)) return false;
       if (!outputWorkflowFilterMatches(item)) return false;
       if (!query) return true;
@@ -557,6 +586,15 @@
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", active ? "true" : "false");
     });
+    var featureCounts = summary.feature_counts || {};
+    document.querySelectorAll(".output-feature-filter").forEach(function (button) {
+      var feature = button.dataset.outputFeature || "";
+      var active = feature === state.feature;
+      var countNode = button.querySelector("[data-feature-count]");
+      if (countNode) countNode.textContent = feature ? String(featureCounts[feature] || 0) : "全部";
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
     document.querySelectorAll(".output-tag-filter").forEach(function (button) {
       var tag = button.dataset.outputTag || "";
       var mode = outputTagFilterMode(tag);
@@ -570,20 +608,22 @@
     var deleteOneStarButton = $("deleteOneStarOutputs");
     if (deleteOneStarButton) {
       deleteOneStarButton.disabled = !oneStarCount;
-      $("oneStarOutputCount").textContent = String(oneStarCount);
+      var oneStarCountNode = $("oneStarOutputCount");
+      if (oneStarCountNode) oneStarCountNode.textContent = String(oneStarCount);
       deleteOneStarButton.title = oneStarCount ? "删除" + outputActionScopeLabel() + " " + oneStarCount + " 个一星成片" : "没有一星成片可删除";
     }
     var exportCaseButton = $("exportCaseOutputs");
     if (exportCaseButton) {
       var caseCount = caseMediaOutputs().length;
       exportCaseButton.disabled = !caseCount;
-      $("caseOutputCount").textContent = String(caseCount);
+      var caseCountNode = $("caseOutputCount");
+      if (caseCountNode) caseCountNode.textContent = String(caseCount);
       exportCaseButton.title = caseCount ? "下载 " + outputActionScopeLabel() + " " + caseCount + " 个案例媒体（ZIP）" : "没有带“案例”标签的媒体文件可导出";
     }
     updateFilterSlider();
   }
   function scopedOutputSummary() {
-    var summary = { total: 0, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 }, tag_counts: { "案例": 0, "H": 0 } };
+    var summary = { total: 0, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 }, tag_counts: { "案例": 0, "H": 0 }, feature_counts: {} };
     var taskIds = {};
     state.outputs.forEach(function (item) {
       if (!contextOutputMatches(item) || !belongsToProject(item, state.projectId)) return;
@@ -596,6 +636,8 @@
       normalizedOutputTags(item).forEach(function (tag) {
         summary.tag_counts[tag] = (summary.tag_counts[tag] || 0) + 1;
       });
+      var feature = outputFeatureKey(item);
+      summary.feature_counts[feature] = (summary.feature_counts[feature] || 0) + 1;
       var taskId = String(item.task_id || "").trim();
       if (taskId) taskIds[taskId] = true;
     });
@@ -603,7 +645,7 @@
     return summary;
   }
   function rebuildSummary() {
-    var summary = { total: state.outputs.length, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 }, tag_counts: { "案例": 0, "H": 0 } };
+    var summary = { total: state.outputs.length, tasks: 0, image: 0, video: 0, audio: 0, other: 0, text: 0, rating_counts: { unrated: 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0 }, tag_counts: { "案例": 0, "H": 0 }, feature_counts: {} };
     var taskIds = {};
     state.outputs.forEach(function (item) {
       var type = String(item.display_type || "other");
@@ -615,6 +657,8 @@
       normalizedOutputTags(item).forEach(function (tag) {
         summary.tag_counts[tag] = (summary.tag_counts[tag] || 0) + 1;
       });
+      var feature = outputFeatureKey(item);
+      summary.feature_counts[feature] = (summary.feature_counts[feature] || 0) + 1;
       taskIds[String(item.task_id || "")] = true;
     });
     summary.tasks = Object.keys(taskIds).filter(function (taskId) { return taskId; }).length;
@@ -683,6 +727,8 @@
   }
   function artifactTagsMarkup(item) {
     var tags = [];
+    var feature = outputFeatureKey(item);
+    tags.push('<span class="artifact-feature-tag" title="功能：' + esc(outputFeatureLabel(feature)) + '" aria-label="功能：' + esc(outputFeatureLabel(feature)) + '">' + esc(outputFeatureLabel(feature)) + '</span>');
     if (hasOutputTag(item, "案例")) tags.push('<span class="artifact-tag artifact-tag-case" title="案例" aria-label="案例">案例</span>');
     if (hasOutputTag(item, "H")) tags.push('<span class="artifact-tag artifact-tag-h" title="H" aria-label="H">H</span>');
     return tags.join("");
@@ -850,7 +896,9 @@
     var taskName = String(item && item.task_name || "未命名任务").trim() || "未命名任务";
     var taskId = String(item && item.task_id || "").trim();
     if (!taskId || (item && item.workflow_available === false)) return esc(taskName);
-    return '<button class="artifact-workflow-link" type="button" data-load-task-workflow="' + esc(taskId) + '" title="加载此次工作流草稿" aria-label="加载工作流 ' + esc(taskName) + '">' + esc(taskName) + '</button>';
+    var toolbox = String(item && item.task_type || "").trim().toLowerCase() === "toolbox";
+    var label = toolbox ? "复现 · " + taskName : taskName;
+    return '<button class="artifact-workflow-link" type="button" data-load-task-workflow="' + esc(taskId) + '" title="' + (toolbox ? "复现此次工具箱任务" : "加载此次工作流草稿") + '" aria-label="' + (toolbox ? "复现任务 " : "加载工作流 ") + esc(taskName) + '">' + esc(label) + '</button>';
   }
   function taskIdLabel(item) {
     var taskId = String(item && item.task_id || "").trim();
@@ -860,6 +908,141 @@
   }
   function telegramUploadKey(taskId, outputIndex) {
     return String(taskId || "") + ":" + String(outputIndex);
+  }
+  function telegramRecipientEntries(settings) {
+    var configured = settings && Array.isArray(settings.push_users)
+      ? settings.push_users
+      : settings && Array.isArray(settings.push_chat_ids)
+        ? settings.push_chat_ids
+        : String(settings && (settings.push_chat_id || settings.chat_id) || "").split(/[，,\n]/);
+    var seen = {};
+    return configured.map(function (entry, index) {
+      var objectEntry = entry && typeof entry === "object" ? entry : {};
+      var id = String(objectEntry.chat_id || objectEntry.chatId || objectEntry.id || entry || "").trim();
+      if (!id || seen[id]) return null;
+      seen[id] = true;
+      var label = String(objectEntry.name || objectEntry.username || objectEntry.title || "").trim() || "推送用户 " + (index + 1);
+      return { id: id, label: label, detail: "Chat ID · " + id };
+    }).filter(Boolean);
+  }
+  function telegramUploadSelectedIds() {
+    var allowed = {};
+    state.telegramRecipients.forEach(function (recipient) { allowed[recipient.id] = true; });
+    return (telegramUploadSelection.selectedIds || []).filter(function (id) { return allowed[id]; });
+  }
+  function updateTelegramUploadSelectionSummary() {
+    var selectedIds = telegramUploadSelectedIds();
+    telegramUploadSelection.selectedIds = selectedIds;
+    var summary = $("telegramUploadSelectionSummary");
+    var allButton = $("selectAllTelegramRecipients");
+    var clearButton = $("clearTelegramRecipients");
+    var confirm = $("confirmTelegramUpload");
+    var total = state.telegramRecipients.length;
+    if (summary) summary.textContent = "已选择 " + selectedIds.length + " / " + total + " 个推送用户";
+    if (allButton) {
+      allButton.disabled = !total || selectedIds.length === total;
+      allButton.textContent = selectedIds.length === total && total ? "已全选" : "全选";
+    }
+    if (clearButton) clearButton.disabled = !selectedIds.length;
+    if (confirm) confirm.disabled = !selectedIds.length;
+  }
+  function renderTelegramUploadRecipients() {
+    var list = $("telegramUploadRecipients");
+    if (!list) return;
+    var selectedIds = telegramUploadSelectedIds();
+    if (!state.telegramRecipients.length) {
+      list.innerHTML = '<div class="telegram-upload-empty"><strong>没有可用的推送用户</strong><span>请先在设置中填写 Telegram 推送 Chat ID。</span></div>';
+      updateTelegramUploadSelectionSummary();
+      return;
+    }
+    list.innerHTML = state.telegramRecipients.map(function (recipient) {
+      var checked = selectedIds.indexOf(recipient.id) !== -1;
+      return '<label class="telegram-upload-recipient' + (checked ? ' is-selected' : '') + '">' +
+        '<input type="checkbox" name="telegram-upload-recipient" value="' + esc(recipient.id) + '"' + (checked ? ' checked' : '') + ' />' +
+        '<span class="telegram-upload-recipient-copy"><strong>' + esc(recipient.label) + '</strong><small>' + esc(recipient.detail) + '</small></span>' +
+        '</label>';
+    }).join("");
+    updateTelegramUploadSelectionSummary();
+  }
+  function setTelegramUploadSelection(selectAll) {
+    telegramUploadSelection.selectedIds = selectAll ? state.telegramRecipients.map(function (recipient) { return recipient.id; }) : [];
+    renderTelegramUploadRecipients();
+  }
+  function openTelegramUpload(itemOrItems, button) {
+    var items = (Array.isArray(itemOrItems) ? itemOrItems : [itemOrItems]).filter(function (item) { return item && item.kind === "file"; });
+    if (!items.length) return showToast("只有本地文件成片可以上传", true);
+    if (!state.telegramConfigured || !state.telegramRecipients.length) return showToast("请先在设置中配置 Telegram 推送用户", true);
+    telegramUploadSelection = {
+      items: items,
+      item: items[0],
+      button: button || null,
+      selectedIds: state.telegramRecipients.map(function (recipient) { return recipient.id; })
+    };
+    var description = $("telegramUploadDescription");
+    if (description) description.textContent = items.length === 1
+      ? "选择要接收「" + String(items[0].name || "本地成片") + "」的 Telegram 推送用户，可多选或全选。"
+      : "已选择 " + items.length + " 个成片，选择要接收这些成片的 Telegram 推送用户，可多选或全选。";
+    renderTelegramUploadRecipients();
+    window.RHMotion.openModal("telegramUploadModal", "closeTelegramUpload");
+  }
+  function closeTelegramUpload() {
+    telegramUploadSelection = { items: [], item: null, button: null, selectedIds: [] };
+    window.RHMotion.closeModal("telegramUploadModal");
+  }
+  function confirmTelegramUpload() {
+    var items = Array.isArray(telegramUploadSelection.items) && telegramUploadSelection.items.length ? telegramUploadSelection.items : [telegramUploadSelection.item];
+    var selectedIds = telegramUploadSelectedIds();
+    var entries = [];
+    var seen = {};
+    items.forEach(function (item) {
+      if (!item || item.kind !== "file") return;
+      var taskId = String(item.task_id || "").trim();
+      var outputIndex = Number(item.output_index);
+      var key = telegramUploadKey(taskId, outputIndex);
+      if (!taskId || !Number.isInteger(outputIndex) || outputIndex < 0 || seen[key] || telegramUploadBusy[key]) return;
+      seen[key] = true;
+      entries.push({ item: item, taskId: taskId, outputIndex: outputIndex, key: key });
+    });
+    if (!entries.length || !selectedIds.length) return showToast("请至少选择一个成片和推送用户", true);
+    var confirm = $("confirmTelegramUpload");
+    var contextButton = telegramUploadSelection.button;
+    entries.forEach(function (entry) { telegramUploadBusy[entry.key] = true; });
+    if (confirm) {
+      confirm.disabled = true;
+      confirm.textContent = "上传中…";
+    }
+    if (contextButton) {
+      contextButton.disabled = true;
+      contextButton.textContent = "上传中";
+      contextButton.setAttribute("aria-busy", "true");
+    }
+    Promise.all(entries.map(function (entry) {
+      return request("/api/tasks/" + encodeURIComponent(entry.taskId) + "/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ output_index: entry.outputIndex, chat_ids: selectedIds })
+      });
+    })).then(function (results) {
+      closeTelegramUpload();
+      var firstMessage = results[0] && results[0].message;
+      showToast(entries.length === 1 ? (firstMessage || ("已上传到 " + selectedIds.length + " 个 Telegram 推送用户")) : "已上传 " + entries.length + " 个成片到 Telegram");
+    }).catch(function (error) {
+      showToast("上传到 Telegram 失败：" + error.message, true);
+    }).finally(function () {
+      entries.forEach(function (entry) {
+        var key = entry.key;
+        delete telegramUploadBusy[key];
+      });
+      if (confirm) {
+        confirm.disabled = false;
+        confirm.textContent = "上传到所选用户";
+      }
+      if (contextButton) {
+        contextButton.disabled = false;
+        contextButton.textContent = "上传";
+        contextButton.removeAttribute("aria-busy");
+      }
+    });
   }
   function artifactById(artifactId) {
     return state.outputs.find(function (item) { return String(item && item.id) === String(artifactId); }) || null;
@@ -871,6 +1054,44 @@
     });
     return card;
   }
+  function selectedMultiOutputItems() {
+    var seen = {};
+    return state.outputs.filter(function (item) {
+      var key = outputActionKey(item);
+      if (!multiSelectedArtifactIds[key] || seen[key]) return false;
+      seen[key] = true;
+      return true;
+    });
+  }
+  function syncMultiSelection() {
+    document.querySelectorAll("#outputGrid .artifact-card").forEach(function (card) {
+      var item = artifactById(card.dataset.artifactId);
+      var active = outputMultiSelectMode && Boolean(item && multiSelectedArtifactIds[outputActionKey(item)]);
+      card.classList.toggle("is-multi-selected", active);
+    });
+    var count = selectedMultiOutputItems().length;
+    ["uploadSelectedOutputs", "moveSelectedOutputs", "deleteSelectedOutputs"].forEach(function (id) {
+      var button = $(id);
+      if (button) button.disabled = !count;
+    });
+  }
+  function toggleMultiOutput(item) {
+    if (!item) return;
+    var key = outputActionKey(item);
+    if (multiSelectedArtifactIds[key]) delete multiSelectedArtifactIds[key];
+    else multiSelectedArtifactIds[key] = true;
+    syncMultiSelection();
+  }
+  function setOutputMultiSelectMode(enabled) {
+    outputMultiSelectMode = Boolean(enabled);
+    multiSelectedArtifactIds = {};
+    var defaults = $("outputToolbarDefaultActions");
+    var multi = $("outputToolbarMultiActions");
+    if (defaults) defaults.hidden = outputMultiSelectMode;
+    if (multi) multi.hidden = !outputMultiSelectMode;
+    syncArtifactSelection();
+    syncMultiSelection();
+  }
   function syncArtifactSelection(items) {
     var visibleItems = Array.isArray(items) ? items : filteredOutputs();
     var selected = visibleItems.find(function (item) { return String(item && item.id) === String(state.selectedArtifactId); }) || null;
@@ -878,9 +1099,13 @@
     state.selectedArtifactId = selected ? String(selected.id || "") : "";
     document.querySelectorAll("#outputGrid .artifact-card").forEach(function (card) {
       var active = String(card.dataset.artifactId) === state.selectedArtifactId;
-      card.classList.toggle("is-selected", active);
-      card.setAttribute("aria-selected", active ? "true" : "false");
+      var item = artifactById(card.dataset.artifactId);
+      var multiActive = outputMultiSelectMode && Boolean(item && multiSelectedArtifactIds[outputActionKey(item)]);
+      card.classList.toggle("is-selected", !outputMultiSelectMode && active);
+      card.classList.toggle("is-multi-selected", multiActive);
+      card.setAttribute("aria-selected", (outputMultiSelectMode ? multiActive : active) ? "true" : "false");
     });
+    syncMultiSelection();
   }
   function selectArtifactCard(item, focus) {
     if (!item) return;
@@ -1049,6 +1274,7 @@
       uploadAction.hidden = !canUpload;
       uploadAction.disabled = uploadBusy;
       uploadAction.textContent = uploadBusy ? "上传中" : "上传";
+      uploadAction.title = canUpload ? "选择 Telegram 推送用户" : "请先配置 Telegram 推送用户";
       if (uploadBusy) uploadAction.setAttribute("aria-busy", "true");
       else uploadAction.removeAttribute("aria-busy");
     }
@@ -1104,32 +1330,7 @@
     });
   }
   function uploadArtifactToTelegram(item, button) {
-    var taskId = String(item && item.task_id || "").trim();
-    var outputIndex = Number(item && item.output_index);
-    var key = telegramUploadKey(taskId, outputIndex);
-    if (!taskId || !Number.isInteger(outputIndex) || outputIndex < 0 || (button && button.disabled) || telegramUploadBusy[key]) return;
-    telegramUploadBusy[key] = true;
-    if (button) {
-      button.disabled = true;
-      button.textContent = "上传中";
-      button.setAttribute("aria-busy", "true");
-    }
-    request("/api/tasks/" + encodeURIComponent(taskId) + "/telegram", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ output_index: outputIndex })
-    }).then(function (data) {
-      showToast(data.message || "已加入 Telegram 上传队列");
-    }).catch(function (error) {
-      showToast("上传到 Telegram 失败：" + error.message, true);
-    }).finally(function () {
-      delete telegramUploadBusy[key];
-      if (button) {
-        button.disabled = false;
-        button.textContent = "上传";
-        button.removeAttribute("aria-busy");
-      }
-    });
+    openTelegramUpload(item, button);
   }
   function taskDraftFromLoadData(data) {
     var task = data && data.task && typeof data.task === "object" ? data.task : {};
@@ -1169,13 +1370,21 @@
       button.textContent = "读取中…";
     }
     request("/api/tasks/" + encodeURIComponent(taskId) + "/load").then(function (data) {
+      if (data && data.kind === "toolbox") {
+        var toolboxTask = data.task && typeof data.task === "object" ? data.task : {};
+        var custom = toolboxTask.custom_inputs && typeof toolboxTask.custom_inputs === "object" ? toolboxTask.custom_inputs : {};
+        localStorage.setItem("rh-workflow-desk-toolbox-replay-v1", JSON.stringify(data));
+        var tool = String(custom.tool || "").trim();
+        window.location.href = "/?workspace=" + (tool === "codex" ? "codex" : tool === "tts" ? "tts" : "media");
+        return;
+      }
       var draft = taskDraftFromLoadData(data);
       if (!draft.workflow.id) throw new Error("任务中缺少本地工作流标识");
       queuePromptGroupSnapshot(data.prompt_group);
       window.localStorage.setItem(draftStorageKey, JSON.stringify(draft));
       var focusImport = notifySubmitImport({ kind: "workflow", source: "task" });
       showToast(focusImport ? "工作流已加载，任务提交面板已同步" : "已加载工作流「" + draft.workflow.name + "」，正在打开任务提交页");
-      if (!focusImport) window.location.href = "/";
+      if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl();
     }).catch(function (error) {
       showToast("加载工作流失败：" + error.message, true);
     }).finally(function () {
@@ -1627,38 +1836,59 @@
     }).join("");
     confirm.disabled = selectedId === currentId;
   }
-  function openOutputProjectMove(item) {
-    if (!item || !String(item.task_id || "").trim()) return showToast("这个产物没有关联的本地任务", true);
+  function openOutputProjectMove(itemOrItems) {
+    var items = (Array.isArray(itemOrItems) ? itemOrItems : [itemOrItems]).filter(function (item) { return item && String(item.task_id || "").trim(); });
+    var uniqueItems = [];
+    var seenTaskIds = {};
+    items.forEach(function (item) {
+      var taskId = String(item.task_id || "").trim();
+      if (seenTaskIds[taskId]) return;
+      seenTaskIds[taskId] = true;
+      uniqueItems.push(item);
+    });
+    if (!uniqueItems.length) return showToast("这个产物没有关联的本地任务", true);
+    var item = uniqueItems[0];
     projectMove.item = item;
+    projectMove.items = uniqueItems;
     var currentId = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
     var firstOther = outputProjectMoveOptions().find(function (record) { return record.id !== currentId; });
     projectMove.projectId = firstOther ? firstOther.id : currentId;
     var description = $("outputProjectMoveDescription");
-    if (description) description.textContent = "任务「" + String(item.task_name || item.task_id) + "」只会改变项目归类，不会移动或复制成片文件。";
+    if (description) description.textContent = uniqueItems.length === 1
+      ? "任务「" + String(item.task_name || item.task_id) + "」只会改变项目归类，不会移动或复制成片文件。"
+      : "已选择 " + uniqueItems.length + " 个任务，只会改变项目归类，不会移动或复制成片文件。";
     renderOutputProjectMoveOptions();
     window.RHMotion.openModal("outputProjectMoveModal", "closeOutputProjectMove");
   }
   function closeOutputProjectMove() {
     projectMove.item = null;
+    projectMove.items = [];
     projectMove.projectId = "";
     window.RHMotion.closeModal("outputProjectMoveModal");
   }
   function confirmOutputProjectMove() {
-    var item = projectMove.item;
+    var items = projectMove.items.length ? projectMove.items : (projectMove.item ? [projectMove.item] : []);
+    var item = items[0];
     var targetId = projectMove.projectId;
     if (!item || !targetId) return showToast("请选择一个项目", true);
-    var currentId = outputProjectId(item) || UNCLASSIFIED_PROJECT_ID;
-    if (targetId === currentId) return showToast("任务已经属于这个项目", true);
+    var movableItems = items.filter(function (candidate) { return (outputProjectId(candidate) || UNCLASSIFIED_PROJECT_ID) !== targetId; });
+    if (!movableItems.length) return showToast("所选任务已经属于这个项目", true);
     var target = targetId === UNCLASSIFIED_PROJECT_ID ? null : outputProjectRecord(targetId);
     if (targetId !== UNCLASSIFIED_PROJECT_ID && !target) return showToast("目标项目不存在，请刷新页面", true);
     var button = $("confirmOutputProjectMove");
     button.disabled = true;
     button.textContent = "保存中…";
-    return requestOutputTaskProject(item, targetId).then(function (result) {
+    var moveRequest = movableItems.length === 1
+      ? requestOutputTaskProject(item, targetId)
+      : Promise.all(movableItems.map(function (candidate) { return requestOutputTaskProject(candidate, targetId); }));
+    return moveRequest.then(function (result) {
       closeOutputProjectMove();
       rebuildSummary();
       refreshOutputCollection();
-      showToast(result.project ? "任务已移动到「" + result.project.name + "」" : "任务已移出项目文件夹");
+      result = Array.isArray(result) ? (result[0] || {}) : (result || {});
+      showToast(movableItems.length === 1
+        ? (result.project ? "任务已移动到「" + result.project.name + "」" : "任务已移出项目文件夹")
+        : (result.project ? "已将 " + movableItems.length + " 个任务移动到「" + result.project.name + "」" : "已将 " + movableItems.length + " 个任务移出项目文件夹"));
     }).catch(function (error) {
       showToast("保存项目归类失败：" + error.message, true);
     }).finally(function () {
@@ -1690,7 +1920,7 @@
       var focusImport = notifySubmitImport({ kind: "media", source: "output", inputId: target.inputId });
       closeOutputImport();
       showToast(focusImport ? "已将「" + itemName + "」导入「" + target.title + "」，任务提交面板已同步" : "已将「" + itemName + "」导入「" + target.title + "」");
-      if (!focusImport) window.location.href = "/";
+      if (!focusImport) window.location.href = window.RHMotion.taskSubmitUrl();
     } catch (error) {
       showToast("保存导入结果失败：" + error.message, true);
     } finally {
@@ -1757,9 +1987,10 @@
       return;
     }
     if (event.key === "Escape") {
-      var hasOverlay = outputPreviewIsOpen() || Boolean($("outputImportModal") && !$("outputImportModal").hidden) || outputProjectMoveIsOpen() || outputProjectEditorIsOpen() || outputProjectDeleteIsOpen() || Boolean($("artifactContextMenu") && !$("artifactContextMenu").hidden) || Boolean($("outputProjectContextMenu") && !$("outputProjectContextMenu").hidden);
+      var hasOverlay = outputPreviewIsOpen() || Boolean($("outputImportModal") && !$("outputImportModal").hidden) || Boolean($("telegramUploadModal") && !$("telegramUploadModal").hidden) || outputProjectMoveIsOpen() || outputProjectEditorIsOpen() || outputProjectDeleteIsOpen() || Boolean($("artifactContextMenu") && !$("artifactContextMenu").hidden) || Boolean($("outputProjectContextMenu") && !$("outputProjectContextMenu").hidden);
       closeOutputPreview();
       closeOutputImport();
+      closeTelegramUpload();
       closeOutputProjectMove();
       closeOutputProjectEditor();
       closeOutputProjectDelete();
@@ -1882,6 +2113,7 @@
     if (!items.length) {
       state.selectedArtifactId = "";
       $("outputGrid").innerHTML = outputsEmptyMarkup();
+      syncMultiSelection();
       renderPagination(0);
       saveOutputViewState();
       return;
@@ -1910,13 +2142,50 @@
       state.outputs = Array.isArray(data.outputs) ? data.outputs : [];
       state.projects = Array.isArray(data.projects) ? data.projects : [];
       state.summary = data.summary || {};
-      state.telegramConfigured = Boolean(settings && settings.configured);
+      state.telegramRecipients = telegramRecipientEntries(settings);
+      state.telegramConfigured = Boolean(settings && (settings.push_configured != null ? settings.push_configured : settings.configured));
       render();
       if (showMessage) showToast("产物列表已刷新");
     }).catch(function (error) {
       $("outputGrid").innerHTML = '<div class="outputs-empty"><strong>读取产物失败</strong><span>' + esc(error.message) + "</span></div>";
       showToast(error.message, true);
     }).finally(function () { $("refreshOutputs").disabled = false; });
+  }
+  function uploadSelectedOutputs() {
+    var selected = selectedMultiOutputItems();
+    var items = selected.filter(function (item) { return item && item.kind === "file"; });
+    if (!items.length) return showToast("所选成片没有可上传的本地文件", true);
+    if (items.length !== selected.length) showToast("已忽略 " + (selected.length - items.length) + " 个不可上传的成片");
+    openTelegramUpload(items, $("uploadSelectedOutputs"));
+  }
+  function deleteSelectedOutputs() {
+    var items = selectedMultiOutputItems();
+    if (!items.length) return;
+    if (!window.confirm("将删除已选 " + items.length + " 个成片文件和产物记录，不删除任务记录。此操作不可恢复。")) return;
+    var button = $("deleteSelectedOutputs");
+    var keys = items.map(function (item) { return { task_id: String(item.task_id || ""), output_index: Number(item.output_index) }; });
+    var targetKeys = {};
+    items.forEach(function (item) { targetKeys[outputActionKey(item)] = true; });
+    button.disabled = true;
+    button.classList.add("is-busy");
+    button.textContent = "删除中…";
+    return request("/api/outputs/selected", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ output_keys: keys })
+    }).then(function (data) {
+      var deleted = Number(data.deleted || 0);
+      state.outputs = state.outputs.filter(function (item) { return !targetKeys[outputActionKey(item)]; });
+      rebuildSummary();
+      refreshOutputCollection();
+      showToast("已删除 " + deleted + " 个成片");
+    }).catch(function (error) {
+      showToast("删除所选成片失败：" + error.message, true);
+    }).finally(function () {
+      button.classList.remove("is-busy");
+      button.textContent = "删除";
+      setOutputMultiSelectMode(false);
+    });
   }
   function deleteOneStarOutputs() {
     var projectId = state.projectId;
@@ -2001,6 +2270,14 @@
     });
     $("exportCaseOutputs").addEventListener("click", exportCaseOutputs);
     $("deleteOneStarOutputs").addEventListener("click", deleteOneStarOutputs);
+    $("toggleOutputMultiSelect").addEventListener("click", function () { setOutputMultiSelectMode(true); });
+    $("cancelOutputMultiSelect").addEventListener("click", function () { setOutputMultiSelectMode(false); });
+    $("uploadSelectedOutputs").addEventListener("click", uploadSelectedOutputs);
+    $("moveSelectedOutputs").addEventListener("click", function () {
+      var items = selectedMultiOutputItems();
+      if (items.length) openOutputProjectMove(items);
+    });
+    $("deleteSelectedOutputs").addEventListener("click", deleteSelectedOutputs);
     $("outputGrid").addEventListener("pointerdown", function (event) {
       if (event.button !== 0 && event.button !== 2) return;
       var card = event.target.closest(".artifact-card");
@@ -2072,6 +2349,11 @@
       var card = event.target.closest(".artifact-card");
       if (!card) return;
       var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
+      if (outputMultiSelectMode) {
+        event.preventDefault();
+        toggleMultiOutput(item);
+        return;
+      }
       selectArtifactCard(item, false);
       openOutputPreview(item);
     });
@@ -2084,6 +2366,10 @@
       event.preventDefault();
       event.stopPropagation();
       var item = state.outputs.find(function (output) { return String(output.id) === String(card.dataset.artifactId); });
+      if (outputMultiSelectMode) {
+        toggleMultiOutput(item);
+        return;
+      }
       selectArtifactCard(item, false);
       openOutputPreview(item);
     });
@@ -2116,6 +2402,13 @@
       var currentIndex = OUTPUT_TAG_FILTER_MODES.indexOf(mode);
       if (OUTPUT_TAG_FILTER_TAGS.indexOf(tag) === -1 || currentIndex === -1) return;
       state.tagFilters[tag] = OUTPUT_TAG_FILTER_MODES[(currentIndex + 1) % OUTPUT_TAG_FILTER_MODES.length];
+      resetOutputPage();
+      render();
+    });
+    $("outputFeatureFilters").addEventListener("click", function (event) {
+      var button = event.target.closest("[data-output-feature]");
+      if (!button) return;
+      state.feature = restoredOutputFeature(button.dataset.outputFeature || "");
       resetOutputPage();
       render();
     });
@@ -2152,6 +2445,17 @@
       if (event.target.name === "output-import-target") $("confirmOutputImport").disabled = false;
     });
     $("outputImportModal").addEventListener("click", function (event) { if (event.target === $("outputImportModal")) closeOutputImport(); });
+    $("closeTelegramUpload").addEventListener("click", closeTelegramUpload);
+    $("cancelTelegramUpload").addEventListener("click", closeTelegramUpload);
+    $("confirmTelegramUpload").addEventListener("click", confirmTelegramUpload);
+    $("selectAllTelegramRecipients").addEventListener("click", function () { setTelegramUploadSelection(true); });
+    $("clearTelegramRecipients").addEventListener("click", function () { setTelegramUploadSelection(false); });
+    $("telegramUploadRecipients").addEventListener("change", function (event) {
+      if (event.target.name !== "telegram-upload-recipient") return;
+      telegramUploadSelection.selectedIds = Array.prototype.slice.call($("telegramUploadRecipients").querySelectorAll('input[name="telegram-upload-recipient"]:checked')).map(function (input) { return input.value; });
+      renderTelegramUploadRecipients();
+    });
+    $("telegramUploadModal").addEventListener("click", function (event) { if (event.target === $("telegramUploadModal")) closeTelegramUpload(); });
     $("closeOutputProjectMove").addEventListener("click", closeOutputProjectMove);
     $("cancelOutputProjectMove").addEventListener("click", closeOutputProjectMove);
     $("confirmOutputProjectMove").addEventListener("click", confirmOutputProjectMove);

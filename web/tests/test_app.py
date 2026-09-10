@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from web import app as web_app
-from web import server as web_server
+from web.backend import app as web_app
+from web.backend import server as web_server
 from rh_cli.errors import RhCliError
 
 
@@ -447,6 +447,29 @@ def test_telegram_inbound_settings_bind_one_image_workflow(tmp_path, monkeypatch
         store._db.close()
 
 
+def test_telegram_settings_save_separates_push_and_inbound_chat_ids(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        store._write_json_file({"telegram_bot_token": "123456:secret"})
+
+        settings = store.set_telegram_settings(
+            "",
+            enabled=True,
+            push_chat_id="5468961835",
+            inbound_chat_id="*",
+        )
+        saved = store._read_json_file()
+
+        assert settings["push_chat_id"] == "5468961835"
+        assert settings["inbound_chat_id"] == "*"
+        assert saved["telegram_push_chat_id"] == "5468961835"
+        assert saved["telegram_inbound_chat_id"] == "*"
+        assert "telegram_chat_id" not in saved
+    finally:
+        store._db.close()
+
+
 def test_telegram_inbound_settings_allows_optional_file_inputs(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -521,6 +544,10 @@ def test_telegram_video_inbound_submits_downloaded_social_video(tmp_path, monkey
                 "1": {"class_type": "LoadVideo", "inputs": {"video": "input.mp4"}},
                 "2": {"class_type": "SaveVideo", "inputs": {"filename_prefix": "output"}},
                 "14": {"class_type": "PrimitiveFloat", "inputs": {"value": 15}},
+                "16": {
+                    "class_type": "ResolutionSelector",
+                    "inputs": {"aspect_ratio": "9:16 (Portrait Widescreen)", "megapixels": 0.4, "multiple": 32},
+                },
             }),
             account_id=account["id"],
             remote_workflow_id="123456",
@@ -529,13 +556,16 @@ def test_telegram_video_inbound_submits_downloaded_social_video(tmp_path, monkey
         downloaded.write_bytes(b"video")
         monkeypatch.setattr(web_app, "download_social_video", lambda url, data_root: downloaded)
         monkeypatch.setattr(web_app, "_probe_video_duration", lambda path: 8.9376)
+        monkeypatch.setattr(web_app, "_probe_video_dimensions", lambda path: (1920, 1080))
         submitted = {}
+        sent = []
 
         class InboundNotifier:
             def message_text(self, update):
                 return "https://www.bilibili.com/video/BV1xx"
 
             def send_message(self, *args, **kwargs):
+                sent.append((args, kwargs))
                 return None
 
         manager = web_app.TaskManager.__new__(web_app.TaskManager)
@@ -564,10 +594,52 @@ def test_telegram_video_inbound_submits_downloaded_social_video(tmp_path, monkey
         assert submitted["workflow_id"] == workflow_id
         assert submitted["files"] == {"1:video": str(downloaded)}
         assert submitted["workflow_data"]["14"]["inputs"]["value"] == 8.938
+        assert submitted["workflow_data"]["16"]["inputs"]["aspect_ratio"] == "16:9 (Widescreen)"
         assert submitted["submission_source"] == "telegram"
         assert submitted["project"]["name"] == "Telegrame"
+        assert sent[-1][0][1] == "chat"
     finally:
         store._db.close()
+
+
+def test_telegram_video_inbound_caps_duration_at_15_seconds(tmp_path, monkeypatch):
+    video_path = tmp_path / "downloaded.mp4"
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr(web_app, "_probe_video_duration", lambda path: 18.2749)
+    workflow = {"14": {"class_type": "PrimitiveFloat", "inputs": {"value": 15}}}
+
+    measured = web_app._apply_telegram_video_duration(workflow, video_path)
+
+    assert measured == 15.0
+    assert workflow["14"]["inputs"]["value"] == 15.0
+
+
+@pytest.mark.parametrize(
+    ("dimensions", "expected"),
+    [((1920, 1080), "16:9 (Widescreen)"), ((1080, 1920), "9:16 (Portrait Widescreen)")],
+)
+def test_telegram_video_inbound_sets_resolution_selector_from_video_orientation(
+    tmp_path, monkeypatch, dimensions, expected,
+):
+    video_path = tmp_path / "downloaded.mp4"
+    video_path.write_bytes(b"video")
+    monkeypatch.setattr(web_app, "_probe_video_dimensions", lambda path: dimensions)
+    workflow = {
+        "16": {
+            "class_type": "ResolutionSelector",
+            "inputs": {"aspect_ratio": "1:1 (Square)", "megapixels": 0.4, "multiple": 32},
+        },
+        "17": {
+            "class_type": "ResolutionSelector",
+            "inputs": {"aspect_ratio": "1:1 (Square)", "megapixels": 0.4, "multiple": 32},
+        },
+    }
+
+    aspect_ratio = web_app._apply_telegram_video_aspect_ratio(workflow, video_path)
+
+    assert aspect_ratio == expected
+    assert workflow["16"]["inputs"]["aspect_ratio"] == expected
+    assert workflow["17"]["inputs"]["aspect_ratio"] == expected
 
 
 def test_telegram_video_inbound_persists_measured_duration_in_task_snapshot(tmp_path, monkeypatch):
@@ -944,6 +1016,40 @@ def test_manual_telegram_upload_rejects_duplicate_while_in_flight():
 
     assert "value" in result
     assert "value" not in error
+
+
+def test_manual_telegram_upload_forwards_selected_recipients():
+    output = {"kind": "file", "name": "result.png", "path": "/tmp/result.png"}
+
+    class UploadStore:
+        def task(self, task_id):
+            return {"id": task_id, "outputs": [output]}
+
+    class UploadNotifier:
+        def settings(self):
+            return {"configured": True, "push_configured": True, "push_chat_ids": ["-1001", "-1002"]}
+
+        def __init__(self):
+            self.selected = None
+
+        def notify_task(self, task_id, outputs, **kwargs):
+            self.selected = kwargs.get("chat_ids")
+            return {"status": "sent", "sent": 1, "failed": 0}
+
+    manager = web_app.TaskManager.__new__(web_app.TaskManager)
+    manager.store = UploadStore()
+    manager._telegram_notifier = UploadNotifier()
+    manager._telegram_executor = web_app.ThreadPoolExecutor(max_workers=1)
+    manager._telegram_upload_lock = threading.Lock()
+    manager._telegram_uploading = set()
+    manager._log_stage = lambda *args, **kwargs: None
+    try:
+        result = manager.upload_task_to_telegram("task-1", 0, ["-1002"])
+    finally:
+        manager._telegram_executor.shutdown(wait=True)
+
+    assert result["status"] == "sent"
+    assert manager._telegram_notifier.selected == ["-1002"]
 
 
 def test_telegram_delivery_claim_is_atomic_across_store_connections(tmp_path, monkeypatch):
@@ -2211,6 +2317,31 @@ def test_workflow_folder_can_be_renamed_without_changing_membership(tmp_path, mo
         store._db.close()
 
 
+def test_workflow_cards_keep_manual_order_after_reorder_and_edit(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        workflow = {"1": {"class_type": "SaveImage", "inputs": {}}}
+        first, _, _ = store.save_workflow("first.json", json.dumps(workflow))
+        second, _, _ = store.save_workflow("second.json", json.dumps(workflow))
+        third, _, _ = store.save_workflow("third.json", json.dumps(workflow))
+
+        store.reorder_workflows("", [third, first, second])
+
+        assert [item["id"] for item in store.workflows()] == [third, first, second]
+        store.update_workflow(first, {"remote_workflow_id": "remote-first"})
+        assert [item["id"] for item in store.workflows()] == [third, first, second]
+
+        registry = store._read_workflow_registry()
+        assert {item["id"]: item["sort_order"] for item in registry} == {
+            third: 0,
+            first: 1,
+            second: 2,
+        }
+    finally:
+        store._db.close()
+
+
 def test_rename_workflow_changes_registry_name_without_moving_json(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -2620,6 +2751,7 @@ def test_submit_task_writes_path_only_replay_manifest(tmp_path, monkeypatch):
         assert task["manifest_path"] == str(manifest_path.resolve())
         assert task["output_prefix"] == "chinatsu-showcase"
         assert manifest["execution"]["output_prefix"] == "chinatsu-showcase"
+        assert manifest["feature"] == {"id": "workflow", "name": "任务提交"}
         assert manifest["inputs"] == {
             "files": {"1:image": str(input_path)},
             "prompts": {"2:text": "A fixed prompt."},
@@ -2635,6 +2767,98 @@ def test_submit_task_writes_path_only_replay_manifest(tmp_path, monkeypatch):
         }
     finally:
         manager.close()
+        store._db.close()
+
+
+def test_toolbox_tasks_write_workflow_ids_and_path_only_manifests(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    source = tmp_path / "reference.png"
+    source.write_bytes(b"image")
+
+    class FakeExecutor:
+        def submit(self, *_args, **_kwargs):
+            return None
+
+    manager = web_server.ToolboxManager.__new__(web_server.ToolboxManager)
+    manager.store = store
+    manager._executor = FakeExecutor()
+    try:
+        codex = manager.submit_image({
+            "prompt": "一只猫",
+            "resolution": "2k",
+            "size": "16:9",
+            "references": [{"path": str(source)}],
+        })
+        media_source = tmp_path / "motion.mp4"
+        media_source.write_bytes(b"video")
+        depth = manager.submit_media({"mode": "depth_skeleton", "resolution": "720p", "duration_seconds": "2.5", "start_frame": "48", "input": {"path": str(media_source)}})
+
+        codex_manifest = json.loads(Path(codex["manifest_path"]).read_text(encoding="utf-8"))
+        depth_manifest = json.loads(Path(depth["manifest_path"]).read_text(encoding="utf-8"))
+        assert codex["local_workflow_id"] == "toolbox.codex-image"
+        assert depth["local_workflow_id"] == "toolbox.depth-skeleton"
+        assert codex_manifest["workflow_id"] == "toolbox.codex-image"
+        assert codex_manifest["feature"] == {"id": "codex", "name": "Codex 图像生成"}
+        assert codex_manifest["execution"]["aspect_ratio"] == "16:9"
+        assert codex_manifest["inputs"]["files"]["reference_1"] == str(source.resolve())
+        assert codex_manifest["inputs"]["prompts"] == {"prompt": "一只猫"}
+        assert depth_manifest["workflow"]["id"] == "toolbox.depth-skeleton"
+        assert depth_manifest["feature"] == {"id": "media", "name": "深度与骨骼"}
+        assert depth_manifest["execution"]["mode"] == "depth_skeleton"
+        assert depth_manifest["execution"]["resolution"] == "720p"
+        assert depth_manifest["execution"]["duration_seconds"] == "2.5"
+        assert depth_manifest["execution"]["start_frame"] == "48"
+        assert depth_manifest["inputs"]["custom"]["resolution"] == "720p"
+        assert depth_manifest["inputs"]["custom"]["duration_seconds"] == 2.5
+        assert depth_manifest["inputs"]["custom"]["start_frame"] == 48
+        assert depth_manifest["inputs"]["files"]["input"] == str(media_source.resolve())
+
+        replay = store.load_task_replay(codex["id"])
+        assert replay["kind"] == "toolbox"
+        assert replay["workflow_id"] == "toolbox.codex-image"
+        assert replay["toolbox"]["custom_inputs"]["aspect_ratio"] == "16:9"
+    finally:
+        store._db.close()
+
+
+def test_existing_task_manifests_are_backfilled_with_feature_descriptors(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    output_dir = tmp_path / "out"
+    workflow_folder = output_dir / "task_workflow"
+    tts_folder = output_dir / "task_tts"
+    workflow_folder.mkdir(parents=True)
+    tts_folder.mkdir(parents=True)
+
+    def create_legacy_task(task_id, task_type, folder, custom_inputs=None, local_workflow_id=""):
+        store.create_task({
+            "id": task_id,
+            "created_at": 1,
+            "workflow_path": str(folder / "workflow_api.json"),
+            "workflow_name": "legacy.json",
+            "task_type": task_type,
+            "local_workflow_id": local_workflow_id,
+            "files": {},
+            "prompts": {},
+            "custom_inputs": custom_inputs or {},
+            "output_dir": str(output_dir),
+        })
+
+    try:
+        create_legacy_task("task_workflow", "workflow", workflow_folder)
+        create_legacy_task("task_tts", "toolbox", tts_folder, {"tool": "tts"}, "toolbox.tts")
+        (workflow_folder / "manifest.json").write_text(json.dumps({"kind": "rh-workflow-task", "task_type": "workflow"}), encoding="utf-8")
+        (tts_folder / "manifest.json").write_text(json.dumps({"kind": "rh-toolbox-task", "task_type": "toolbox"}), encoding="utf-8")
+
+        store._db.close()
+        store = web_app.LocalStore()
+
+        workflow_manifest = json.loads((workflow_folder / "manifest.json").read_text(encoding="utf-8"))
+        tts_manifest = json.loads((tts_folder / "manifest.json").read_text(encoding="utf-8"))
+        assert workflow_manifest["feature"] == {"id": "workflow", "name": "任务提交"}
+        assert tts_manifest["feature"] == {"id": "tts", "name": "角色语音"}
+    finally:
         store._db.close()
 
 
@@ -3235,6 +3459,46 @@ def test_submit_task_records_instance_type(tmp_path, monkeypatch):
         store._db.close()
 
 
+def test_submit_task_clamps_h3_reference_length_in_task_snapshot(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        workflow = {
+            "6": {
+                "class_type": "MiniMaxH3AudioConditioningT8",
+                "inputs": {"length": ["15", 1]},
+            },
+            "14": {"class_type": "PrimitiveFloat", "inputs": {"value": 15.0}},
+            "15": {
+                "class_type": "ComfyMathExpression",
+                "inputs": {
+                    "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+                    "values.a": ["14", 0],
+                },
+            },
+            "1": {"class_type": "SaveImage", "inputs": {}},
+        }
+        task = manager.submit_task(
+            "unused",
+            {},
+            {},
+            None,
+            None,
+            remote_workflow_id="123456",
+            workflow_data=workflow,
+        )
+
+        snapshot = json.loads(Path(task["workflow_snapshot_path"]).read_text(encoding="utf-8"))
+
+        assert workflow["15"]["inputs"]["expression"].startswith("max(5,")
+        assert snapshot["15"]["inputs"]["expression"].startswith("min(360,")
+        assert any("参考帧数表达式上限钳制为 360" in item["message"] for item in task["stage_logs"])
+    finally:
+        manager.close()
+        store._db.close()
+
+
 @pytest.mark.parametrize(
     ("initial_instance_type", "expected_instance_types"),
     [
@@ -3362,6 +3626,119 @@ def test_run_task_does_not_retry_805_more_than_once(tmp_path, monkeypatch):
         store._db.close()
 
 
+def test_run_task_retries_vhs_decode_once_after_video_transcode(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    manager = web_app.TaskManager(store)
+    try:
+        manager._stop.set()
+        manager._wake.set()
+        manager._dispatcher.join(timeout=1)
+        source = tmp_path / "source-av1.mp4"
+        source.write_bytes(b"source")
+        workflow = {
+            "__rh_meta__": {"workflowId": "987654"},
+            "6": {
+                "class_type": "MiniMaxH3AudioConditioningT8",
+                "inputs": {"length": ["15", 1]},
+            },
+            "14": {"class_type": "PrimitiveFloat", "inputs": {"value": 15.0}},
+            "15": {
+                "class_type": "ComfyMathExpression",
+                "inputs": {
+                    "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+                    "values.a": ["14", 0],
+                },
+            },
+            "114": {
+                "class_type": "VHS_LoadVideo",
+                "inputs": {"video": str(source)},
+            },
+            "1": {"class_type": "SaveImage", "inputs": {"images": ["114", 0]}},
+        }
+        task = manager.submit_task(
+            "unused",
+            {"114:video": str(source)},
+            {},
+            None,
+            None,
+            remote_workflow_id="987654",
+            workflow_data=workflow,
+        )
+        upload_calls = []
+        transcode_calls = []
+        submitted_workflows = []
+        poll_calls = 0
+
+        class FakeClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_apply_file_args(client, current_workflow, file_args, upload_url):
+            upload_calls.append(list(file_args))
+            for spec in file_args:
+                input_id, _ = spec.split("=", 1)
+                node_id, field = input_id.split(":", 1)
+                current_workflow[node_id]["inputs"][field] = f"remote-{len(upload_calls)}"
+            return list(file_args)
+
+        def fake_transcode(source_path, task_output_dir, *, label=""):
+            converted = task_output_dir / "input-transcoded" / f"{label}_h264.mp4"
+            converted.parent.mkdir(parents=True, exist_ok=True)
+            converted.write_bytes(b"converted")
+            transcode_calls.append((source_path, task_output_dir, label))
+            return converted
+
+        def fake_submit(*args, **kwargs):
+            submitted_workflows.append(json.loads(args[3]))
+            return f"remote-task-{len(submitted_workflows)}"
+
+        def fake_poll(*args, **kwargs):
+            nonlocal poll_calls
+            poll_calls += 1
+            if poll_calls == 1:
+                raise RhCliError(
+                    "TASK_FAILED",
+                    "任务执行失败：APIKEY_TASK_STATUS_ERROR",
+                    detail={
+                        "code": 805,
+                        "data": {
+                            "failedReason": {
+                                "node_name": "VHS_LoadVideo",
+                                "node_id": "114",
+                                "exception_message": "source.mp4 could not be loaded with cv.",
+                            }
+                        },
+                    },
+                )
+            return []
+
+        monkeypatch.setattr(web_app, "RhHttpClient", lambda *args, **kwargs: FakeClient())
+        monkeypatch.setattr(web_app, "_site_urls", lambda site: ("upload", "create", "outputs"))
+        monkeypatch.setattr(web_app, "_apply_file_args", fake_apply_file_args)
+        monkeypatch.setattr(web_app, "_transcode_video_for_retry", fake_transcode)
+        monkeypatch.setattr(web_app, "_submit", fake_submit)
+        monkeypatch.setattr(web_app, "_poll_outputs", fake_poll)
+
+        manager._run_task(task["id"], _saved_key(), threading.Event())
+
+        finished = store.task(task["id"])
+        assert len(transcode_calls) == 1
+        assert [len(call) for call in upload_calls] == [1, 1]
+        assert len(submitted_workflows) == 2
+        assert submitted_workflows[1]["114"]["inputs"]["video"] == "remote-2"
+        assert submitted_workflows[1]["15"]["inputs"]["expression"].startswith("min(360,")
+        assert poll_calls == 2
+        assert finished["status"] == "completed"
+        assert any("H.264/yuv420p" in item["message"] for item in finished["stage_logs"])
+    finally:
+        manager.close()
+        store._db.close()
+
+
 def test_local_file_preview_reads_image_without_copying(tmp_path):
     source = tmp_path / "existing.png"
     source.write_bytes(b"png-bytes")
@@ -3461,6 +3838,50 @@ def test_public_outputs_lists_available_files_and_text(tmp_path, monkeypatch):
         store._db.close()
 
 
+def test_public_outputs_exposes_toolbox_replay_metadata(tmp_path, monkeypatch):
+    _configure_web_paths(tmp_path, monkeypatch)
+    store = web_app.LocalStore()
+    try:
+        task_id = "task_toolbox_output"
+        output_dir = tmp_path / "out"
+        task_folder = output_dir / task_id
+        task_folder.mkdir(parents=True)
+        output_path = task_folder / "result.png"
+        output_path.write_bytes(b"png")
+        store.create_task(
+            {
+                "id": task_id,
+                "created_at": 1,
+                "workflow_path": str(task_folder / ".toolbox-command.json"),
+                "workflow_name": "Codex 图像生成",
+                "task_type": "toolbox",
+                "local_workflow_id": "toolbox.codex-image",
+                "files": {"reference_1": str(tmp_path / "reference.png")},
+                "prompts": {"prompt": "一只猫"},
+                "custom_inputs": {"tool": "codex", "resolution": "2k", "aspect_ratio": "1:1"},
+                "output_dir": str(output_dir),
+            }
+        )
+        store.save_toolbox_manifest(store.task(task_id))
+        store.update_task(
+            task_id,
+            status="completed",
+            completed_at=2,
+            outputs_json=json.dumps([{"kind": "file", "path": str(output_path), "mime": "image/png"}], ensure_ascii=False),
+        )
+
+        result = web_app.public_outputs(store, SimpleNamespace(public_tasks=lambda: [store.task(task_id)]))
+
+        artifact = result["outputs"][0]
+        assert artifact["task_type"] == "toolbox"
+        assert artifact["workflow_id"] == "toolbox.codex-image"
+        assert artifact["feature"] == "codex"
+        assert artifact["feature_tag"] == "Codex 图像生成"
+        assert artifact["workflow_available"] is True
+    finally:
+        store._db.close()
+
+
 def test_usage_ledger_survives_task_deletion_and_dashboard_reads_it(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
     store = web_app.LocalStore()
@@ -3487,7 +3908,8 @@ def test_usage_ledger_survives_task_deletion_and_dashboard_reads_it(tmp_path, mo
             completed_at=created_at + 9000,
             cost_type="coins",
             cost="12",
-            duration="8",
+            # RunningHub taskCostTime is stored in milliseconds.
+            duration="8000",
             outputs_json=json.dumps([{"kind": "text", "text": "done"}], ensure_ascii=False),
         )
         manager = SimpleNamespace(public_tasks=lambda: [store.task(task_id)], public_keys=lambda: [])
@@ -3498,6 +3920,7 @@ def test_usage_ledger_survives_task_deletion_and_dashboard_reads_it(tmp_path, mo
         assert result["summary"]["coins_spent"] == "12"
         assert result["summary"]["submissions"] == 1
         assert result["summary"]["processing_seconds"] == "8"
+        assert result["recent"][0]["duration_seconds"] == "8"
         assert result["summary"]["outputs"] == 1
         assert result["recent"][0]["task_available"] is True
 

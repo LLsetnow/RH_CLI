@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from web import app as web_app
-from web import server as web_server
-from web.reference_store import VERSION, ReferenceStore
+from web.backend import app as web_app
+from web.backend import server as web_server
+from web.backend.reference_store import VERSION, ReferenceStore
 
 
 def _reference_root(tmp_path: Path) -> Path:
@@ -196,6 +196,36 @@ def test_reference_store_writes_tags_and_new_entries_back_to_kind_json(tmp_path)
     assert added["title"] == "新人物"
     assert added["image_path"] == "character/new.png"
     assert any(item["title"] == "新人物" for item in json.loads(source.read_text(encoding="utf-8"))["references"])
+
+
+def test_reference_store_delete_removes_media_and_index_entry(tmp_path):
+    root = _reference_root(tmp_path)
+    image = root / "character" / "hero.png"
+    audio = root / "character" / "hero.wav"
+    audio.write_bytes(b"audio")
+    source = root / "character" / "character.json"
+    source.write_text(json.dumps({
+        "version": VERSION,
+        "references": [{
+            "id": "character-delete",
+            "category": "二次元",
+            "tags": ["人物"],
+            "title": "主角",
+            "text": "主角参考。",
+            "image_path": "hero.png",
+            "audio_path": "hero.wav",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    store = ReferenceStore(tmp_path / "data", root)
+
+    assert store.media_folder("character-delete") == image.parent
+
+    store.delete_reference("character-delete")
+
+    assert all(item["id"] != "character-delete" for item in store.references())
+    assert json.loads(source.read_text(encoding="utf-8"))["references"] == []
+    assert not image.exists()
+    assert not audio.exists()
 
 
 def test_reference_store_renames_target_image_when_title_changes(tmp_path):

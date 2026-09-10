@@ -6,15 +6,16 @@
 
 ## 项目结构
 
-- `server.py`：本地 HTTP 服务、静态文件服务和 JSON API。
-- `app.py`：`LocalStore`、`TaskManager`、任务历史、并发调度、产物和重启恢复。
-- `prompt_store.py`、`action_store.py`、`reference_store.py`：提示词、动作和参考资源索引。
+- `backend/server.py`：本地 HTTP 服务、静态文件服务和 JSON API。
+- `backend/app.py`：`LocalStore`、`TaskManager`、任务历史、并发调度、产物和重启恢复。
+- `backend/prompt_store.py`、`backend/action_store.py`、`backend/reference_store.py`：提示词、动作和参考资源索引。
 - `static/index.html`、`app.js`、`app.css`：任务提交页。
 - `static/prompt.*`：提示词工坊。
 - `static/outputs.*`：成片/产物浏览页。
 - `static/workflows.*`：本地工作流库管理页。
 - `static/motion.js`：页面切换、弹窗和媒体预览的共享动效。
 - `electron/main.cjs`、`preload.cjs`：Electron 主进程、本地服务启动和原生文件/目录选择器。
+- `scripts/start.sh`、`scripts/build-macos.sh`：Web 开发启动和 macOS 打包脚本。
 - `data/`：本地 API Key、账号、任务 SQLite、工作流副本、任务产物和提示词状态。
 - `docs/`：面向后续开发的架构、样式和验证说明；先阅读 [docs/README.md](./docs/README.md)。
 
@@ -55,7 +56,7 @@
 从仓库根目录运行 Web 版：
 
 ```bash
-./web/start.sh --no-browser
+./web/scripts/start.sh --no-browser
 ```
 
 运行 macOS Electron 开发版：

@@ -92,6 +92,14 @@ def _segments(value: Any) -> list[dict[str, Any]]:
         "image_path",
         "audio_url",
         "audio_path",
+        "video_url",
+        "video_path",
+        "depth_video_url",
+        "depth_video_path",
+        "skeleton_video_url",
+        "skeleton_video_path",
+        "depth_skeleton_video_url",
+        "depth_skeleton_video_path",
         "media_type",
         "reference_kind",
     }
@@ -196,7 +204,12 @@ def _item(value: Any) -> dict[str, Any] | None:
                 "text": text,
             },
         }
-        for key in ("image_url", "image_path", "audio_url", "audio_path", "media_type"):
+        for key in (
+            "image_url", "image_path", "audio_url", "audio_path",
+            "video_url", "video_path", "depth_video_url", "depth_video_path",
+            "skeleton_video_url", "skeleton_video_path",
+            "depth_skeleton_video_url", "depth_skeleton_video_path", "media_type",
+        ):
             if key in snapshot_value:
                 result["snapshot"][key] = str(snapshot_value.get(key) or "").strip()
         return result
@@ -210,6 +223,16 @@ def _item(value: Any) -> dict[str, Any] | None:
     result["action_id" if kind == "action" else "block_id"] = reference_id
     if snapshot:
         result["snapshot"] = {key: snapshot[key] for key in ("tags", "title", "text")}
+        if kind == "action":
+            for key in (
+                "color_image_url", "color_image_path", "depth_image_url", "depth_image_path",
+                "skeleton_image_url", "skeleton_image_path", "media_type",
+                "video_url", "video_path", "depth_video_url", "depth_video_path",
+                "skeleton_video_url", "skeleton_video_path",
+                "depth_skeleton_video_url", "depth_skeleton_video_path", "pair_status",
+            ):
+                if key in snapshot_value:
+                    result["snapshot"][key] = str(snapshot_value.get(key) or "").strip()
     return result
 
 

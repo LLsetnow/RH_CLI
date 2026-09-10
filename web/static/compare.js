@@ -775,14 +775,8 @@
       if (!state.video.raf) state.video.raf = window.requestAnimationFrame(videoTick);
     }
   }
-  function isTypingTarget(target) {
-    var element = target && target.nodeType === 1 ? target : null;
-    if (!element) return false;
-    return ["INPUT", "TEXTAREA", "SELECT"].indexOf(element.tagName) !== -1 || element.isContentEditable;
-  }
   function handleVideoShortcut(event) {
-    var controlTarget = event.target && event.target.closest && event.target.closest("button, a, select, [role=button], [data-asset-id]");
-    if (getVideos().length < 2 || isTypingTarget(event.target) || controlTarget || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (getVideos().length < 2 || event.metaKey || event.ctrlKey || event.altKey) return;
     var key = event.key;
     if (key === " ") {
       event.preventDefault();
@@ -799,12 +793,12 @@
       seekVideos(-1, false);
       return;
     }
-    if (key === "d" || key === "D") {
+    if (key === "d" || key === "D" || event.code === "KeyD") {
       event.preventDefault();
       seekVideos(-1 / 24, true);
       return;
     }
-    if (key === "f" || key === "F") {
+    if (key === "f" || key === "F" || event.code === "KeyF") {
       event.preventDefault();
       seekVideos(1 / 24, true);
     }
@@ -943,7 +937,7 @@
     stage.addEventListener("keydown", function (event) {
       if (event.key === "0") resetTransform();
     });
-    document.addEventListener("keydown", handleVideoShortcut);
+    document.addEventListener("keydown", handleVideoShortcut, true);
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && compareFullscreenIsOpen()) {
         event.preventDefault();
