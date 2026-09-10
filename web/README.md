@@ -62,7 +62,7 @@ npm install
 npm run package:mac
 ```
 
-构建会先用 PyInstaller 打包内置 Python 本地服务，再生成带当前版本号的 `web/dist/RH-Workflow-Desk-0.3.1-arm64.dmg`、对应 `.zip` 和校验文件；安装后的任务数据写入 macOS 用户数据目录。
+构建会先用 PyInstaller 打包内置 Python 本地服务，再生成带当前版本号的 `web/dist/RH-Workflow-Desk-0.3.2-arm64.dmg`、对应 `.zip` 和校验文件；安装后的任务数据写入 macOS 用户数据目录。
 
 Windows x64 安装包在 GitHub Actions 的 Windows runner 上构建，以确保内置 Python 服务是真正的 Windows `.exe`：
 
@@ -72,7 +72,7 @@ npm install
 npm run package:win
 ```
 
-构建会生成 `web/dist/RH-Workflow-Desk-0.3.1-x64.exe` 和 `SHA256SUMS.txt`；安装后的任务数据写入 Windows 用户数据目录。
+构建会生成 `web/dist/RH-Workflow-Desk-0.3.2-x64.exe` 和 `SHA256SUMS.txt`；安装后的任务数据写入 Windows 用户数据目录。
 
 ## 新用户首次安装与配置
 
