@@ -30,6 +30,8 @@ from .action_store import ActionStore
 from .prompt_store import PromptStore
 from .prompt_writer import AliyunPromptWriter
 from .reference_store import ReferenceStore
+from .input_paths import input_source_path
+from .runtime_paths import depth_runtime_paths, skeleton_runtime_paths
 from .tts import TtsClient, public_tts_voices
 from .translation import AliyunTranslationClient
 from .toolbox import (
@@ -40,6 +42,7 @@ from .toolbox import (
     default_codex_image_command,
     expand_command_template,
     find_generated_media,
+    normalize_codex_image_model,
     normalize_codex_image_resolution,
     normalize_codex_image_size,
     normalize_media_duration,
@@ -322,7 +325,7 @@ def save_pasted_image(body: dict[str, object]) -> dict[str, object]:
     name = safe_name(str(body.get("name") or ""), "clipboard-image")
     stem = Path(name).stem or "clipboard-image"
     filename = f"{uuid.uuid4().hex}_{safe_name(stem, 'clipboard-image')}{PASTED_IMAGE_EXTENSIONS[mime]}"
-    target_dir = DATA_ROOT / "pasted-inputs"
+    target_dir = input_source_path(DATA_ROOT, "pasted")
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / filename
     temporary = target_dir / f".{filename}.{uuid.uuid4().hex}.tmp"
@@ -393,7 +396,7 @@ def save_prompt_media(body: dict[str, object]) -> dict[str, object]:
 
     stem = safe_name(Path(safe_filename).stem, "prompt-media")
     filename = f"{uuid.uuid4().hex}_{stem}{suffix}"
-    target_dir = DATA_ROOT / "prompt-media"
+    target_dir = input_source_path(DATA_ROOT, "prompt")
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / filename
     temporary = target_dir / f".{filename}.{uuid.uuid4().hex}.tmp"
@@ -661,52 +664,15 @@ def prepare_action_video_generation_body(
 
 
 def _depth_runtime_paths(root: Path) -> tuple[Path, Path]:
-    """Locate the VideoMake Core ML depth generator beside the configured ref root."""
-    project_roots = []
-    if root.name == "ref":
-        project_roots.append(root.parent)
-    project_roots.append(Path("/Users/apple/Documents/VideoMake"))
-    seen: set[Path] = set()
-    for project_root in project_roots:
-        project_root = project_root.resolve()
-        if project_root in seen:
-            continue
-        seen.add(project_root)
-        script = project_root / "tools" / "depth_anything_macos.py"
-        python = project_root / ".runtime" / "depth_anything_v2_small_f16" / "venv" / "bin" / "python"
-        if script.is_file() and python.is_file():
-            return python, script
-    raise RhCliError(
-        "DEPTH_GENERATOR_UNAVAILABLE",
-        "找不到 Depth Anything 运行环境，请确认 VideoMake/tools/depth_anything_macos.py 和 .runtime/depth_anything_v2_small_f16/venv 存在。",
-    )
+    """Locate the RH_CLI-owned Core ML depth generator."""
+    python, script, _, _ = depth_runtime_paths()
+    return python, script
 
 
 def _skeleton_runtime_paths(root: Path) -> tuple[Path, Path, Path]:
-    """Locate the VideoMake DWPose runtime beside the ref root."""
-    project_roots = []
-    if root.name == "ref":
-        project_roots.append(root.parent)
-    project_roots.append(Path("/Users/apple/Documents/VideoMake"))
-    seen: set[Path] = set()
-    for project_root in project_roots:
-        project_root = project_root.resolve()
-        if project_root in seen:
-            continue
-        seen.add(project_root)
-        script = project_root / "tools" / "pose_skeleton_macos.py"
-        runtime = project_root / ".runtime" / "pose_dwpose"
-        python = runtime / "venv" / "bin" / "python"
-        model = runtime / "checkpoints" / "dw-ll_ucoco_384.onnx"
-        detector = runtime / "checkpoints" / "yolox_l.onnx"
-        if script.is_file() and python.is_file() and model.is_file() and detector.is_file():
-            return python, script, model
-    raise RhCliError(
-        "SKELETON_GENERATOR_UNAVAILABLE",
-        "找不到人体骨骼图运行环境，请确认 VideoMake/tools/pose_skeleton_macos.py、"
-        ".runtime/pose_dwpose/venv 和 checkpoints/dw-ll_ucoco_384.onnx、"
-        "checkpoints/yolox_l.onnx 存在。",
-    )
+    """Locate the RH_CLI-owned DWPose runtime."""
+    python, script, model, _ = skeleton_runtime_paths()
+    return python, script, model
 
 
 def generate_prompt_depth(body: dict[str, object], root_value: str | Path) -> dict[str, object]:
@@ -715,7 +681,7 @@ def generate_prompt_depth(body: dict[str, object], root_value: str | Path) -> di
     if not root.is_dir():
         raise RhCliError("MEDIA_LIBRARY_NOT_FOUND", f"媒体库根目录不存在：{root}")
     source_path = str(body.get("source_path") or "").strip()
-    temporary_parent = DATA_ROOT / "prompt"
+    temporary_parent = input_source_path(DATA_ROOT, "prompt") / ".tmp"
     temporary_parent.mkdir(parents=True, exist_ok=True)
     temporary_dir = Path(tempfile.mkdtemp(prefix="depth-generation-", dir=str(temporary_parent)))
     temporary_source: Path | None = None
@@ -774,7 +740,7 @@ def generate_prompt_skeleton(body: dict[str, object], root_value: str | Path) ->
     if not root.is_dir():
         raise RhCliError("MEDIA_LIBRARY_NOT_FOUND", f"媒体库根目录不存在：{root}")
     source_path = str(body.get("source_path") or "").strip()
-    temporary_parent = DATA_ROOT / "prompt"
+    temporary_parent = input_source_path(DATA_ROOT, "prompt") / ".tmp"
     temporary_parent.mkdir(parents=True, exist_ok=True)
     temporary_dir = Path(tempfile.mkdtemp(prefix="skeleton-generation-", dir=str(temporary_parent)))
     temporary_source: Path | None = None
@@ -862,7 +828,7 @@ def generate_prompt_video(body: dict[str, object], root_value: str | Path) -> di
     normalized_resolution = normalize_media_resolution(body.get("resolution"))
     normalized_start_frame = normalize_media_start_frame(body.get("start_frame"))
     normalized_duration = normalize_media_duration(body.get("duration_seconds"))
-    temporary_parent = DATA_ROOT / "prompt"
+    temporary_parent = input_source_path(DATA_ROOT, "prompt") / ".tmp"
     temporary_parent.mkdir(parents=True, exist_ok=True)
     temporary_dir = Path(tempfile.mkdtemp(prefix="video-generation-", dir=str(temporary_parent)))
     try:
@@ -1097,6 +1063,7 @@ class ToolboxManager:
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             raise RhCliError("TOOLBOX_PROMPT_MISSING", "请输入图像生成要求。")
+        model = normalize_codex_image_model(body.get("model"))
         resolution = normalize_codex_image_resolution(body.get("resolution"))
         size = normalize_codex_image_size(body.get("size") or body.get("aspect_ratio"))
         raw_references = body.get("references")
@@ -1115,6 +1082,7 @@ class ToolboxManager:
                 "output": "/pending/toolbox-result.png",
                 "references": [str(path) for path in references],
                 "mode": "image",
+                "model": model,
                 "resolution": resolution,
                 "size": size,
             },
@@ -1126,6 +1094,7 @@ class ToolboxManager:
             custom_inputs={
                 "tool": "codex",
                 "engine": "gpt-image",
+                "model": model,
                 "resolution": resolution,
                 "aspect_ratio": size,
                 "reference_count": len(references),
@@ -1141,6 +1110,7 @@ class ToolboxManager:
             resolution,
             size,
             int(task["created_at"]),
+            model,
         )
         return self.store.task(str(task["id"])) or task
 
@@ -1154,6 +1124,7 @@ class ToolboxManager:
         resolution: str,
         size: str,
         started_at: int,
+        model: str = "gpt-image-2.5-flare",
     ) -> None:
         try:
             output = task_folder / "result.png"
@@ -1162,6 +1133,7 @@ class ToolboxManager:
                 "output": str(output),
                 "references": [str(path) for path in references],
                 "mode": "image",
+                "model": model,
                 "resolution": resolution,
                 "size": size,
             }
@@ -1325,7 +1297,7 @@ class ToolboxManager:
         duration_seconds: float | None,
         resolution: str = "original",
     ) -> None:
-        temporary_parent = DATA_ROOT / "prompt"
+        temporary_parent = input_source_path(DATA_ROOT, "prompt") / ".tmp"
         temporary_parent.mkdir(parents=True, exist_ok=True)
         temporary_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-", dir=str(temporary_parent)))
         try:

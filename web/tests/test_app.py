@@ -2840,6 +2840,7 @@ def test_toolbox_tasks_write_workflow_ids_and_path_only_manifests(tmp_path, monk
     try:
         codex = manager.submit_image({
             "prompt": "一只猫",
+            "model": "gpt-image-2.5-sunburst",
             "resolution": "2k",
             "size": "16:9",
             "references": [{"path": str(source)}],
@@ -2854,6 +2855,7 @@ def test_toolbox_tasks_write_workflow_ids_and_path_only_manifests(tmp_path, monk
         assert depth["local_workflow_id"] == "toolbox.depth-skeleton"
         assert codex_manifest["workflow_id"] == "toolbox.codex-image"
         assert codex_manifest["feature"] == {"id": "codex", "name": "Codex 图像生成"}
+        assert codex_manifest["execution"]["model"] == "gpt-image-2.5-sunburst"
         assert codex_manifest["execution"]["aspect_ratio"] == "16:9"
         assert codex_manifest["inputs"]["files"]["reference_1"] == str(source.resolve())
         assert codex_manifest["inputs"]["prompts"] == {"prompt": "一只猫"}
@@ -3044,7 +3046,7 @@ def test_telegram_tasks_are_backfilled_and_new_direct_tasks_use_telegrame_projec
             "created_at": 2,
             "workflow_path": str(tmp_path / "workflow.json"),
             "workflow_name": "legacy-telegram-input.json",
-            "files": {"13:image": str(tmp_path / "telegram-inputs" / "telegram-image.jpg")},
+            "files": {"13:image": str(tmp_path / "data" / "input" / "telegram" / "telegram-image.jpg")},
             "prompts": {},
             "key_id": None,
             "remote_workflow_id": "123456",
@@ -3819,7 +3821,7 @@ def test_save_pasted_image_persists_a_local_input_copy(tmp_path, monkeypatch):
     )
 
     target = Path(result["path"])
-    assert target.parent == tmp_path / "data" / "pasted-inputs"
+    assert target.parent == tmp_path / "data" / "input" / "pasted"
     assert target.suffix == ".png"
     assert target.read_bytes() == raw
     assert result["preview_url"].startswith("data:image/png;base64,")

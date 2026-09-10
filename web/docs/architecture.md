@@ -48,7 +48,7 @@ backend/
 - `data/workflow/<workflow_id>/prompt_group.json`：工作流包内部的提示词组文件。提示词组不作为工作流页面中的独立用户资源展示。
 - `data/workflow/<workflow_id>/manifest.json`：工作流注册文件，是该工作流包的顶层配置和唯一入口，保存名称、所属账号、workflowId、输入配置，以及另外两个文件的相对路径。
 - `data/workflow-registry.json`：工作流库的内部目录索引，只保存工作流 ID 与 `workflow/<workflow_id>/manifest.json` 路径；它不是用户需要理解或单独编辑的工作流对象。
-- `data/pasted-inputs/`：剪贴板图片副本；普通拖入/选择文件只保存本机绝对路径，不复制原始输入。
+- `data/input/<来源>/`：统一的本地输入目录；当前来源包括下载、剪贴板、提示词媒体、Telegram 和转码。普通拖入/选择文件只保存本机绝对路径，不复制原始输入。
 - `data/outputs/`：默认产物目录；用户可以在设置中指定外部绝对路径。普通工作流任务文件夹保存 `workflow_api.json`、`prompt_group.json` 和 `manifest.json`；Codex 图像、深度图、骨骼图、角色语音工具箱任务没有工作流 JSON，只保存路径型 `manifest.json`。输入文件只保留原始路径，不复制到任务目录。
 - `data/prompt/state.json`：提示词工坊当前临时组装顺序。独立提示词组索引和文件可以作为历史数据或兼容数据保留，但新的工作流库条目以自身的 `prompt_group.json` 为准，工作流页面不展示“组状态库”。
 

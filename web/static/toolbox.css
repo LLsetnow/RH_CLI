@@ -52,6 +52,7 @@ body {
 .toolbox-media-settings-row .toolbox-duration-field input { width: 100%; }
 .toolbox-field-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
 .toolbox-count, .toolbox-field-heading > span:last-child { color: var(--subtle); font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; font-weight: 500; letter-spacing: 0; }
+.toolbox-image-options .toolbox-select-grid { grid-template-columns: minmax(0, 1.55fr) minmax(76px, .68fr) minmax(0, 1.17fr); }
 .toolbox-select-grid { display: grid; grid-template-columns: minmax(86px, .72fr) minmax(0, 1.28fr); gap: 8px; margin-top: 8px; }
 .toolbox-select-field { display: block; min-width: 0; color: var(--subtle); font-size: 9px; }
 .toolbox-select-field select { display: block; min-width: 0; margin-top: 5px; }
@@ -151,6 +152,7 @@ body {
   .toolbox-block, .toolbox-history-panel { padding: 18px; }
   .toolbox-block-heading h2 { font-size: 18px; }
   .toolbox-block-chip { display: none; }
+  .toolbox-image-options .toolbox-select-grid { grid-template-columns: 1fr; }
   .toolbox-select-grid { grid-template-columns: 1fr 1.4fr; }
   .toolbox-media-settings-row { grid-template-columns: 1fr; gap: 0; }
   .toolbox-media-settings-row .toolbox-field-group + .toolbox-field-group { margin-top: 14px; }

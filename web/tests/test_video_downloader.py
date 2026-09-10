@@ -76,7 +76,7 @@ def test_download_douyin_video_uses_cookie_file_and_returns_local_video(tmp_path
 
     assert result.is_file()
     assert result.suffix == ".mp4"
-    assert result.parent.parent.name == "downloaded-inputs"
+    assert result.parent.parent.name == "downloaded"
     command, kwargs = calls[0]
     assert "--no-playlist" in command
     assert command[command.index("--cookies") + 1] == str(cookie.resolve())

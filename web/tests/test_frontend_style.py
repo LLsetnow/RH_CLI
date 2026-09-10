@@ -449,6 +449,9 @@ def test_toolbox_media_input_matches_workflow_node_style_and_import_contract():
     assert 'id="mediaOpenFolderButton"' in markup
     assert 'id="codexImageResolution"' in markup
     assert 'id="codexImageSize"' in markup
+    assert 'id="codexImageModel"' in markup
+    assert 'value="gpt-image-2.5-flare" selected' in markup
+    assert 'value="gpt-image-2.5-sunburst"' in markup
     assert 'id="mediaResolution"' in markup
     assert 'id="mediaStartFrame"' in markup
     assert 'id="mediaDuration"' in markup
@@ -472,7 +475,9 @@ def test_toolbox_media_input_matches_workflow_node_style_and_import_contract():
     assert 'jsonRequest("/api/preview-file"' in script
     assert 'jsonRequest("/api/pick-file", "POST")' in script
     assert 'resolution: String($("codexImageResolution").value || "1k")' in script
+    assert 'model: String($("codexImageModel").value || DEFAULT_CODEX_IMAGE_MODEL)' in script
     assert 'size: String($("codexImageSize").value || "9:16")' in script
+    assert "model: String(codexModel && codexModel.value || DEFAULT_CODEX_IMAGE_MODEL)" in script
     assert 'resolution: String($("mediaResolution").value || "original")' in script
     assert 'duration_seconds: String($("mediaDuration").value || "").trim() || null' in script
     assert 'start_frame: mediaStartFrameValue()' in script

@@ -5,6 +5,7 @@
   var imageExtensions = /\.(avif|bmp|gif|jpe?g|png|webp)$/i;
   var mediaExtensions = /\.(avif|bmp|gif|jpe?g|png|webp|avi|flv|m4v|mkv|mov|mp4|webm|wmv)$/i;
   var MEDIA_PREVIEW_FPS = 24;
+  var DEFAULT_CODEX_IMAGE_MODEL = "gpt-image-2.5-flare";
   var toolboxDraftStorageKey = "rh-workflow-desk-toolbox-draft-v1";
   var toolboxDraftSaveTimer = 0;
 
@@ -154,6 +155,7 @@
   }
   function toolboxDraftSnapshot() {
     var codexPrompt = $("codexPrompt");
+    var codexModel = $("codexImageModel");
     var codexResolution = $("codexImageResolution");
     var codexSize = $("codexImageSize");
     var mediaResolution = $("mediaResolution");
@@ -164,6 +166,7 @@
       version: 1,
       codex: {
         prompt: String(codexPrompt && codexPrompt.value || ""),
+        model: String(codexModel && codexModel.value || DEFAULT_CODEX_IMAGE_MODEL),
         resolution: String(codexResolution && codexResolution.value || "1k"),
         size: String(codexSize && codexSize.value || "9:16"),
         references: state.references.map(draftAsset).filter(Boolean)
@@ -210,6 +213,7 @@
     var tts = draft.tts && typeof draft.tts === "object" ? draft.tts : {};
     state.restoringDraft = true;
     if ($("codexPrompt")) $("codexPrompt").value = String(codex.prompt || "");
+    if ($("codexImageModel")) $("codexImageModel").value = String(codex.model || DEFAULT_CODEX_IMAGE_MODEL);
     if ($("codexImageResolution")) $("codexImageResolution").value = String(codex.resolution || "1k");
     if ($("codexImageSize")) $("codexImageSize").value = String(codex.size || "9:16");
     setMode(String(media.mode || "depth"));
@@ -238,7 +242,7 @@
     });
   }
   function bindToolboxDraftInputs() {
-    ["codexPrompt", "codexImageResolution", "codexImageSize", "mediaResolution", "mediaStartFrame", "mediaDuration", "ttsText"].forEach(function (id) {
+    ["codexPrompt", "codexImageModel", "codexImageResolution", "codexImageSize", "mediaResolution", "mediaStartFrame", "mediaDuration", "ttsText"].forEach(function (id) {
       var input = $(id);
       if (!input) return;
       ["input", "change"].forEach(function (eventName) {
@@ -584,6 +588,7 @@
     var tool = String(toolbox.tool || custom.tool || "").trim();
     if (tool === "codex") {
       $("codexPrompt").value = String(prompts.prompt || "");
+      $("codexImageModel").value = String(custom.model || DEFAULT_CODEX_IMAGE_MODEL);
       $("codexImageResolution").value = String(custom.resolution || "1k");
       $("codexImageSize").value = String(custom.aspect_ratio || "9:16");
       var references = Object.keys(files).filter(function (key) { return /^reference_\d+$/.test(key); }).sort(function (left, right) {
@@ -646,6 +651,7 @@
     setInlineStatus("codexTaskStatus", "正在创建本地任务…", "running");
     jsonRequest("/api/toolbox/image", "POST", {
       prompt: prompt,
+      model: String($("codexImageModel").value || DEFAULT_CODEX_IMAGE_MODEL),
       resolution: String($("codexImageResolution").value || "1k"),
       size: String($("codexImageSize").value || "9:16"),
       references: state.references.map(function (item) { return { path: item.path, name: item.name, mime: item.mime }; })

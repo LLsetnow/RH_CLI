@@ -15,6 +15,8 @@ from urllib.parse import urlparse, urlunparse
 
 from rh_cli.errors import RhCliError
 
+from .input_paths import input_source_path
+
 
 DOUYIN_DOMAINS = ("douyin.com", "iesdouyin.com")
 BILIBILI_DOMAINS = ("bilibili.com", "b23.tv")
@@ -242,7 +244,7 @@ def _download_video(
     max_attempts: int,
     retry_delay: float,
 ) -> Path:
-    download_root = Path(data_root).expanduser().resolve() / "downloaded-inputs"
+    download_root = input_source_path(data_root, "downloaded")
     target_dir = download_root / (platform + "-" + uuid.uuid4().hex)
     target_dir.mkdir(parents=True, exist_ok=True)
     temporary_cookie: Path | None = None

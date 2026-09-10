@@ -27,7 +27,7 @@ def test_save_prompt_media_persists_browser_video_with_original_display_name(tmp
 
     path = Path(saved["path"])
     assert path.is_file()
-    assert path.parent == tmp_path / "data" / "prompt-media"
+    assert path.parent == tmp_path / "data" / "input" / "prompt"
     assert path.read_bytes() == b"video-bytes"
     assert saved["display_name"] == "示例视频.mp4"
     assert saved["media_kind"] == "video"
@@ -174,7 +174,7 @@ def test_prepare_prompt_media_rejects_a_wrong_slot_type(tmp_path):
         raise AssertionError("expected an invalid resource media slot")
 
 
-def test_generate_prompt_depth_uses_videomake_script_and_cleans_up_temp_files(tmp_path, monkeypatch):
+def test_generate_prompt_depth_uses_rh_cli_script_and_cleans_up_temp_files(tmp_path, monkeypatch):
     root = tmp_path / "ref"
     root.mkdir()
     commands = []
@@ -183,7 +183,7 @@ def test_generate_prompt_depth_uses_videomake_script_and_cleans_up_temp_files(tm
     monkeypatch.setattr(
         web_server,
         "_depth_runtime_paths",
-        lambda configured_root: (Path("/runtime/python"), Path("/videomake/tools/depth_anything_macos.py")),
+        lambda configured_root: (Path("/runtime/python"), Path("/rh-cli/tools/depth_anything_macos.py")),
     )
 
     def fake_run(command, **kwargs):
@@ -201,7 +201,7 @@ def test_generate_prompt_depth_uses_videomake_script_and_cleans_up_temp_files(tm
     assert base64.b64decode(result["data"]) == b"generated-depth"
     assert commands == [[
         "/runtime/python",
-        "/videomake/tools/depth_anything_macos.py",
+        "/rh-cli/tools/depth_anything_macos.py",
         commands[0][2],
         "-o",
         commands[0][4],
@@ -209,7 +209,7 @@ def test_generate_prompt_depth_uses_videomake_script_and_cleans_up_temp_files(tm
     assert not list((tmp_path / "data" / "prompt").glob("depth-generation-*"))
 
 
-def test_generate_prompt_skeleton_uses_dwpose_runtime_and_cleans_up_temp_files(tmp_path, monkeypatch):
+def test_generate_prompt_skeleton_uses_rh_cli_dwpose_runtime_and_cleans_up_temp_files(tmp_path, monkeypatch):
     root = tmp_path / "ref"
     root.mkdir()
     commands = []
@@ -218,7 +218,7 @@ def test_generate_prompt_skeleton_uses_dwpose_runtime_and_cleans_up_temp_files(t
     monkeypatch.setattr(
         web_server,
         "_skeleton_runtime_paths",
-        lambda configured_root: (Path("/runtime/python"), Path("/videomake/tools/pose_skeleton_macos.py"), Path("/videomake/.runtime/pose_dwpose/checkpoints/dw-ll_ucoco_384.onnx")),
+        lambda configured_root: (Path("/runtime/python"), Path("/rh-cli/tools/pose_skeleton_macos.py"), Path("/rh-cli/.runtime/pose_dwpose/checkpoints/dw-ll_ucoco_384.onnx")),
     )
 
     def fake_run(command, **kwargs):
@@ -236,12 +236,12 @@ def test_generate_prompt_skeleton_uses_dwpose_runtime_and_cleans_up_temp_files(t
     assert base64.b64decode(result["data"]) == b"generated-skeleton"
     assert commands == [[
         "/runtime/python",
-        "/videomake/tools/pose_skeleton_macos.py",
+        "/rh-cli/tools/pose_skeleton_macos.py",
         commands[0][2],
         "-o",
         commands[0][4],
         "--model",
-        "/videomake/.runtime/pose_dwpose/checkpoints/dw-ll_ucoco_384.onnx",
+        "/rh-cli/.runtime/pose_dwpose/checkpoints/dw-ll_ucoco_384.onnx",
     ]]
     assert not list((tmp_path / "data" / "prompt").glob("skeleton-generation-*"))
 

@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 from rh_cli.errors import RhCliError
 
+from .runtime_paths import depth_runtime_paths, skeleton_runtime_paths
+
 
 VIDEO_SUFFIXES = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"}
 IMAGE_SUFFIXES = {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"}
@@ -25,6 +27,8 @@ MEDIA_RESOLUTIONS = {"original", "480p", "720p", "1080p"}
 MEDIA_RESOLUTION_SHORT_EDGES = {"480p": 480, "720p": 720, "1080p": 1080}
 MEDIA_PROCESS_FPS = 24
 CODEX_IMAGE_RESOLUTIONS = {"1k", "2k", "4k"}
+CODEX_IMAGE_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
+DEFAULT_CODEX_IMAGE_MODEL = "gpt-image-2.5-flare"
 CODEX_IMAGE_SIZES = {
     "auto",
     "1:1",
@@ -43,7 +47,7 @@ CODEX_IMAGE_SIZES = {
     "21:9",
     "9:21",
 }
-DEFAULT_RUNTIME_ROOT = Path("/Users/apple/Documents/VideoMake/ref")
+DEFAULT_MEDIA_ROOT = Path("/Users/apple/Documents/VideoMake/ref")
 DEFAULT_CODEX_IMAGE_COMMAND = (
     "opc image generate {prompt} --engine gpt-image --resolution {resolution} --size {size} --output {output} "
     "--no-enhance {reference_args}"
@@ -102,6 +106,13 @@ def normalize_codex_image_resolution(value: Any) -> str:
     return resolution
 
 
+def normalize_codex_image_model(value: Any) -> str:
+    model = str(value or DEFAULT_CODEX_IMAGE_MODEL).strip().lower()
+    if model not in CODEX_IMAGE_MODELS:
+        raise RhCliError("TOOLBOX_IMAGE_MODEL_INVALID", "图像模型只能选择 gpt-image-2.5-flare 或 gpt-image-2.5-sunburst。")
+    return model
+
+
 def normalize_codex_image_size(value: Any) -> str:
     size = str(value or "9:16").strip().lower()
     if size not in CODEX_IMAGE_SIZES:
@@ -151,6 +162,7 @@ def expand_command_template(template: str, context: dict[str, Any]) -> list[str]
         "output": str(context.get("output") or ""),
         "input": str(context.get("input") or ""),
         "mode": str(context.get("mode") or ""),
+        "model": str(context.get("model") or DEFAULT_CODEX_IMAGE_MODEL),
         "resolution": str(context.get("resolution") or "1k"),
         "size": str(context.get("size") or "9:16"),
         "references_json": json.dumps(references, ensure_ascii=False),
@@ -209,6 +221,7 @@ def run_local_command(
             "RH_TOOLBOX_OUTPUT": str(context.get("output") or ""),
             "RH_TOOLBOX_REFERENCES": json.dumps(context.get("references", []), ensure_ascii=False),
             "RH_TOOLBOX_MODE": str(context.get("mode") or ""),
+            "RH_TOOLBOX_IMAGE_MODEL": str(context.get("model") or DEFAULT_CODEX_IMAGE_MODEL),
             "RH_TOOLBOX_RESOLUTION": str(context.get("resolution") or ""),
             "RH_TOOLBOX_SIZE": str(context.get("size") or ""),
         }
@@ -247,53 +260,21 @@ def find_generated_media(folder: Path, *, exclude: set[Path] | None = None) -> l
 
 def _runtime_root(configured_root: str | Path | None) -> Path:
     raw = str(configured_root or "").strip()
-    root = Path(raw).expanduser().resolve() if raw else DEFAULT_RUNTIME_ROOT
+    root = Path(raw).expanduser().resolve() if raw else DEFAULT_MEDIA_ROOT
     if root.is_dir():
         return root
-    if DEFAULT_RUNTIME_ROOT.is_dir():
-        return DEFAULT_RUNTIME_ROOT
-    raise RhCliError("TOOLBOX_RUNTIME_UNAVAILABLE", "找不到 VideoMake 本地媒体库根目录。")
+    if DEFAULT_MEDIA_ROOT.is_dir():
+        return DEFAULT_MEDIA_ROOT
+    raise RhCliError("TOOLBOX_RUNTIME_UNAVAILABLE", "找不到本地媒体库根目录。")
 
 
 def _depth_runtime_paths(root: Path) -> tuple[Path, Path, Path]:
-    project_roots = []
-    if root.name == "ref":
-        project_roots.append(root.parent)
-    project_roots.append(DEFAULT_RUNTIME_ROOT.parent)
-    seen: set[Path] = set()
-    for project_root in project_roots:
-        project_root = project_root.resolve()
-        if project_root in seen:
-            continue
-        seen.add(project_root)
-        script = project_root / "tools" / "depth_anything_macos.py"
-        batch_script = project_root / "tools" / "depth_anything_batch_macos.py"
-        runtime = project_root / ".runtime" / "depth_anything_v2_small_f16"
-        python = runtime / "venv" / "bin" / "python"
-        if python.is_file() and script.is_file() and batch_script.is_file():
-            return python, script, batch_script
-    raise RhCliError("DEPTH_GENERATOR_UNAVAILABLE", "找不到 Depth Anything 本地运行环境。")
+    python, script, batch_script, _ = depth_runtime_paths()
+    return python, script, batch_script
 
 
-def _skeleton_runtime_paths(root: Path) -> tuple[Path, Path, Path]:
-    project_roots = []
-    if root.name == "ref":
-        project_roots.append(root.parent)
-    project_roots.append(DEFAULT_RUNTIME_ROOT.parent)
-    seen: set[Path] = set()
-    for project_root in project_roots:
-        project_root = project_root.resolve()
-        if project_root in seen:
-            continue
-        seen.add(project_root)
-        script = project_root / "tools" / "pose_skeleton_macos.py"
-        runtime = project_root / ".runtime" / "pose_dwpose"
-        python = runtime / "venv" / "bin" / "python"
-        model = runtime / "checkpoints" / "dw-ll_ucoco_384.onnx"
-        detector = runtime / "checkpoints" / "yolox_l.onnx"
-        if script.is_file() and python.is_file() and model.is_file() and detector.is_file():
-            return python, script, model
-    raise RhCliError("SKELETON_GENERATOR_UNAVAILABLE", "找不到 DWPose 本地运行环境。")
+def _skeleton_runtime_paths(root: Path) -> tuple[Path, Path, Path, Path]:
+    return skeleton_runtime_paths()
 
 
 def _run_checked(command: list[str], *, label: str, timeout: int = 3600) -> subprocess.CompletedProcess[str]:
@@ -602,8 +583,11 @@ def _run_image_processor(mode: str, source: Path, output_dir: Path, root: Path) 
         python, script, _ = _depth_runtime_paths(root)
         _run_checked([str(python), str(script), str(source), "-o", str(depth_path)], label="深度图生成")
     if mode in {"skeleton", "depth_skeleton"}:
-        python, script, model = _skeleton_runtime_paths(root)
-        _run_checked([str(python), str(script), str(source), "-o", str(skeleton_path), "--model", str(model)], label="骨骼图生成")
+        python, script, model, detector = _skeleton_runtime_paths(root)
+        _run_checked(
+            [str(python), str(script), str(source), "-o", str(skeleton_path), "--model", str(model), "--det-model", str(detector)],
+            label="骨骼图生成",
+        )
     if mode == "depth_skeleton":
         output_path = output_dir / "depth_skeleton.png"
         _combine_images(depth_path, skeleton_path, output_path)
@@ -665,9 +649,9 @@ def _run_video_processors(
                 progress=progress,
             )
         if normalized_modes & {"skeleton", "depth_skeleton"}:
-            python, script, model = _skeleton_runtime_paths(root)
+            python, script, model, detector = _skeleton_runtime_paths(root)
             _run_video_stage(
-                [str(python), str(script), *map(str, frames), "--output-dir", str(skeleton_dir), "--model", str(model)],
+                [str(python), str(script), *map(str, frames), "--output-dir", str(skeleton_dir), "--model", str(model), "--det-model", str(detector)],
                 label="正在生成骨骼图",
                 output_dir=skeleton_dir,
                 output_pattern="frame_*_skeleton.png",

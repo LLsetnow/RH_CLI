@@ -40,6 +40,7 @@ from rh_cli.workflow.client import (
     _validate_api_workflow,
 )
 from .telegram import TelegramDeliveryError, TelegramNotifier
+from .input_paths import input_source_path
 from .video_downloader import extract_social_video_url, social_video_platform, download_social_video
 
 
@@ -3897,6 +3898,7 @@ class LocalStore:
                 "UPDATE tasks SET submission_source='telegram' "
                 "WHERE LOWER(TRIM(submission_source)) = 'telegram' "
                 "OR stage_logs_json LIKE '%已从 Telegram 接收%' "
+                "OR input_json LIKE '%input/telegram/%' "
                 "OR input_json LIKE '%telegram-inputs/%'"
             )
             self._db.commit()
@@ -4006,6 +4008,18 @@ class LocalStore:
             custom.get("tool"), custom.get("mode")
         )
         feature = task_feature_for_task(task)
+        execution = {
+            "tool": str(custom.get("tool") or "").strip(),
+            "mode": str(custom.get("mode") or "").strip(),
+            "resolution": str(custom.get("resolution") or "").strip(),
+            "duration_seconds": "" if custom.get("duration_seconds") is None else str(custom.get("duration_seconds")).strip(),
+            "start_frame": "" if custom.get("start_frame") is None else str(custom.get("start_frame")).strip(),
+            "aspect_ratio": str(custom.get("aspect_ratio") or "").strip(),
+            "input_type": str(custom.get("input_type") or "").strip(),
+        }
+        if execution["tool"] == "codex":
+            execution["model"] = str(custom.get("model") or "").strip()
+
         document = {
             "version": 1,
             "kind": "rh-toolbox-task",
@@ -4019,15 +4033,7 @@ class LocalStore:
                 "name": str(task.get("workflow_name") or "本地处理").strip() or "本地处理",
                 "type": "toolbox",
             },
-            "execution": {
-                "tool": str(custom.get("tool") or "").strip(),
-                "mode": str(custom.get("mode") or "").strip(),
-                "resolution": str(custom.get("resolution") or "").strip(),
-                "duration_seconds": "" if custom.get("duration_seconds") is None else str(custom.get("duration_seconds")).strip(),
-                "start_frame": "" if custom.get("start_frame") is None else str(custom.get("start_frame")).strip(),
-                "aspect_ratio": str(custom.get("aspect_ratio") or "").strip(),
-                "input_type": str(custom.get("input_type") or "").strip(),
-            },
+            "execution": execution,
             "inputs": {
                 "files": task.get("files") if isinstance(task.get("files"), dict) else {},
                 "prompts": task.get("prompts") if isinstance(task.get("prompts"), dict) else {},
@@ -5823,7 +5829,7 @@ class TaskManager:
             if not input_id:
                 raise RhCliError("INVALID_TELEGRAM_INBOUND_WORKFLOW", "没有找到入站图片输入节点。")
             target_path = self._telegram_notifier.download_image(
-                int(update.get("update_id") or 0), reference, DATA_ROOT / "telegram-inputs"
+                int(update.get("update_id") or 0), reference, input_source_path(DATA_ROOT, "telegram")
             )
             prompt_group = detail.get("prompt_group")
             if not isinstance(prompt_group, dict):

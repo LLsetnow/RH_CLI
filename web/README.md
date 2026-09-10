@@ -12,7 +12,7 @@
 - `data/workflow/<workflow_id>/prompt_group.json`：工作流包内部的提示词组文件，不作为工作流页面中的独立资源
 - `data/workflow/<workflow_id>/manifest.json`：工作流注册文件，保存顶层配置并索引同目录下的工作流文件和提示词组文件
 - `data/workflow-registry.json`：工作流库的内部目录索引；只有登记到这里的完整工作流包会显示在“工作流”页面
-- `data/pasted-inputs/`：从剪贴板粘贴的图片输入副本，供任务提交时使用
+- `data/input/<来源>/`：本地输入文件统一目录；来源包括 `downloaded`、`pasted`、`prompt`、`telegram` 和 `transcoded`
 - `data/outputs/`：默认输出目录下的任务产物；普通工作流任务的 `<task_id>/` 保存 `workflow_api.json`、`prompt_group.json` 和路径清单 `manifest.json`，Codex/深度/骨骼/角色语音工具箱任务保存包含本地 workflowId、统一 `feature` 类型、提示词、画幅参数和输入路径的 `manifest.json`。输入文件不复制到任务目录，只保存原始路径
 - `VideoMake/ref/Resources.json`：ref 资源目录和各 JSON 索引的机器可读入口；其中 `sources.prompt` 指向提示词基础积木文件。`data/prompt/state.json` 保存当前临时组装顺序；独立提示词组文件只作为历史或兼容数据保留，新的工作流包以自身携带的提示词组为准。基础积木路径由该索引解析，内容放在 JSON 的 `blocks` 数组中，每项包含 `id`、`category`、`tags`、`title` 和 `text`
 - `VideoMake/ref/pose/pose.json`：动作库 JSON 源文件。动作原图、深度图和骨骼图仍从 ref 原目录读取，不会复制到本项目
@@ -499,7 +499,7 @@ flowchart LR
 - 工作流必须是 ComfyUI API 格式：顶层为节点字典，每个节点包含 `inputs` 和 `class_type`。
 - 文件输入会识别常见的 `LoadImage`、`LoadAudio`、`LoadVideo`、`VHS_LoadVideo` 等节点。
 - 提示词会识别 `CLIPTextEncode`、`TextEncode*`、`Prompt` 等节点中的文本字段。
-- 文件输入支持拖入文件、在输入卡片中按 `⌘V` / `Ctrl+V` 粘贴图片，或点击“预览”进行图片/视频预览；视频节点会使用本机流式预览并支持播放、暂停和进度拖动。剪贴板图片会保存到 `data/pasted-inputs/` 并以本机绝对路径提交。浏览器不会把拖入文件的原始路径交给网页，因此普通文件要提交任务请点击路径框旁的“选择文件”，由 macOS 原生文件选择器返回真实绝对路径，也可以手动填写本机绝对路径。普通拖入文件不会复制到项目目录，真正的远程上传只在执行任务时发生。
+- 文件输入支持拖入文件、在输入卡片中按 `⌘V` / `Ctrl+V` 粘贴图片，或点击“预览”进行图片/视频预览；视频节点会使用本机流式预览并支持播放、暂停和进度拖动。剪贴板图片会保存到 `data/input/pasted/` 并以本机绝对路径提交。浏览器不会把拖入文件的原始路径交给网页，因此普通文件要提交任务请点击路径框旁的“选择文件”，由 macOS 原生文件选择器返回真实绝对路径，也可以手动填写本机绝对路径。普通拖入文件不会复制到项目目录，真正的远程上传只在执行任务时发生。
 - 每个文件、提示词和 RandomNoise 输入卡都支持“旁路”：开启后，本次提交会从 API 工作流中移除该节点，并删除直接指向其输出的下游连线；当前输入不会上传或覆盖。当前填写内容会保留在页面和任务记录中，关闭旁路后可以继续使用。
 - 拖动文件悬停在整个输入卡片上方时，卡片会显示绿色发光反馈；工作流输入区域顶部会列出文件和提示词节点标签，点击标签可快速定位到对应卡片。
 - 任务队列中的“加载”可以把该任务保存的 API 工作流、文件路径、提示词、workflowId、RandomNoise 配置和提交时的提示词组状态恢复到左侧面板；进入提示词工坊时会同步恢复该组装台内容，加载不会复制输入文件。
@@ -522,7 +522,7 @@ flowchart LR
 - 动作素材必须使用同一个 basename 配对：原图放在 `VideoMake/ref/pose/color/<name>.<ext>`，深度图统一直接放在 `VideoMake/ref/pose/depth/<name>_depth.png`，骨骼图统一直接放在 `VideoMake/ref/pose/skeleton/<name>_skeleton.png`，不再使用深度图分类子目录；`pose.json` 的同一个动作对象中维护 `color_image_path`、`depth_image_path` 和可选的 `skeleton_image_path`。动作库会检查原图/深度图配对，并额外暴露骨骼图是否可用。
 - “任务提交”页通过子导航提供四个功能区：普通 RunningHub 工作流提交、Codex 图像生成、深度与骨骼处理、角色语音。Codex 图像生成支持 0 到多张参考图，并可选择 1K/2K/4K 分辨率和画幅比例，默认 1K、9:16；命令细节完全由应用在后台处理，用户只需填写生成要求。每次运行自动生成 `task_<id>`，输出写入设置中的产物目录，并记录稳定的本地 workflowId 与 manifest。深度、骨骼和深度+骨骼支持图片单张处理及视频逐帧处理，可选择原始、480p、720p 或 1080p，并可指定只处理视频前 N 秒；空白表示整段视频，超过输入实际时长时自动按实际时长处理。选择目标分辨率时会保持画幅比例，先生成短边对应的工作副本，再按处理时长截取、抽帧和推理。同样记录输入路径、模式、分辨率和处理时长并进入任务历史和成片库。角色语音从 `VideoMake/ref/tts/` 自动发现完整的 GPT-SoVITS V4 人物资产，选择人物并输入文本后生成 WAV，也进入统一任务队列和成片库。工具箱任务均可从任务队列或成片库恢复参数再次运行，旧地址 `/toolbox` 会自动跳转到 Codex 功能区。
 - 工作流输入、提示词工坊媒体、任务提交节点视频和成片库视频都支持右键菜单“截取当前帧”；截取位置取当前播放时间，保存后可继续作为图片输入使用。
-- 动作编辑器支持用本机 DWPose 自动生成骨骼图；它输出接近你参考图的 OpenPose 风格黑底、彩色肢体线、面部/手部关键点图，保持原图尺寸。运行环境位于 `VideoMake/.runtime/pose_dwpose/`，模型文件为 `checkpoints/dw-ll_ucoco_384.onnx` 和 `checkpoints/yolox_l.onnx`，生成脚本为 `VideoMake/tools/pose_skeleton_macos.py`。
+- 动作编辑器支持用本机 DWPose 自动生成骨骼图；它输出接近你参考图的 OpenPose 风格黑底、彩色肢体线、面部/手部关键点图，保持原图尺寸。运行环境位于 RH_CLI 根目录的 `.runtime/pose_dwpose/`，模型文件为 `checkpoints/dw-ll_ucoco_384.onnx` 和 `checkpoints/yolox_l.onnx`，生成脚本为 RH_CLI 根目录的 `tools/pose_skeleton_macos.py`。
 - 骨骼图生成面向常规真人姿态参考；动漫、严重遮挡、极近裁切或非人体主体可能识别不完整，识别失败时不会写入空图。
 - 扩展动作时直接新增素材和 `pose.json` 中的动作对象：新增原图、生成同名 `_depth.png` 和 `_skeleton.png`，在 JSON 中填写分类、名称、提示词及三条相对路径；重新进入动作库或点击“重新扫描”即可更新。应用直接读取 JSON，不再生成或依赖 `data/prompt/actions.json` 缓存。
 - 设置中的“个人 API Key 并发数”可配置为 1–3，默认 3，只影响普通个人 API Key；`apiType` 包含 `wallet`、`shared` 或 `enterprise` 时，本地调度器固定按 100 个并发槽处理。

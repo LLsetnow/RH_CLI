@@ -23,6 +23,7 @@ dist/
 .venv/
 venv/
 env/
+.runtime/
 
 # User data
 input/

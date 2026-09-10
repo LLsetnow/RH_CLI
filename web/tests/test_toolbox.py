@@ -8,11 +8,13 @@ from web.backend import toolbox as toolbox_module
 from web.backend import server as web_server
 from web.backend import tts as tts_module
 from web.backend.toolbox import (
+    DEFAULT_CODEX_IMAGE_MODEL,
     DEFAULT_CODEX_IMAGE_COMMAND,
     _run_video_stage,
     _video_progress_message,
     expand_command_template,
     normalize_codex_image_resolution,
+    normalize_codex_image_model,
     normalize_codex_image_size,
     normalize_media_duration,
     normalize_media_resolution,
@@ -51,6 +53,14 @@ def test_internal_codex_command_builds_optional_repeated_reference_flags():
     assert expand_command_template(DEFAULT_CODEX_IMAGE_COMMAND, context)[-4:] == [
         "--ref", "/tmp/a.png", "--ref", "/tmp/b.png",
     ]
+
+
+def test_codex_image_model_defaults_and_validates_supported_values():
+    assert DEFAULT_CODEX_IMAGE_MODEL == "gpt-image-2.5-flare"
+    assert normalize_codex_image_model(None) == DEFAULT_CODEX_IMAGE_MODEL
+    assert normalize_codex_image_model("GPT-IMAGE-2.5-SUNBURST") == "gpt-image-2.5-sunburst"
+    with pytest.raises(RhCliError, match="图像模型"):
+        normalize_codex_image_model("gpt-image-2")
 
 
 def test_toolbox_mode_validation_is_explicit():
@@ -237,7 +247,7 @@ def test_video_variants_share_one_frame_pass_and_encode_three_24fps_outputs(monk
 
     monkeypatch.setattr(toolbox_module.shutil, "which", lambda name: "/opt/homebrew/bin/ffmpeg" if name == "ffmpeg" else None)
     monkeypatch.setattr(toolbox_module, "_depth_runtime_paths", lambda configured_root: (tmp_path / "depth-python", tmp_path / "depth-script", tmp_path / "depth-batch"))
-    monkeypatch.setattr(toolbox_module, "_skeleton_runtime_paths", lambda configured_root: (tmp_path / "skeleton-python", tmp_path / "skeleton-script", tmp_path / "skeleton-model"))
+    monkeypatch.setattr(toolbox_module, "_skeleton_runtime_paths", lambda configured_root: (tmp_path / "skeleton-python", tmp_path / "skeleton-script", tmp_path / "skeleton-model", tmp_path / "skeleton-detector"))
     monkeypatch.setattr(toolbox_module, "_combine_images", lambda depth, skeleton, output: output.write_bytes(b"combined"))
 
     def fake_run_checked(command, *, label, timeout=3600):
@@ -314,11 +324,12 @@ def test_submit_image_persists_canvas_options_and_passes_them_to_the_runner(tmp_
     manager.store = FakeStore()
     manager._executor = FakeExecutor()
 
-    task = manager.submit_image({"prompt": "一只猫", "resolution": "2K", "size": "16:9"})
+    task = manager.submit_image({"prompt": "一只猫", "model": "gpt-image-2.5-sunburst", "resolution": "2K", "size": "16:9"})
 
     assert task["workflow_name"] == "Codex 图像生成"
     assert task["task_type"] == "toolbox"
     assert task["custom_inputs"]["resolution"] == "2k"
+    assert task["custom_inputs"]["model"] == "gpt-image-2.5-sunburst"
     assert task["custom_inputs"]["aspect_ratio"] == "16:9"
     assert manager._executor.calls[0][1][5:7] == ("2k", "16:9")
 

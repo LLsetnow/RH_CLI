@@ -466,7 +466,7 @@ def test_prompt_resource_folder_and_delete_actions_are_scoped_to_library_media(t
 
 def test_social_video_download_can_be_requested_for_supported_platforms(tmp_path, monkeypatch):
     _configure_web_paths(tmp_path, monkeypatch)
-    downloaded = tmp_path / "data" / "downloaded-inputs" / "bilibili-video.mp4"
+    downloaded = tmp_path / "data" / "input" / "downloaded" / "bilibili-video.mp4"
     downloaded.parent.mkdir(parents=True)
     downloaded.write_bytes(b"video")
     calls = []
